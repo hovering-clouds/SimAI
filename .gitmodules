@@ -1,12 +1,12 @@
 [submodule "SimCCL"]
 	path = SimCCL
-	url = https://github.com/aliyun/SimCCL
+	url = git@github.com:aliyun/SimCCL
 	branch = master
 [submodule "aicb"]
 	path = aicb
-	url = https://github.com/aliyun/aicb
-	branch = master
+	url = git@github.com:hovering-clouds/aicb
+	branch = hc-dev
 [submodule "ns-3-alibabacloud"]
 	path = ns-3-alibabacloud
-	url = https://github.com/aliyun/ns-3-alibabacloud
-	branch = master
+	url = git@github.com:hovering-clouds/ns-3-alibabacloud
+	branch = hc-dev
