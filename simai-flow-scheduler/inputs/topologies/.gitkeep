@@ -1,0 +1,7 @@
+{
+  "_comment": "Placeholder topology file - to be implemented in Phase 2",
+  "name": "spectrum-x-16g",
+  "num_nodes": 16,
+  "bandwidth_gbps": 100,
+  "latency_us": 1.5
+}

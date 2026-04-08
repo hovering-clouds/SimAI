@@ -1,0 +1,97 @@
+{
+  "version": "1.0",
+  "meta": {
+    "num_jobs": 1,
+    "num_nodes": 4,
+    "description": "Example single-job workload with Ring AllReduce"
+  },
+  "network": {
+    "topology_file": "topologies/spectrum-x-4g.json"
+  },
+  "jobs": [
+    {
+      "job_id": 0,
+      "name": "example-job",
+      "assigned_nodes": [0, 1, 2, 3],
+      "parallelism": {
+        "tp": 4,
+        "dp": 1,
+        "pp": 1,
+        "ep": 1
+      }
+    }
+  ],
+  "tasks": [
+    {
+      "task_id": 0,
+      "job_id": 0,
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "type": "compute",
+      "node": 0,
+      "duration_us": 1000,
+      "deps": []
+    },
+    {
+      "task_id": 1,
+      "job_id": 0,
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "type": "flow",
+      "src": 0,
+      "dst": 1,
+      "size_bytes": 268435456,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 4,
+      "deps": [0]
+    },
+    {
+      "task_id": 2,
+      "job_id": 0,
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "type": "flow",
+      "src": 1,
+      "dst": 2,
+      "size_bytes": 268435456,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 4,
+      "deps": [0]
+    },
+    {
+      "task_id": 3,
+      "job_id": 0,
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "type": "flow",
+      "src": 2,
+      "dst": 3,
+      "size_bytes": 268435456,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 4,
+      "deps": [0]
+    },
+    {
+      "task_id": 4,
+      "job_id": 0,
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "type": "flow",
+      "src": 3,
+      "dst": 0,
+      "size_bytes": 268435456,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 4,
+      "deps": [0]
+    }
+  ]
+}
