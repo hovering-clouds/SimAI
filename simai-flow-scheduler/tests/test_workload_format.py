@@ -216,9 +216,19 @@ class TestWorkloadIO:
 
     def test_validator(self, tmp_path):
         """Test WorkloadValidator."""
+        from src.workload_format.schema import Job, ParallelismConfig
+
         workload = P2PWorkload(
             version="1.0",
             meta=Meta(num_jobs=1, num_nodes=4),
+            jobs=[
+                Job(
+                    job_id=0,
+                    name="test-job",
+                    assigned_nodes=[0, 1, 2, 3],
+                    parallelism=ParallelismConfig(tp=4),
+                )
+            ],
             tasks=[
                 Task(
                     task_id=0,

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Optional, Union
 
-from .schema import P2PWorkload
+from .schema import P2PWorkload, Meta, Network, Job, ParallelismConfig, Task, TaskType, Phase, CommType
 
 
 class WorkloadWriter:
@@ -52,44 +52,66 @@ class WorkloadWriter:
         """
         Serialize P2PWorkload to JSON-serializable dict.
 
+        Only includes non-None optional fields to keep output clean.
+
         Args:
             workload: P2PWorkload to serialize.
 
         Returns:
             JSON-serializable dictionary.
         """
+        # Build meta - only include non-None optional fields
+        meta_dict = {
+            "num_jobs": workload.meta.num_jobs,
+            "num_nodes": workload.meta.num_nodes,
+        }
+        if workload.meta.generated_at is not None:
+            meta_dict["generated_at"] = workload.meta.generated_at
+        if workload.meta.generator_version is not None:
+            meta_dict["generator_version"] = workload.meta.generator_version
+        if workload.meta.description is not None:
+            meta_dict["description"] = workload.meta.description
+
+        # Build network - only include non-None optional fields
+        network_dict = {
+            "topology_file": workload.network.topology_file,
+        }
+        if workload.network.bandwidth_gbps is not None:
+            network_dict["bandwidth_gbps"] = workload.network.bandwidth_gbps
+        if workload.network.latency_us is not None:
+            network_dict["latency_us"] = workload.network.latency_us
+
         return {
             "version": workload.version,
-            "meta": {
-                "num_jobs": workload.meta.num_jobs,
-                "num_nodes": workload.meta.num_nodes,
-                "generated_at": workload.meta.generated_at,
-                "generator_version": workload.meta.generator_version,
-                "description": workload.meta.description,
-            },
-            "network": {
-                "topology_file": workload.network.topology_file,
-                "bandwidth_gbps": workload.network.bandwidth_gbps,
-                "latency_us": workload.network.latency_us,
-            } if workload.network else None,
+            "meta": meta_dict,
+            "network": network_dict,
             "jobs": [self._serialize_job(job) for job in workload.jobs],
             "tasks": [self._serialize_task(task) for task in workload.tasks],
         }
 
     def _serialize_job(self, job) -> dict:
         """Serialize a Job object."""
-        return {
+        result = {
             "job_id": job.job_id,
-            "name": job.name,
-            "model": job.model,
             "assigned_nodes": job.assigned_nodes,
-            "parallelism": {
-                "tp": job.parallelism.tp,
-                "dp": job.parallelism.dp,
-                "pp": job.parallelism.pp,
-                "ep": job.parallelism.ep,
-            },
         }
+        if job.name is not None:
+            result["name"] = job.name
+        if job.model is not None:
+            result["model"] = job.model
+
+        # Only include parallelism if non-default values
+        parallelism = {
+            "tp": job.parallelism.tp,
+            "dp": job.parallelism.dp,
+            "pp": job.parallelism.pp,
+            "ep": job.parallelism.ep,
+        }
+        # Only include parallelism if any value is not 1
+        if any(v != 1 for v in parallelism.values()):
+            result["parallelism"] = parallelism
+
+        return result
 
     def _serialize_task(self, task) -> dict:
         """Serialize a Task object."""
@@ -163,10 +185,72 @@ class WorkloadReader:
         Returns:
             P2PWorkload object.
         """
+        # Parse meta
+        meta_data = data.get("meta", {})
+        meta = Meta(
+            num_jobs=meta_data.get("num_jobs", 0),
+            num_nodes=meta_data.get("num_nodes", 0),
+            generated_at=meta_data.get("generated_at"),
+            generator_version=meta_data.get("generator_version"),
+            description=meta_data.get("description"),
+        )
+
+        # Parse network
+        network_data = data.get("network")
+        if network_data:
+            network = Network(
+                topology_file=network_data.get("topology_file", ""),
+                bandwidth_gbps=network_data.get("bandwidth_gbps"),
+                latency_us=network_data.get("latency_us"),
+            )
+        else:
+            network = Network(topology_file="")
+
+        # Parse jobs
+        jobs = []
+        for job_data in data.get("jobs", []):
+            parallelism_data = job_data.get("parallelism", {})
+            parallelism = ParallelismConfig(
+                tp=parallelism_data.get("tp", 1),
+                dp=parallelism_data.get("dp", 1),
+                pp=parallelism_data.get("pp", 1),
+                ep=parallelism_data.get("ep", 1),
+            )
+            job = Job(
+                job_id=job_data.get("job_id", 0),
+                name=job_data.get("name"),
+                model=job_data.get("model"),
+                assigned_nodes=job_data.get("assigned_nodes", []),
+                parallelism=parallelism,
+            )
+            jobs.append(job)
+
+        # Parse tasks
+        tasks = []
+        for task_data in data.get("tasks", []):
+            task = Task(
+                task_id=task_data.get("task_id", 0),
+                job_id=task_data.get("job_id", 0),
+                type=task_data.get("type", "compute"),
+                iteration=task_data.get("iteration", 0),
+                phase=task_data.get("phase", "forward"),
+                layer_id=task_data.get("layer_id", 0),
+                deps=task_data.get("deps", []),
+                node=task_data.get("node"),
+                duration_us=task_data.get("duration_us"),
+                src=task_data.get("src"),
+                dst=task_data.get("dst"),
+                size_bytes=task_data.get("size_bytes"),
+                comm_type=task_data.get("comm_type", "unknown"),
+                chunk_id=task_data.get("chunk_id"),
+                num_chunks=task_data.get("num_chunks"),
+            )
+            tasks.append(task)
+
         return P2PWorkload(
             version=data.get("version", "1.0"),
-            meta=data.get("meta", {}),
-            network=data.get("network"),
-            jobs=data.get("jobs", []),
-            tasks=data.get("tasks", [])
+            meta=meta,
+            network=network,
+            jobs=jobs,
+            tasks=tasks,
         )

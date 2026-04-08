@@ -115,19 +115,6 @@ ruff check src/ tests/
 mypy src/
 ```
 
-## Phase 1 Roadmap
-
-Phase 1 focuses on building the core infrastructure:
-
-- [x] Project initialization and directory structure
-- [x] P2P Workload JSON Schema definition
-- [ ] Workload validator and reader/writer
-- [ ] Ring AllReduce expander (with MockNcclGroup.cc verification)
-- [ ] AllGather / ReduceScatter expanders
-- [ ] Unit tests for expanders
-
-See `specs/flow-scheduler-design.md` for the complete design document.
-
 ## License
 
 Apache 2.0

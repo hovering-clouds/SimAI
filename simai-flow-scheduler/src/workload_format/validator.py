@@ -6,7 +6,7 @@ import json
 from typing import Optional
 from jsonschema import validate, ValidationError, Draft7Validator
 
-from .schema import P2PWorkload, P2P_WORKLOAD_JSON_SCHEMA
+from .schema import P2PWorkload, P2P_WORKLOAD_JSON_SCHEMA, Meta, Network, Job, ParallelismConfig, Task
 
 
 class WorkloadValidator:
@@ -51,7 +51,7 @@ class WorkloadValidator:
         Validate a P2PWorkload object.
 
         Args:
-            workload: P2PWorkload object to validate.
+            workload: P2PWorkload to validate.
 
         Returns:
             List of validation error messages. Empty if valid.
@@ -108,10 +108,72 @@ class WorkloadValidator:
         Returns:
             P2PWorkload object.
         """
+        # Parse meta
+        meta_data = data.get("meta", {})
+        meta = Meta(
+            num_jobs=meta_data.get("num_jobs", 0),
+            num_nodes=meta_data.get("num_nodes", 0),
+            generated_at=meta_data.get("generated_at"),
+            generator_version=meta_data.get("generator_version"),
+            description=meta_data.get("description"),
+        )
+
+        # Parse network
+        network_data = data.get("network")
+        if network_data:
+            network = Network(
+                topology_file=network_data.get("topology_file", ""),
+                bandwidth_gbps=network_data.get("bandwidth_gbps"),
+                latency_us=network_data.get("latency_us"),
+            )
+        else:
+            network = Network(topology_file="")
+
+        # Parse jobs
+        jobs = []
+        for job_data in data.get("jobs", []):
+            parallelism_data = job_data.get("parallelism", {})
+            parallelism = ParallelismConfig(
+                tp=parallelism_data.get("tp", 1),
+                dp=parallelism_data.get("dp", 1),
+                pp=parallelism_data.get("pp", 1),
+                ep=parallelism_data.get("ep", 1),
+            )
+            job = Job(
+                job_id=job_data.get("job_id", 0),
+                name=job_data.get("name"),
+                model=job_data.get("model"),
+                assigned_nodes=job_data.get("assigned_nodes", []),
+                parallelism=parallelism,
+            )
+            jobs.append(job)
+
+        # Parse tasks
+        tasks = []
+        for task_data in data.get("tasks", []):
+            task = Task(
+                task_id=task_data.get("task_id", 0),
+                job_id=task_data.get("job_id", 0),
+                type=task_data.get("type", "compute"),
+                iteration=task_data.get("iteration", 0),
+                phase=task_data.get("phase", "forward"),
+                layer_id=task_data.get("layer_id", 0),
+                deps=task_data.get("deps", []),
+                node=task_data.get("node"),
+                duration_us=task_data.get("duration_us"),
+                src=task_data.get("src"),
+                dst=task_data.get("dst"),
+                size_bytes=task_data.get("size_bytes"),
+                comm_type=task_data.get("comm_type", "unknown"),
+                chunk_id=task_data.get("chunk_id"),
+                num_chunks=task_data.get("num_chunks"),
+            )
+            tasks.append(task)
+
         return P2PWorkload(
             version=data.get("version", "1.0"),
-            meta=data.get("meta", {}),
-            network=data.get("network"),
-            jobs=data.get("jobs", []),
-            tasks=data.get("tasks", [])
+            meta=meta,
+            network=network,
+            jobs=jobs,
+            tasks=tasks,
         )
