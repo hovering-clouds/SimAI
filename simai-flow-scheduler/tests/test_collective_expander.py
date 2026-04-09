@@ -20,6 +20,8 @@ import pytest
 from src.workload_generator.collective_expander import (
     AllReduceExpander,
     AllGatherExpander,
+    ReduceScatterExpander,
+    AlltoAllExpander,
     FlowTask,
 )
 from src.workload_format.schema import TaskType, CommType
@@ -691,3 +693,190 @@ class TestAllGatherExpander:
         for task_id in adj:
             if task_id not in visited:
                 assert not has_cycle(task_id), "DAG contains cycles"
+
+
+# ─── ReduceScatter Expander Tests ────────────────────────────────────────────
+
+class TestReduceScatterExpander:
+    """Tests for Ring ReduceScatter expander.
+
+    ReduceScatter has the same ring structure as AllGather:
+    - Phase 1 (chunk_id=0): n flows, no deps
+    - Phase 2 (chunk_id=1..n-2): n-2 steps, diagonal deps
+    - Total: n*(n-1) flows
+    """
+
+    def _build_expected_flows_4ranks(self) -> list[dict]:
+        return [
+            {"task_id": 0, "src": 0, "dst": 1, "chunk_id": 0, "deps": []},
+            {"task_id": 1, "src": 1, "dst": 2, "chunk_id": 0, "deps": []},
+            {"task_id": 2, "src": 2, "dst": 3, "chunk_id": 0, "deps": []},
+            {"task_id": 3, "src": 3, "dst": 0, "chunk_id": 0, "deps": []},
+            {"task_id": 4, "src": 0, "dst": 1, "chunk_id": 1, "deps": [3]},
+            {"task_id": 5, "src": 1, "dst": 2, "chunk_id": 1, "deps": [0]},
+            {"task_id": 6, "src": 2, "dst": 3, "chunk_id": 1, "deps": [1]},
+            {"task_id": 7, "src": 3, "dst": 0, "chunk_id": 1, "deps": [2]},
+            {"task_id": 8, "src": 0, "dst": 1, "chunk_id": 2, "deps": [7]},
+            {"task_id": 9, "src": 1, "dst": 2, "chunk_id": 2, "deps": [4]},
+            {"task_id": 10, "src": 2, "dst": 3, "chunk_id": 2, "deps": [5]},
+            {"task_id": 11, "src": 3, "dst": 0, "chunk_id": 2, "deps": [6]},
+        ]
+
+    def test_expand_4_ranks_count(self):
+        expander = ReduceScatterExpander()
+        flows = expander.expand_reducescatter([0, 1, 2, 3], 1024)
+        assert len(flows) == 12
+
+    def test_expand_4_ranks_exact(self):
+        expander = ReduceScatterExpander()
+        flows = expander.expand_reducescatter([0, 1, 2, 3], 1024)
+        expected = self._build_expected_flows_4ranks()
+        for i, (flow, exp) in enumerate(zip(flows, expected)):
+            assert flow.task_id == exp["task_id"]
+            assert flow.src == exp["src"]
+            assert flow.dst == exp["dst"]
+            assert flow.chunk_id == exp["chunk_id"]
+            assert flow.deps == exp["deps"]
+            assert flow.comm_type == CommType.TP_REDUCESCATTER_RING
+            assert flow.size_bytes == 256
+            assert flow.num_chunks == 3
+
+    def test_expand_8_ranks(self):
+        expander = ReduceScatterExpander()
+        flows = expander.expand_reducescatter(list(range(8)), 1024 * 1024)
+        assert len(flows) == 56
+        assert all(f.comm_type == CommType.TP_REDUCESCATTER_RING for f in flows)
+
+    def test_initial_no_deps(self):
+        expander = ReduceScatterExpander()
+        flows = expander.expand_reducescatter([0, 1, 2, 3], 1024)
+        for flow in flows[:4]:
+            assert flow.deps == []
+
+    def test_propagation_has_deps(self):
+        expander = ReduceScatterExpander()
+        flows = expander.expand_reducescatter([0, 1, 2, 3], 1024)
+        for flow in flows[4:]:
+            assert len(flow.deps) == 1
+
+    def test_two_ranks(self):
+        expander = ReduceScatterExpander()
+        flows = expander.expand_reducescatter([0, 1], 1024)
+        assert len(flows) == 2
+        assert all(f.deps == [] for f in flows)
+
+    def test_single_rank(self):
+        expander = ReduceScatterExpander()
+        assert expander.expand_reducescatter([0], 1024) == []
+
+    def test_ring_topology(self):
+        expander = ReduceScatterExpander()
+        flows = expander.expand_reducescatter([0, 1, 2, 3], 1024)
+        for flow in flows:
+            assert flow.dst == (flow.src + 1) % 4
+
+    def test_chunk_id_sequence(self):
+        expander = ReduceScatterExpander()
+        flows = expander.expand_reducescatter([0, 1, 2, 3], 1024)
+        assert [f.chunk_id for f in flows] == [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2]
+
+    def test_dependency_chain_valid(self):
+        expander = ReduceScatterExpander()
+        flows = expander.expand_reducescatter([0, 1, 2, 3], 1024)
+        valid_ids = {f.task_id for f in flows}
+        for flow in flows:
+            for dep in flow.deps:
+                assert dep in valid_ids
+
+    def test_dag_no_cycles(self):
+        expander = ReduceScatterExpander()
+        flows = expander.expand_reducescatter([0, 1, 2, 3], 1024)
+        adj = {f.task_id: list(f.deps) for f in flows}
+        visited, in_stack = set(), set()
+
+        def has_cycle(node):
+            visited.add(node); in_stack.add(node)
+            for dep in adj[node]:
+                if dep not in visited:
+                    if has_cycle(dep): return True
+                elif dep in in_stack: return True
+            in_stack.discard(node); return False
+
+        for tid in adj:
+            if tid not in visited:
+                assert not has_cycle(tid), "DAG contains cycles"
+
+    def test_unsupported_algo(self):
+        expander = ReduceScatterExpander()
+        with pytest.raises(ValueError, match="unsupported algo"):
+            expander.expand_reducescatter([0, 1], 1024, algo="tree")
+
+
+# ─── AlltoAll Expander Tests ─────────────────────────────────────────────────
+
+class TestAlltoAllExpander:
+    """Tests for AlltoAll expander. N*(N-1) independent flows."""
+
+    def test_expand_4_ranks_count(self):
+        expander = AlltoAllExpander()
+        assert len(expander.expand_alltoall([0, 1, 2, 3], 1024)) == 12
+
+    def test_all_pairs_present(self):
+        expander = AlltoAllExpander()
+        ranks = [0, 1, 2, 3]
+        flows = expander.expand_alltoall(ranks, 1024)
+        pairs = {(f.src, f.dst) for f in flows}
+        for src in ranks:
+            for dst in ranks:
+                if src != dst:
+                    assert (src, dst) in pairs
+
+    def test_no_self_loops(self):
+        expander = AlltoAllExpander()
+        for f in expander.expand_alltoall([0, 1, 2, 3], 1024):
+            assert f.src != f.dst
+
+    def test_no_dependencies(self):
+        expander = AlltoAllExpander()
+        flows = expander.expand_alltoall([0, 1, 2, 3], 1024)
+        assert all(f.deps == [] for f in flows)
+
+    def test_chunk_fields(self):
+        expander = AlltoAllExpander()
+        flows = expander.expand_alltoall([0, 1, 2, 3], 1024)
+        assert all(f.chunk_id == 0 for f in flows)
+        assert all(f.num_chunks == 1 for f in flows)
+
+    def test_size_bytes(self):
+        expander = AlltoAllExpander()
+        flows = expander.expand_alltoall([0, 1, 2, 3], 4096)
+        assert all(f.size_bytes == 1024 for f in flows)
+
+    def test_comm_type(self):
+        expander = AlltoAllExpander()
+        flows = expander.expand_alltoall([0, 1, 2, 3], 1024)
+        assert all(f.comm_type == CommType.TP_ALLTOALL for f in flows)
+
+    def test_8_ranks(self):
+        expander = AlltoAllExpander()
+        assert len(expander.expand_alltoall(list(range(8)), 1024)) == 56
+
+    def test_two_ranks(self):
+        expander = AlltoAllExpander()
+        flows = expander.expand_alltoall([0, 1], 1024)
+        assert len(flows) == 2
+        assert {(f.src, f.dst) for f in flows} == {(0, 1), (1, 0)}
+
+    def test_single_rank(self):
+        expander = AlltoAllExpander()
+        assert expander.expand_alltoall([0], 1024) == []
+
+    def test_task_ids_sequential(self):
+        expander = AlltoAllExpander()
+        flows = expander.expand_alltoall([0, 1, 2, 3], 1024, task_id_start=100)
+        assert [f.task_id for f in flows] == list(range(100, 112))
+
+    def test_task_ids_from_zero(self):
+        expander = AlltoAllExpander()
+        flows = expander.expand_alltoall([0, 1, 2, 3], 1024)
+        assert [f.task_id for f in flows] == list(range(12))

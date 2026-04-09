@@ -336,8 +336,8 @@ def _expand_ring(self, ranks, data_size, job_id, task_id_start):
 |-------------------|---------------|------|
 | `genAllReduceFlowModels` | `AllReduceExpander.expand_allreduce(algo="ring")` | Ring 算法 |
 | `genAllGatherFlowModels` | `AllGatherExpander.expand_allgather(algo="ring")` | Ring 算法 |
-| `genReduceScatterFlowModels` | `ReduceScatterExpander.expand_reducescatter(algo="ring")` | Ring 算法（待实现） |
-| `genAlltoAllFlowModels` | `AlltoAllExpander.expand_alltoall()` | 全连接（待实现） |
+| `genReduceScatterFlowModels` | `ReduceScatterExpander.expand_reducescatter(algo="ring")` | Ring 算法 |
+| `genAlltoAllFlowModels` | `AlltoAllExpander.expand_alltoall()` | 全连接 |
 
 **验证策略**：使用相同的输入参数，对比本项目展开结果与 MockNcclGroup.cc 生成的 flow 列表，确保 `src/dst/deps/chunk_id` 完全一致。
 
@@ -485,7 +485,7 @@ class NS3Executor:
 | 1 | 定义 P2P Workload JSON Schema | `workload_format/schema.py` |
 | 1 | 实现 JSON 读写和验证器 | `workload_format/writer.py`, `validator.py` |
 | 2 | 实现 Ring AllReduce 展开器（对照 MockNcclGroup 验证） | `collective_expander/ring_allreduce.py` |
-| 2 | 实现 AllGather / ReduceScatter 展开器 | `collective_expander/*.py` |
+| 2 | 实现 AllGather / ReduceScatter / AlltoAll 展开器 | `collective_expander/*.py` |
 | 2-3 | 实现 AllToAll 展开器 | `collective_expander/alltoall.py` |
 | 3 | 单元测试：展开器正确性验证 | `tests/test_collective_expander.py` |
 
