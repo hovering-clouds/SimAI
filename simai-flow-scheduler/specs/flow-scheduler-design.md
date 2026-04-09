@@ -78,10 +78,7 @@ simai-flow-scheduler/
 │   ├── workload_generator/      # Layer 2: Workload 生成
 │   │   ├── __init__.py
 │   │   ├── aICB_adapter.py      # AICB 输出适配器
-│   │   ├── collective_expander.py  # Collective→P2P 展开
-│   │   ├── ring_allreduce.py    # Ring 算法实现
-│   │   ├── tree_allreduce.py    # Tree 算法实现
-│   │   ├── alltoall.py          # AlltoAll 算法实现
+│   │   ├── collective_expander.py  # Collective→P2P 展开（基类 + 所有算法实现）
 │   │   └── job_merger.py        # 多任务合并
 │   ├── workload_format/         # Layer 3: P2P Workload 格式
 │   │   ├── __init__.py
@@ -233,7 +230,9 @@ class CollectiveExpander(ABC):
         self,
         ranks: list[int],
         data_size: int,
-        algo: str,  # "ring", "tree", "nvls"
+        algo: str = "ring",  # "ring", "tree", "nvls"
+        job_id: int = 0,
+        task_id_start: int = 0,
     ) -> list[FlowTask]:
         """将 AllReduce 展开为多个 P2P 流任务"""
         pass
@@ -243,7 +242,9 @@ class CollectiveExpander(ABC):
         self,
         ranks: list[int],
         data_size: int,
-        algo: str,
+        algo: str = "ring",
+        job_id: int = 0,
+        task_id_start: int = 0,
     ) -> list[FlowTask]:
         pass
 
@@ -252,7 +253,9 @@ class CollectiveExpander(ABC):
         self,
         ranks: list[int],
         data_size: int,
-        algo: str,
+        algo: str = "ring",
+        job_id: int = 0,
+        task_id_start: int = 0,
     ) -> list[FlowTask]:
         pass
 
@@ -261,81 +264,80 @@ class CollectiveExpander(ABC):
         self,
         ranks: list[int],
         data_size: int,
+        job_id: int = 0,
+        task_id_start: int = 0,
     ) -> list[FlowTask]:
         pass
 ```
 
-#### 4.1.2 Ring AllReduce 展开算法
-
-Ring AllReduce 将 N 个 rank 的数据分成 N 个 chunk，分两阶段：
-
-**Reduce-Scatter 阶段（前半环）**：
-- step i: rank i → rank (i+1) mod N，传输 chunk i
-- 每个 step 依赖前一个 step 的同一 chunk
-
-**AllGather 阶段（后半环）**：
-- step i: rank (i+1) mod N → rank i，传输 chunk i
-- 依赖前一个 step 的同一 chunk 和本 chunk 在前一阶段的完成
+每个子类负责一种集合通信操作，内部按 `algo` 参数分派到具体算法实现：
 
 ```python
-def expand_allreduce_ring(ranks: list[int], data_size: int) -> list[FlowTask]:
-    """
-    Ring AllReduce 展开：
-    - N 个 rank，N 个 chunk
-    - Reduce-Scatter: N-1 步，每步 N-1 条流
-    - AllGather: N-1 步，每步 N-1 条流
-    - 总共 2*(N-1)*(N-1) 条流
-    """
+class AllReduceExpander(CollectiveExpander):
+    def expand_allreduce(self, ranks, data_size, algo="ring", ...):
+        if algo == "ring":
+            return self._expand_ring(...)
+        elif algo == "tree":
+            return self._expand_tree(...)
+        raise ValueError(f"unsupported algo '{algo}'")
+
+    def _expand_ring(self, ranks, data_size, job_id, task_id_start):
+        # Ring AllReduce 具体实现
+        ...
+```
+
+#### 4.1.2 Ring AllReduce 展开算法
+
+Ring AllReduce 将 N 个 rank 的数据分成 N 个 chunk，分三阶段：
+
+**Phase 1: 初始 chunk**（1 步，RS 第 1 步）：
+- 每个 rank 发送自己的数据到 next rank，无依赖
+
+**Phase 2: Reduce-Scatter 迭代**（n-2 步，RS 第 2 到 n-1 步）：
+- 每个 flow 依赖 ring 上前一个 rank 在上一步的 flow（对角线依赖）
+
+**Phase 3: AllGather 迭代**（n-1 步，AG 第 1 到 n-1 步）：
+- RS 完成后才开始，与 Phase 1 无关
+- 同样的对角线依赖模式
+
+总 flow 数: `n + n*(n-2) + n*(n-1) = n * 2*(n-1)`
+
+```python
+def _expand_ring(self, ranks, data_size, job_id, task_id_start):
     n = len(ranks)
     chunk_size = data_size // n
-    tasks = []
-    flow_id = 0
+    chunk_count = 2 * (n - 1)
+    ring = _build_ring_topology(ranks)
 
-    # Reduce-Scatter 阶段
+    # Phase 1: 初始 chunk (chunk_id=0)
+    task_list = {}
+    for rank in ranks:
+        tasks.append(FlowTask(..., chunk_id=0, deps=[]))
+        task_list[rank] = task_id; task_id += 1
+
+    # Phase 2: RS 迭代 (n-2 步, chunk_id=1..n-2)
+    for step in range(n - 2):
+        for rank in ranks:
+            deps = [task_list[ring[rank]["prev"]]]  # 对角线依赖
+            tasks.append(FlowTask(..., chunk_id=1+step, deps=deps))
+            ...
+
+    # Phase 3: AG 迭代 (n-1 步, chunk_id=n-1..2n-3)
     for step in range(n - 1):
-        for rank_idx in range(n):
-            src = ranks[rank_idx]
-            dst = ranks[(rank_idx + 1) % n]
-            chunk = rank_idx  # 每个 rank 发送自己的 chunk
-            prev_deps = []
-            if step > 0:
-                # 依赖上一阶段的同一 chunk
-                prev_deps.append(flow_id - n)
-            tasks.append(FlowTask(
-                type="flow",
-                src=src, dst=dst,
-                size_bytes=chunk_size,
-                comm_type="TP_ALLREDUCE_RING",
-                chunk_id=chunk,
-                num_chunks=n,
-                deps=prev_deps
-            ))
-            flow_id += 1
-
-    # AllGather 阶段
-    for step in range(n - 1):
-        for rank_idx in range(n):
-            src = ranks[(rank_idx + 1) % n]
-            dst = ranks[rank_idx]
-            chunk = (rank_idx + 1) % n  # 接收下一个 chunk
-            prev_deps = [
-                flow_id - n,           # 依赖上一阶段的同一 chunk
-                tasks[-(n-1) + rank_idx].task_id if step > 0 else None  # 依赖本 chunk 在 RS 阶段完成
-            ]
-            # ... 类似添加任务
-            pass
-
-    return tasks
+        for rank in ranks:
+            deps = [task_list[ring[rank]["prev"]]]  # 对角线依赖
+            tasks.append(FlowTask(..., chunk_id=(n-1)+step, deps=deps))
+            ...
 ```
 
 #### 4.1.3 与 MockNcclGroup 的对应关系
 
 | MockNcclGroup 函数 | 本项目对应函数 | 说明 |
 |-------------------|---------------|------|
-| `genAllReduceFlowModels` | `RingAllReduceExpander.expand_allreduce` | Ring 算法 |
-| `genAllGatherFlowModels` | `RingAllGatherExpander.expand_allgather` | Ring 算法 |
-| `genReduceScatterFlowModels` | `RingReduceScatterExpander.expand_reducescatter` | Ring 算法 |
-| `genAlltoAllFlowModels` | `AllToAllExpander.expand_alltoall` | 全连接 |
+| `genAllReduceFlowModels` | `AllReduceExpander.expand_allreduce(algo="ring")` | Ring 算法 |
+| `genAllGatherFlowModels` | `AllGatherExpander.expand_allgather(algo="ring")` | Ring 算法 |
+| `genReduceScatterFlowModels` | `ReduceScatterExpander.expand_reducescatter(algo="ring")` | Ring 算法（待实现） |
+| `genAlltoAllFlowModels` | `AlltoAllExpander.expand_alltoall()` | 全连接（待实现） |
 
 **验证策略**：使用相同的输入参数，对比本项目展开结果与 MockNcclGroup.cc 生成的 flow 列表，确保 `src/dst/deps/chunk_id` 完全一致。
 

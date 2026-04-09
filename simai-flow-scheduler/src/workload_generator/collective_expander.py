@@ -62,12 +62,39 @@ class FlowTask:
         )
 
 
+def _build_ring_topology(ranks: list[int]) -> dict[int, dict]:
+    """
+    Build the ring channel structure.
+
+    For single-node (no PXN), each rank has:
+    - prev: the rank that sends TO this rank (= ranks[(i-1) % n])
+    - next: the rank this rank sends TO (= ranks[(i+1) % n])
+
+    Returns:
+        Dict mapping rank -> {prev, next}
+    """
+    n = len(ranks)
+    ring = {}
+    for i, rank in enumerate(ranks):
+        prev_rank = ranks[(i - 1) % n]
+        next_rank = ranks[(i + 1) % n]
+        ring[rank] = {
+            "prev": prev_rank,
+            "next": next_rank,
+        }
+    return ring
+
+
 class CollectiveExpander(ABC):
     """
     Base class for collective communication expanders.
 
     Expands collective operations into sequences of P2P flow tasks.
     Reference implementation: MockNcclGroup.cc
+
+    Concrete implementations:
+    - AllReduceExpander: expand_allreduce with algo dispatch (ring, tree, nvls)
+    - AllGatherExpander: expand_allgather with algo dispatch (ring, tree)
     """
 
     @abstractmethod
@@ -165,15 +192,12 @@ class CollectiveExpander(ABC):
         pass
 
 
-class RingAllReduceExpander(CollectiveExpander):
+class AllReduceExpander(CollectiveExpander):
     """
-    Ring AllReduce expander.
+    AllReduce expander. Dispatches to algorithm-specific implementations.
 
-    Implements the two-phase Ring AllReduce algorithm:
-    1. Reduce-Scatter phase: N-1 steps, each rank sends one chunk to next rank
-    2. AllGather phase: N-1 steps, each rank receives chunks from previous rank
-
-    Reference: MockNcclGroup.cc::genAllReduceFlowModels
+    Supported algorithms:
+    - "ring": Ring AllReduce (MockNcclGroup.cc::genAllReduceRingFlowModels)
     """
 
     def expand_allreduce(
@@ -184,97 +208,130 @@ class RingAllReduceExpander(CollectiveExpander):
         job_id: int = 0,
         task_id_start: int = 0,
     ) -> list[FlowTask]:
+        if algo == "ring":
+            return self._expand_ring(ranks, data_size, job_id, task_id_start)
+        raise ValueError(f"AllReduceExpander: unsupported algo '{algo}'")
+
+    def _expand_ring(
+        self,
+        ranks: list[int],
+        data_size: int,
+        job_id: int,
+        task_id_start: int,
+    ) -> list[FlowTask]:
         """
-        Expand Ring AllReduce into P2P flows.
+        Ring AllReduce implementation.
 
-        Algorithm:
-        - Split data into N chunks (N = number of ranks)
-        - Reduce-Scatter: N-1 steps, each step N flows
-        - AllGather: N-1 steps, each step N flows
-        - Total: 2 * (N-1) * N flows
+        Algorithm structure (for n ranks):
+        - Phase 1: Initial chunk (chunk_id=0), 1 step — RS step 1
+          * n flows, all ranks send simultaneously, no dependencies
+        - Phase 2: Reduce-Scatter iterations, n-2 steps (chunk_id=1 to n-2)
+          * Each step: n flows with diagonal dependency on previous rank's flow
+        - Phase 3: AllGather iterations, n-1 steps (chunk_id=n-1 to 2n-3)
+          * Starts AFTER RS completes, independent n-1 steps
+          * Same diagonal dependency pattern as Phase 2
 
-        Args:
-            ranks: List of global ranks.
-            data_size: Total data size in bytes.
-            algo: Must be "ring".
-            job_id: Job ID.
-            task_id_start: Starting task ID.
+        Total flows: n + n*(n-2) + n*(n-1) = n * 2*(n-1)
+        For 4 ranks: 4 + 8 + 12 = 24 flows.
 
-        Returns:
-            List of FlowTask objects.
+        Reference: MockNcclGroup.cc lines 1047-1310
         """
-        if algo != "ring":
-            raise ValueError(f"RingAllReduceExpander only supports 'ring' algo, got '{algo}'")
-
         n = len(ranks)
         if n < 2:
             return []
 
         chunk_size = data_size // n
+        chunk_count = 2 * (n - 1)
         tasks: list[FlowTask] = []
         task_id = task_id_start
+        ring = _build_ring_topology(ranks)
 
-        # Reduce-Scatter phase
-        # Each rank i sends chunk i to rank (i+1) % n
-        for step in range(n - 1):
-            for rank_idx in range(n):
-                src = ranks[rank_idx]
-                dst = ranks[(rank_idx + 1) % n]
-                chunk = rank_idx
+        # --- Phase 1: Initial chunk (chunk_id = 0) ---
+        task_list: dict[int, int] = {}
+        for rank in ranks:
+            rank_info = ring[rank]
+            tasks.append(FlowTask(
+                task_id=task_id,
+                job_id=job_id,
+                type=TaskType.FLOW,
+                src=rank,
+                dst=rank_info["next"],
+                size_bytes=chunk_size,
+                comm_type=CommType.TP_ALLREDUCE_RING,
+                chunk_id=0,
+                num_chunks=chunk_count,
+                deps=[],
+            ))
+            task_list[rank] = task_id
+            task_id += 1
 
-                deps = []
-                if step > 0:
-                    # Depend on the same chunk from previous step
-                    prev_task_id = task_id - n
-                    deps.append(prev_task_id)
-
-                tasks.append(FlowTask(
-                    task_id=task_id,
-                    job_id=job_id,
-                    type=TaskType.FLOW,
-                    src=src,
-                    dst=dst,
-                    size_bytes=chunk_size,
-                    comm_type=CommType.TP_ALLREDUCE_RING,
-                    chunk_id=chunk,
-                    num_chunks=n,
-                    deps=deps,
-                ))
-                task_id += 1
-
-        # AllGather phase
-        # Each rank (i+1) % n sends chunk (i+1) % n to rank i
-        rs_base = task_id_start  # Base task ID of Reduce-Scatter phase
-        for step in range(n - 1):
-            for rank_idx in range(n):
-                src = ranks[(rank_idx + 1) % n]
-                dst = ranks[rank_idx]
-                chunk = (rank_idx + 1) % n
-
-                deps = []
-                # Depend on the same chunk from previous AllGather step
-                if step > 0:
-                    prev_task_id = task_id - n
-                    deps.append(prev_task_id)
-                # Depend on the corresponding Reduce-Scatter task completing
-                rs_task_id = rs_base + ((n - 1 - 1) * n + rank_idx)
-                deps.append(rs_task_id)
+        # --- Phase 2: Reduce-Scatter iterations (n-2 steps) ---
+        for step in range(n - 2):
+            task_list2: dict[int, int] = {}
+            for rank in ranks:
+                rank_info = ring[rank]
+                prev_rank = rank_info["prev"]
+                partner_task_id = task_list[prev_rank]
 
                 tasks.append(FlowTask(
                     task_id=task_id,
                     job_id=job_id,
                     type=TaskType.FLOW,
-                    src=src,
-                    dst=dst,
+                    src=rank,
+                    dst=rank_info["next"],
                     size_bytes=chunk_size,
                     comm_type=CommType.TP_ALLREDUCE_RING,
-                    chunk_id=chunk,
-                    num_chunks=n,
-                    deps=deps,
+                    chunk_id=1 + step,
+                    num_chunks=chunk_count,
+                    deps=[partner_task_id],
                 ))
+                task_list2[rank] = task_id
                 task_id += 1
+            task_list = task_list2
+
+        # --- Phase 3: AllGather iterations (n-1 steps) ---
+        for step in range(n - 1):
+            task_list2: dict[int, int] = {}
+            for rank in ranks:
+                rank_info = ring[rank]
+                prev_rank = rank_info["prev"]
+                partner_task_id = task_list[prev_rank]
+
+                tasks.append(FlowTask(
+                    task_id=task_id,
+                    job_id=job_id,
+                    type=TaskType.FLOW,
+                    src=rank,
+                    dst=rank_info["next"],
+                    size_bytes=chunk_size,
+                    comm_type=CommType.TP_ALLREDUCE_RING,
+                    chunk_id=(n - 1) + step,
+                    num_chunks=chunk_count,
+                    deps=[partner_task_id],
+                ))
+                task_list2[rank] = task_id
+                task_id += 1
+            task_list = task_list2
 
         return tasks
+
+    def expand_allgather(self, ranks, data_size, algo="ring", job_id=0, task_id_start=0):
+        raise NotImplementedError("Use AllGatherExpander for AllGather")
+
+    def expand_reducescatter(self, ranks, data_size, algo="ring", job_id=0, task_id_start=0):
+        raise NotImplementedError("ReduceScatter not yet implemented")
+
+    def expand_alltoall(self, ranks, data_size, job_id=0, task_id_start=0):
+        raise NotImplementedError("AlltoAll not yet implemented")
+
+
+class AllGatherExpander(CollectiveExpander):
+    """
+    AllGather expander. Dispatches to algorithm-specific implementations.
+
+    Supported algorithms:
+    - "ring": Ring AllGather (MockNcclGroup.cc::genAllGatherFlowModels)
+    """
 
     def expand_allgather(
         self,
@@ -284,29 +341,91 @@ class RingAllReduceExpander(CollectiveExpander):
         job_id: int = 0,
         task_id_start: int = 0,
     ) -> list[FlowTask]:
-        """Expand Ring AllGather into P2P flows."""
-        # TODO: Implement Ring AllGather
-        raise NotImplementedError("Ring AllGather not yet implemented")
+        if algo == "ring":
+            return self._expand_ring(ranks, data_size, job_id, task_id_start)
+        raise ValueError(f"AllGatherExpander: unsupported algo '{algo}'")
 
-    def expand_reducescatter(
+    def _expand_ring(
         self,
         ranks: list[int],
         data_size: int,
-        algo: str = "ring",
-        job_id: int = 0,
-        task_id_start: int = 0,
+        job_id: int,
+        task_id_start: int,
     ) -> list[FlowTask]:
-        """Expand Ring ReduceScatter into P2P flows."""
-        # TODO: Implement Ring ReduceScatter
-        raise NotImplementedError("Ring ReduceScatter not yet implemented")
+        """
+        Ring AllGather implementation.
 
-    def expand_alltoall(
-        self,
-        ranks: list[int],
-        data_size: int,
-        job_id: int = 0,
-        task_id_start: int = 0,
-    ) -> list[FlowTask]:
-        """Expand AlltoAll into P2P flows."""
-        # TODO: Implement AlltoAll
+        Algorithm structure (for n ranks):
+        - Phase 1: Initial send (chunk_id=0), 1 step
+          * n flows, each rank sends its own data to next rank, no dependencies
+        - Phase 2: Forwarding iterations, n-2 steps (chunk_id=1 to n-2)
+          * Each step: n flows with diagonal dependency on previous rank's flow
+
+        Total flows: n + n*(n-2) = n*(n-1)
+        For 4 ranks: 4 + 8 = 12 flows.
+
+        Reference: MockNcclGroup.cc genAllGatherFlowModels
+        """
+        n = len(ranks)
+        if n < 2:
+            return []
+
+        chunk_size = data_size // n
+        chunk_count = n - 1
+        tasks: list[FlowTask] = []
+        task_id = task_id_start
+        ring = _build_ring_topology(ranks)
+
+        # --- Phase 1: Initial send (chunk_id = 0) ---
+        task_list: dict[int, int] = {}
+        for rank in ranks:
+            rank_info = ring[rank]
+            tasks.append(FlowTask(
+                task_id=task_id,
+                job_id=job_id,
+                type=TaskType.FLOW,
+                src=rank,
+                dst=rank_info["next"],
+                size_bytes=chunk_size,
+                comm_type=CommType.TP_ALLGATHER_RING,
+                chunk_id=0,
+                num_chunks=chunk_count,
+                deps=[],
+            ))
+            task_list[rank] = task_id
+            task_id += 1
+
+        # --- Phase 2: Forwarding (n-2 steps) ---
+        for step in range(1, n - 1):
+            task_list2: dict[int, int] = {}
+            for rank in ranks:
+                rank_info = ring[rank]
+                prev_rank = rank_info["prev"]
+                partner_task_id = task_list[prev_rank]
+
+                tasks.append(FlowTask(
+                    task_id=task_id,
+                    job_id=job_id,
+                    type=TaskType.FLOW,
+                    src=rank,
+                    dst=rank_info["next"],
+                    size_bytes=chunk_size,
+                    comm_type=CommType.TP_ALLGATHER_RING,
+                    chunk_id=step,
+                    num_chunks=chunk_count,
+                    deps=[partner_task_id],
+                ))
+                task_list2[rank] = task_id
+                task_id += 1
+            task_list = task_list2
+
+        return tasks
+
+    def expand_allreduce(self, ranks, data_size, algo="ring", job_id=0, task_id_start=0):
+        raise NotImplementedError("Use AllReduceExpander for AllReduce")
+
+    def expand_reducescatter(self, ranks, data_size, algo="ring", job_id=0, task_id_start=0):
+        raise NotImplementedError("ReduceScatter not yet implemented")
+
+    def expand_alltoall(self, ranks, data_size, job_id=0, task_id_start=0):
         raise NotImplementedError("AlltoAll not yet implemented")
