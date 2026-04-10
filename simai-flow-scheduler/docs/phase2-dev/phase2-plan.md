@@ -235,7 +235,45 @@ AICB 的 `forward_compute_time` 和 `backward_compute_time` 是**每个 rank 独
 
 单位待确认（可能是 cycles、ns 或 us），初期先保持原值，在 executor 阶段再处理单位转换。
 
-### 5.3 流水线并行（PP）的处理方式
+### 5.3 Gradient Accumulation（GA）的处理
+
+**关键理解**：AICB workload 文件中的 items **已经包含了完整的 GA 展开**。
+
+具体来说：
+- 如果 `ga=24` 且模型有 80 层（`vpp=80`）
+- 那么 workload 文件中会有 `80 * 24 = 1920` 个 layer items（不包括 pre/post items）
+- **Builder 不需要自己做 GA 循环**，只需要按顺序处理所有 items
+
+**GA 在 workload 中的体现**：
+```
+Pre-layer items (6 items, before GA loop):
+  grad_gather, grad_param_comm, ...
+
+GA items (already expanded, 80 layers × 24 GA steps = 1920 items):
+  [layer_0_to_79 for GA step 0]
+  [layer_0_to_79 for GA step 1]
+  ...
+  [layer_0_to_79 for GA step 23]
+
+Post-layer items (8 items):
+  embedding_norm, cross_entropy1~3, optimizer1~4
+```
+
+**Builder 如何使用 `ga` 参数**：
+1. **验证 workload 结构**：
+   ```python
+   num_layer_items = total_items - num_pre_items - num_post_items
+   assert num_layer_items % ga == 0
+   assert num_layer_items // ga == vpp  # vpp = 模型总层数
+   ```
+2. **推导 iteration 字段**：
+   ```python
+   iteration = (item_index - num_pre_items) // vpp
+   ```
+
+这意味着 Phase 2 的 builder 可以直接线性遍历 items，只需根据 `ga` 和 `vpp` 计算每个 item 所属的 iteration。
+
+### 5.4 流水线并行（PP）的处理方式
 
 **PP 不在 workload item 中体现**，关键事实：
 
@@ -250,21 +288,68 @@ AICB 的 `forward_compute_time` 和 `backward_compute_time` 是**每个 rank 独
 - 保留 `PP_SEND`/`PP_RECV` 的 CommType 枚举，后续可替换为真实 flow
 - Phase 2 初期先只处理单 PP stage（pp=1），PP 扩展作为后续增强
 
-### 5.4 通信类型的 TP/DP/EP 判断
+### 5.5 通信类型的 TP/DP/EP 判断
 
-AICB workload 中的通信类型**已经自带后缀标记**，直接解析即可：
+AICB workload 中的通信类型**已经自带后缀标记**，直接解析即可。astra-sim 通过字符串匹配来判断所属的并行组（见 `Workload.cc` 第 1329-1369 行）：
 
-| 位置 | 后缀 | 并行类型 | 说明 |
-|------|------|---------|------|
-| forward 字段（字段 4-5） | 无后缀 | TP | 前向通信通常是 TP |
-| forward 字段 | `_EP` | EP | 带后缀的例外 |
-| backward 字段（字段 7-8） | 无后缀 | TP | 反向通信通常是 TP |
-| backward 字段 | `_EP` | EP | 带后缀的例外 |
-| DP 字段（字段 10-11） | `_DP` | DP | DP 字段自然是 DP |
-| DP 字段 | `_DP_EP` | DP×EP | DP 和 EP 的联合组 |
-| 任何位置 | `ALLTOALL`（无后缀） | EP | AlltoAll 通常关联 EP |
+```cpp
+// ALLTOALL 系列
+if (wg_comm_type_s.substr(0,8) == "ALLTOALL") {
+  if(wg_comm_type_s == "ALLTOALL"){
+    wg_group_type = MockNccl::GroupType::TP;      // 无后缀 → TP
+  } else if(wg_comm_type_s == "ALLTOALL_EP"){
+    wg_group_type = MockNccl::GroupType::EP;      // _EP → EP
+  } else if(wg_comm_type_s == "ALLTOALL_DP_EP"){
+    wg_group_type = MockNccl::GroupType::DP_EP;   // _DP_EP → DP×EP
+  }
+}
 
-判断方式：**直接使用 AICB 的通信类型后缀**，如 `ALLGATHER_DP_EP` → base=`ALLGATHER`, context=`dp_ep`。
+// ALLGATHER 系列
+if (wg_comm_type_s.substr(0,9) == "ALLGATHER") {
+  if(wg_comm_type_s == "ALLGATHER"){
+    wg_group_type = MockNccl::GroupType::TP;
+  } else if(wg_comm_type_s == "ALLGATHER_EP"){
+    wg_group_type = MockNccl::GroupType::EP;
+  } else if(wg_comm_type_s == "ALLGATHER_DP_EP"){
+    wg_group_type = MockNccl::GroupType::DP_EP;
+  }
+}
+
+// REDUCESCATTER 系列
+if (wg_comm_type_s.substr(0,13) == "REDUCESCATTER") {
+  if(wg_comm_type_s == "REDUCESCATTER"){
+    wg_group_type = MockNccl::GroupType::TP;
+  } else if(wg_comm_type_s == "REDUCESCATTER_EP"){
+    wg_group_type = MockNccl::GroupType::EP;
+  } else if(wg_comm_type_s == "REDUCESCATTER_DP_EP"){
+    wg_group_type = MockNccl::GroupType::DP_EP;
+  }
+}
+```
+
+**判断规则总结**：
+
+| AICB comm | 后缀模式 | Base Type | Context | Rank Group | 典型出现位置 |
+|-----------|---------|-----------|---------|------------|-------------|
+| `ALLREDUCE` | 无后缀 | ALLREDUCE | tp | TP group | forward/backward |
+| `ALLREDUCE_EP` | `_EP` | ALLREDUCE | ep | EP group | MoE layers |
+| `ALLREDUCE_DP_EP` | `_DP_EP` | ALLREDUCE | dp_ep | DP×EP group | DP fields |
+| `ALLGATHER` | 无后缀 | ALLGATHER | tp | TP group | forward (e.g., attention_column) |
+| `ALLGATHER_EP` | `_EP` | ALLGATHER | ep | EP group | MoE layers |
+| `ALLGATHER_DP_EP` | `_DP_EP` | ALLGATHER | dp_ep | DP×EP group | Pre-layer items (moe_grad_norm) |
+| `REDUCESCATTER` | 无后缀 | REDUCESCATTER | tp | TP group | backward (e.g., attention_column) |
+| `REDUCESCATTER_EP` | `_EP` | REDUCESCATTER | ep | EP group | MoE layers |
+| `REDUCESCATTER_DP_EP` | `_DP_EP` | REDUCESCATTER | dp_ep | DP×EP group | Pre-layer items |
+| `ALLTOALL` | 无后缀 | ALLTOALL | tp | TP group | 较少见 |
+| `ALLTOALL_EP` | `_EP` | ALLTOALL | ep | EP group | MoE dispatch/combine |
+| `ALLTOALL_DP_EP` | `_DP_EP` | ALLTOALL | dp_ep | DP×EP group | 较少见 |
+| 任何字段 | `_DP` | 对应 base | dp | DP group | DP fields (字段 10-11) |
+
+**关键点**：
+- 无后缀的通信类型（如 `ALLGATHER`, `REDUCESCATTER`）通常出现在 forward/backward 字段，对应 **TP group**
+- `_EP` 后缀的出现于 **MoE 层**（如 `mlp_moelayer` 的 5 个 items 中有 `ALLTOALL_EP`）
+- `_DP_EP` 后缀通常出现在 pre-layer items 或 DP fields
+- DP 字段（字段 10-11）的通信类型如果带 `_DP` 后缀，明确指向 **DP group**；如果无后缀，需要结合上下文判断
 
 ---
 
@@ -483,21 +568,30 @@ class WorkloadBuilder:
         """
         Convert AICB workload to P2P Workload.
 
+        Key insight: AICB file already contains GA-expanded items.
+        If ga=24 and vpp=80, there are 1920 layer items in the file.
+
         Algorithm:
-        1. 从 Job 的 assigned_nodes + parallelism 创建 RankGrouper
-        2. 遍历 aicb_items:
+        1. Create RankGrouper from job.assigned_nodes + parallelism
+        2. Validate structure:
+           - num_layer_items = total_items - pre_items - post_items
+           - assert num_layer_items % ga == 0
+           - assert num_layer_items // ga == vpp
+        3. Iterate through all aicb_items:
            for each item:
-             a. Forward: compute_task(fwd_compute_time)
-                → if fwd_comm != NONE: expand_comm(fwd_comm, fwd_comm_size)
-             b. Backward: compute_task(bwd_compute_time)
-                → if bwd_comm != NONE: expand_comm(bwd_comm, bwd_comm_size)
-             c. DP: compute_task(dp_compute_time)
-                → if dp_comm != NONE: expand_comm(dp_comm, dp_comm_size)
+             a. Determine iteration:
+                iteration = (item_index - num_pre_items) // vpp
+             b. Forward: compute_task(fwd_compute_time, phase=FORWARD)
+                → if fwd_comm != NONE: expand_comm(fwd_comm, fwd_comm_size, ...)
+             c. Backward: compute_task(bwd_compute_time, phase=BACKWARD_INPUT)
+                → if bwd_comm != NONE: expand_comm(bwd_comm, bwd_comm_size, ...)
+             d. DP: compute_task(dp_compute_time, phase=BACKWARD_WEIGHT)
+                → if dp_comm != NONE: expand_comm(dp_comm, dp_comm_size, ...)
            依赖链: fwd_compute → fwd_flows → bwd_compute → bwd_flows → dp_compute → dp_flows
            跨 item: 前一 item 最后 task → 当前 item 第一个 task
-        3. PP 处理（pp > 1 时）：
+        4. PP 处理（pp > 1 时）：
            在 PP stage 间插入虚拟 compute task 作为依赖边
-        4. 收集所有 tasks，构建 P2PWorkload
+        5. Collect all tasks, build P2PWorkload with correct iteration fields
         """
         pass
 
@@ -681,6 +775,7 @@ writer.write(merged, "multi_job_output.json")
 | TP/DP/EP/PP 四维分组逻辑复杂 | RankGrouper 独立模块 + 充分的单元测试覆盖各种组合 |
 | Compute time 单位不明确 | 保持原值，在文档中标注单位待确认 |
 | PP 简化模型过于粗糙 | Phase 2 先只支持 pp=1，PP 扩展作为后续增强 |
+| AICB items 数量不符合预期（可能缺少或多余某些层） | 通过 header 的 `vpp`（=总层数）和 `ga` 验证：`(total_items - pre_items - post_items) % ga == 0` 且结果等于 `vpp` |
 
 ---
 
