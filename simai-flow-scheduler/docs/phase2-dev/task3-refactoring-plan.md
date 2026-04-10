@@ -92,22 +92,52 @@ Phase 2: 连接依赖关系
 
 ```python
 @dataclass
-class ItemTasks:
-    """一个 AICB work item 展开后的所有 tasks，按 phase 分组。"""
-    # key = rank (node), value = list[FlowTask]
-    fwd_computes: dict[int, FlowTask]   # 每个 rank 的 forward compute
-    fwd_flows: list[FlowTask]           # 展开后的 forward flows
-    ig_computes: dict[int, FlowTask]    # 每个 rank 的 backward compute
-    ig_flows: list[FlowTask]            # 展开后的 backward flows
-    wg_computes: dict[int, FlowTask]    # 每个 rank 的 DP compute
-    wg_flows: list[FlowTask]            # 展开后的 DP flows
+class FlowGroupResult:
+    """一次集合通信展开的结果，含增量追踪的 receiver 索引。
+
+    receiver_index 在生成 flow 的同时增量维护，避免后续扫描。
+    key = rank (receiver/dst), value = 该 rank 作为 dst 接收到的所有 flow task_id 列表。
+
+    设计理由：
+    - 为什么只追踪 dst（receiver）而不追踪 src（sender）：
+      一个 rank 的下一步计算只依赖它接收到的数据，不需要等自己完成发送。
+      rank 收到了所有需要的数据就可以开始计算，自己的发送是为其他 rank 服务的。
+    - 为什么是所有 receiver flows 而非仅最后一个：
+      以 2-rank Ring ALLREDUCE 为例：
+        Flow 0: 0→1, deps=[]        Flow 1: 1→0, deps=[]
+        Flow 2: 0→1, deps=[Flow 1]  Flow 3: 1→0, deps=[Flow 0]
+      rank 0 作为 receiver 收到 Flow 1 和 Flow 3。若仅依赖 Flow 3（最后一个），
+      Flow 3 的依赖链是 Flow 3 ← Flow 0，不经过 Flow 1，rank 0 可能缺失 chunk 0 数据。
+      因此必须依赖所有 receiver flows。
+    - 效率：增量维护 O(1)/flow，无后续扫描。每个 rank 的 receiver flows 数为 O(n)（n=组大小）。
+    """
+    flows: list[FlowTask]
+    receiver_index: dict[int, list[int]]  # rank → 该 rank 作为 dst 的 task_id 列表
+
+    @staticmethod
+    def empty() -> "FlowGroupResult":
+        return FlowGroupResult(flows=[], receiver_index={})
+
+    def add_flow(self, flow: FlowTask):
+        """添加一个 flow 并更新 receiver 索引。"""
+        self.flows.append(flow)
+        if flow.dst not in self.receiver_index:
+            self.receiver_index[flow.dst] = []
+        self.receiver_index[flow.dst].append(flow.task_id)
 ```
 
 ```python
 @dataclass
-class RankTracker:
-    """追踪每个 rank 的最后一个 task_id，用于 per-node 依赖建立。"""
-    last_task_id: dict[int, int]  # rank → last task_id involving this rank
+class ItemTasks:
+    """一个 AICB work item 展开后的所有 tasks，按 phase 分组。"""
+    # key = rank, value = FlowTask（每个 rank 的 compute task）
+    fwd_computes: dict[int, FlowTask]
+    ig_computes: dict[int, FlowTask]
+    wg_computes: dict[int, FlowTask]
+    # FlowGroupResult 含 flows + receiver_index
+    fwd_result: FlowGroupResult
+    ig_result: FlowGroupResult
+    wg_result: FlowGroupResult
 ```
 
 #### 3.2.2 Compute Task 生成逻辑
@@ -145,7 +175,7 @@ def _create_compute_tasks_for_phase(
 
 #### 3.2.3 Flow Task 生成逻辑
 
-对于每个通信操作，需要为 **每个并行子组** 分别展开：
+对于每个通信操作，需要为 **每个并行子组** 分别展开。生成时同时维护 `FlowGroupResult`：
 
 ```python
 def _expand_comm_all_groups(
@@ -158,63 +188,73 @@ def _expand_comm_all_groups(
     job_id: int,
     task_id_counter: int,
     algo: str = "ring",
-) -> list[FlowTask]:
-    """为所有并行子组展开通信。"""
-    all_flows = []
+) -> tuple[FlowGroupResult, int]:
+    """为所有并行子组展开通信，同时增量构建 receiver_index。"""
+    result = FlowGroupResult.empty()
 
+    # 遍历所有并行子组
+    for ranks in self._iter_subgroups(context, grouper):
+        if len(ranks) >= 2:
+            flows = self._call_expander(base_type, ranks, comm_size, ...)
+            for flow in flows:
+                flow.phase = phase
+                result.add_flow(flow)  # 增量更新 receiver_index
+            task_id_counter += len(flows)
+
+    return result, task_id_counter
+
+def _iter_subgroups(
+    self, context: str, grouper: RankGrouper
+) -> Iterator[list[int]]:
+    """根据 context 遍历所有并行子组，yield 每个子组的 rank 列表。"""
     if context == "tp":
-        # 遍历所有 (pp_idx, dp_idx, ep_idx) 组合
         for pp_idx in range(grouper.pp):
             for dp_idx in range(grouper.dp):
                 for ep_idx in range(grouper.ep):
-                    ranks = grouper.get_tp_group(pp_idx, dp_idx, ep_idx)
-                    if len(ranks) >= 2:
-                        flows = self._call_expander(base_type, ranks, comm_size, ...)
-                        all_flows.extend(flows)
-                        task_id_counter += len(flows)
-
+                    yield grouper.get_tp_group(pp_idx, dp_idx, ep_idx)
     elif context == "dp":
         for pp_idx in range(grouper.pp):
             for ep_idx in range(grouper.ep):
                 for tp_idx in range(grouper.tp):
-                    ranks = grouper.get_dp_group(pp_idx, ep_idx, tp_idx)
-                    ...
-
+                    yield grouper.get_dp_group(pp_idx, ep_idx, tp_idx)
     elif context == "ep":
         for pp_idx in range(grouper.pp):
             for dp_idx in range(grouper.dp):
                 for tp_idx in range(grouper.tp):
-                    ranks = grouper.get_ep_group(pp_idx, dp_idx, tp_idx)
-                    ...
-
+                    yield grouper.get_ep_group(pp_idx, dp_idx, tp_idx)
     elif context == "dp_ep":
         for pp_idx in range(grouper.pp):
             for tp_idx in range(grouper.tp):
-                ranks = grouper.get_dp_ep_group(pp_idx, tp_idx)
-                ...
-
-    return all_flows
+                yield grouper.get_dp_ep_group(pp_idx, tp_idx)
 ```
 
 #### 3.2.4 Compute → Flow 连接（同一 phase 内）
 
-对于每个并行子组展开的 flows：
-- 每个 rank 的 compute task → 该 rank 在 flows 中的第一个 src flow
+对于每个 rank 的 compute task → 该 rank 的 **所有** 发送流（src flow）。
+
+rank 完成计算后才能开始发送数据，且一个 rank 可能同时发起多条独立的发送流（如 AlltoAll），
+因此必须将 compute 连接到该 rank 的所有 src flow，而非仅第一个。
 
 ```python
 def _wire_compute_to_flows(
     self,
-    computes: dict[int, FlowTask],   # rank → compute task
-    flows: list[FlowTask],            # expanded flows
+    computes: dict[int, FlowTask],        # rank → compute task
+    result: FlowGroupResult,               # 含 flows
 ):
-    """将 compute tasks 连接到对应 rank 的第一个 flow。"""
-    for rank, compute in computes.items():
-        # 找到该 rank 作为 src 的第一个 flow
-        for flow in flows:
-            if flow.src == rank:
-                flow.deps.append(compute.task_id)
-                break
+    """将每个 rank 的 compute task 连接到该 rank 的所有发送流（src flow）。"""
+    for flow in result.flows:
+        if flow.src in computes:
+            flow.deps.append(computes[flow.src].task_id)
 ```
+
+**为什么不只连接第一个 src flow**：
+
+以 AlltoAll 为例，rank 0 同时向 rank 1, 2, 3 发送 3 条独立 flow（无互相依赖）。
+若仅连接 `compute(0) → Flow(0→1)`，则 Flow(0→2) 和 Flow(0→3) 缺少 compute 依赖，
+理论上可在 compute 完成前开始发送。
+
+对于 Ring 模式，后续 src flow 已通过 ring 依赖链间接依赖了前面的 flow，
+多加一条 compute 边是冗余但无害的。统一使用"所有 src flow"简化了逻辑且对所有模式正确。
 
 ### 3.3 Phase 2：依赖关系连接
 
@@ -249,37 +289,42 @@ def _wire_dependencies(
         # --- 1. Forward chain (正序 0 → N-1) ---
         for i in range(num_layers - 1):
             self._wire_per_node_phase_transition(
-                ga_group[i].fwd_flows,       # src: 当前层的 fwd flows
-                ga_group[i+1].fwd_computes,  # dst: 下一层的 fwd computes
+                src_result=ga_group[i].fwd_result,           # 当前层的 fwd flows
+                src_computes=ga_group[i].fwd_computes,        # 当前层的 fwd computes（无通信时回退用）
+                dst_computes=ga_group[i+1].fwd_computes,      # 下一层的 fwd computes
             )
 
         # --- 2. Fwd→IG bridge (最后一层) ---
         last_layer = ga_group[num_layers - 1]
         self._wire_per_node_phase_transition(
-            last_layer.fwd_flows,
-            last_layer.ig_computes,
+            src_result=last_layer.fwd_result,
+            src_computes=last_layer.fwd_computes,
+            dst_computes=last_layer.ig_computes,
         )
 
         # --- 3. IG reverse chain (逆序 N-1 → 0) + WG same layer ---
         for i in range(num_layers - 1, -1, -1):
             # IG→WG same layer
             self._wire_per_node_phase_transition(
-                ga_group[i].ig_flows,
-                ga_group[i].wg_computes,
+                src_result=ga_group[i].ig_result,
+                src_computes=ga_group[i].ig_computes,
+                dst_computes=ga_group[i].wg_computes,
             )
             # IG→previous layer IG (reverse)
             if i > 0:
                 self._wire_per_node_phase_transition(
-                    ga_group[i].ig_flows,
-                    ga_group[i-1].ig_computes,
+                    src_result=ga_group[i].ig_result,
+                    src_computes=ga_group[i].ig_computes,
+                    dst_computes=ga_group[i-1].ig_computes,
                 )
 
         # --- 4. GA bridge ---
         if ga_idx < len(ga_groups) - 1:
             next_ga_group = ga_groups[ga_idx + 1]
             self._wire_per_node_phase_transition(
-                ga_group[0].wg_flows,           # 当前 GA 的最后一层 WG flows
-                next_ga_group[0].fwd_computes,   # 下一个 GA 的第一层 fwd computes
+                src_result=ga_group[0].wg_result,                # 当前 GA 第一层的 WG flows
+                src_computes=ga_group[0].wg_computes,
+                dst_computes=next_ga_group[0].fwd_computes,      # 下一个 GA 的第一层 fwd computes
             )
 ```
 
@@ -288,33 +333,51 @@ def _wire_dependencies(
 ```python
 def _wire_per_node_phase_transition(
     self,
-    src_flows: list[FlowTask],           # 源 phase 的 flows
-    dst_computes: dict[int, FlowTask],    # 目标 phase 的 computes (rank → task)
+    src_result: FlowGroupResult,             # 源 phase 的 flows + receiver_index
+    src_computes: dict[int, FlowTask],        # 源 phase 的 computes (可能为空)
+    dst_computes: dict[int, FlowTask],        # 目标 phase 的 computes (rank → task)
 ):
     """
-    为每个 rank 建立依赖：该 rank 在 src_flows 中最后参与的 flow → 该 rank 的 dst_compute。
+    为每个 rank 建立跨 phase 依赖。
 
-    "最后参与的 flow" = 该 rank 作为 src 或 dst 的 task_id 最大的 flow。
-    如果 src_flows 为空（无通信），则回退到 compute → compute。
+    规则：rank R 的 dst_compute 依赖 src_result 中 R 作为 receiver (dst) 的所有 flow。
+    原因：rank 只需等接收完数据即可开始计算，不需要等自己完成发送。
+
+    如果 src_result 为空（无通信），回退到 compute → compute 直连。
     """
-    for rank, dst_compute in dst_computes.items():
-        last_flow_id = self._find_last_flow_for_rank(src_flows, rank)
-        if last_flow_id is not None:
-            dst_compute.deps.append(last_flow_id)
+    if not src_result.flows:
+        # 无通信：直接 compute(R) → compute(R)
+        for rank, dst_compute in dst_computes.items():
+            if rank in src_computes:
+                dst_compute.deps.append(src_computes[rank].task_id)
+        return
 
-def _find_last_flow_for_rank(
-    self,
-    flows: list[FlowTask],
-    rank: int,
-) -> Optional[int]:
-    """找到该 rank 参与的最后一个 flow 的 task_id。"""
-    last_id = None
-    for flow in flows:
-        if flow.src == rank or flow.dst == rank:
-            if last_id is None or flow.task_id > last_id:
-                last_id = flow.task_id
-    return last_id
+    # 有通信：依赖该 rank 作为 receiver 的所有 flow
+    for rank, dst_compute in dst_computes.items():
+        received_ids = src_result.receiver_index.get(rank, [])
+        dst_compute.deps.extend(received_ids)
 ```
+
+**设计决策说明**：
+
+1. **为什么依赖所有 receiver flows 而非仅最后一个**：
+
+   以 2-rank Ring ALLREDUCE 为例（TP=2 常见场景）：
+   ```
+   Flow 0: 0→1, deps=[]        Flow 1: 1→0, deps=[]
+   Flow 2: 0→1, deps=[Flow 1]  Flow 3: 1→0, deps=[Flow 0]
+   ```
+   rank 0 作为 receiver 收到 Flow 1（chunk 0）和 Flow 3（chunk 1）。
+   若仅依赖 Flow 3（最后一个），其依赖链为 Flow 3 ← Flow 0，不经过 Flow 1。
+   Flow 3 完成时 Flow 1 可能尚未完成，rank 0 缺失 chunk 0 数据。
+
+   依赖所有 receiver flows 可以保证正确性。由于 ring 模式下每个 rank 的 receiver flows 数为 O(n)（n=组大小），依赖边数量可接受。
+
+2. **为什么是 receiver (dst) 而非 sender (src)**：
+
+   rank 的下一步计算只需要接收完其他 rank 发来的数据即可开始。
+   rank 自己的发送是为其他 rank 服务的，不需要等自己发完。
+   发送的完成由 ring 依赖链中的下一个 rank 的接收来保证。
 
 ### 3.4 Pre/Post layer items 的处理
 
@@ -327,17 +390,8 @@ Pre-layer items（`grad_gather`, `grad_param_comm` 等）和 Post-layer items（
 
 当某个 phase 的 comm 为 `NONE` 时：
 - 仍然创建 compute tasks（所有 rank）
-- 不展开 flows
-- 依赖直接从 compute → compute 连接
-
-```python
-# 如果没有通信，则 compute 就是该 phase 的最后一个 task
-if not flows:
-    # src_flows 为空，回退到使用 computes 作为 src
-    for rank, dst_compute in dst_computes.items():
-        if rank in src_computes:
-            dst_compute.deps.append(src_computes[rank].task_id)
-```
+- `FlowGroupResult` 为空（无 flows，receiver_index 为空 dict）
+- `_wire_per_node_phase_transition` 检测到 flows 为空后，自动回退到 compute(R) → compute(R) 直连
 
 ---
 
@@ -493,7 +547,7 @@ self._wire_dependencies(item_tasks_list, num_layer_items, num_pre_items, header)
 
 | 风险 | 缓解 |
 |------|------|
-| Per-node 依赖查找效率 | 使用 dict 追踪每个 rank 的 last_task_id，O(1) 查找 |
+| Per-node 依赖查找效率 | 使用 `FlowGroupResult.receiver_index` 在生成 flow 时增量维护，O(1)/flow，无后续扫描 |
 | 大规模 workload 任务数量膨胀 | 每个 rank 都有 compute task，TP=2 时 compute task 数翻倍。但这是正确模型，不可避免 |
 | 无通信 phase 的依赖回退 | 当 flows 为空时，直接用 computes 作为 src 进行 per-node 连接 |
 | Pre/Post items 不参与 Fwd/Bwd 逆序 | Pre items 按线性处理，输出馈入 GA 循环；Post items 接收 GA 循环输出 |
