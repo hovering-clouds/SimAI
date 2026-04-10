@@ -621,7 +621,13 @@ class WorkloadBuilder:
 
 1. **通信类型后缀直接决定分组**：使用 `AicbParser.parse_comm_type()` 解析后缀，直接映射到 RankGrouper 的对应方法。
 2. **PP 简化处理**：pp > 1 时，在 PP stage 间插入一个虚拟 compute task（duration = 估算传输延迟），不展开为 P2P flow。
-3. **依赖关系**：同一 item 内 compute → flow 串行；跨 item 按出现顺序串联。
+3. **依赖关系（简化模型）**：
+   - Forward 链：layer[i].fwd_flows.last → layer[i+1].fwd_compute
+   - Forward→Backward 桥接：layer[N-1].fwd_flows.last → layer[N-1].ig_compute
+   - Input Gradient 逆序链：layer[i].ig_flows.last → layer[i-1].ig_compute
+   - Weight Gradient 同层依赖：layer[i].ig_flows.last → layer[i].wg_compute
+   - **不要求严格的交错顺序**，只要保证上述依赖即可
+4. **按 layer 组织而非线性遍历**：builder 需要识别 layer boundaries，先分组 items by layer_id × ga_step，再按正确的依赖顺序生成 tasks。
 
 ---
 
