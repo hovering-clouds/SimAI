@@ -401,64 +401,121 @@ Pre-layer items（`grad_gather`, `grad_param_comm` 等）和 Post-layer items（
 
 TP groups: [0,1], [2,3]
 
-```
-Forward chain (正序):
+每个 TP group 内执行 Ring ALLREDUCE。以 TP group [0,1] 为例（2-rank Ring ALLREDUCE，2 steps × 2 flows = 4 flows）：
 
-  Layer 0:
-    rank 0: compute(fwd) ─┐
-    rank 1: compute(fwd) ─┤
-    rank 2: compute(fwd) ─┤
-    rank 3: compute(fwd) ─┘
-                           ↓
-    TP group [0,1]: ALLREDUCE flows
-    TP group [2,3]: ALLREDUCE flows
-                           ↓
-  Layer 1: (同上结构)
-    rank 0: compute(fwd) ← layer[0] flows 中 rank 0 参与的最后一个
-    rank 1: compute(fwd) ← layer[0] flows 中 rank 1 参与的最后一个
-    rank 2: compute(fwd) ← layer[0] flows 中 rank 2 参与的最后一个
-    rank 3: compute(fwd) ← layer[0] flows 中 rank 3 参与的最后一个
-    ...
-                           ↓
-  Layer 2:
-    rank 0-3: compute(fwd) → ALLREDUCE flows
-                           ↓
+```
+Flow 0: 0→1  (chunk 0, step 0)   deps=[]
+Flow 1: 1→0  (chunk 1, step 0)   deps=[]
+Flow 2: 0→1  (chunk 1, step 1)   deps=[Flow 1]   ← ring 依赖
+Flow 3: 1→0  (chunk 0, step 1)   deps=[Flow 0]   ← ring 依赖
+
+receiver_index:
+  rank 0: [Flow 1, Flow 3]   ← rank 0 作为 dst 的所有 flow
+  rank 1: [Flow 0, Flow 2]   ← rank 1 作为 dst 的所有 flow
+```
+
+#### Forward chain (正序)
+
+```
+Layer 0:
+  rank 0: compute(fwd) ─┬─→ Flow 0 (src=0)
+  rank 1: compute(fwd) ─┼─→ Flow 1 (src=1)
+                        │    Flow 2 (src=0, deps=[Flow 1])
+                        │    Flow 3 (src=1, deps=[Flow 0])
+                        │
+  rank 2,3: (TP group [2,3] 同理)
+                        ↓
+Layer 1:
+  rank 0: compute(fwd) ←── receiver_index[0] = [Flow 1, Flow 3]
+                           (依赖 rank 0 作为 receiver 的所有 flow)
+  rank 1: compute(fwd) ←── receiver_index[1] = [Flow 0, Flow 2]
+  rank 2: compute(fwd) ←── (TP group [2,3] 的 receiver flows)
+  rank 3: compute(fwd) ←── ...
+  ...
+                        ↓
+Layer 2:
+  rank 0-3: compute(fwd) → ALLREDUCE flows (同上结构)
+                        ↓
 Bridge (最后一层 fwd → 最后一层 ig):
   Layer 2:
-    rank 0: compute(ig) ← layer[2] fwd flows 中 rank 0 的最后 flow
-    rank 1: compute(ig) ← layer[2] fwd flows 中 rank 1 的最后 flow
+    rank 0: compute(ig) ←── receiver_index[0] from layer[2] fwd flows
+    rank 1: compute(ig) ←── receiver_index[1] from layer[2] fwd flows
     ...
-
-IG reverse chain (逆序):
-
-  Layer 2 → Layer 1:
-    rank 0: compute(ig, layer 1) ← layer[2] ig flows 中 rank 0 的最后 flow
-    rank 1: compute(ig, layer 1) ← layer[2] ig flows 中 rank 1 的最后 flow
-    ...
-
-  Layer 1 → Layer 0:
-    rank 0: compute(ig, layer 0) ← layer[1] ig flows 中 rank 0 的最后 flow
-    ...
-
-WG same layer (IG → WG, 与 IG reverse 并行):
-
-  Layer 2: rank 0: compute(wg) ← layer[2] ig flows 中 rank 0 的最后 flow
-  Layer 1: rank 0: compute(wg) ← layer[1] ig flows 中 rank 0 的最后 flow
-  Layer 0: rank 0: compute(wg) ← layer[0] ig flows 中 rank 0 的最后 flow
 ```
 
-### 4.2 DAG 依赖图（单 rank 视角）
+#### IG reverse chain (逆序) + WG same layer
 
 ```
-layer[0].fwd_compute(R) → layer[0].fwd_flows → layer[1].fwd_compute(R)
-  → layer[1].fwd_flows → layer[2].fwd_compute(R) → layer[2].fwd_flows
-  → layer[2].ig_compute(R) → layer[2].ig_flows ─┬→ layer[2].wg_compute(R)
-                                                  └→ layer[1].ig_compute(R)
-  → layer[1].ig_flows ─┬→ layer[1].wg_compute(R)
-                        └→ layer[0].ig_compute(R)
-  → layer[0].ig_flows ─┬→ layer[0].wg_compute(R)
-                        └→ (GA bridge to next step, or end)
+Layer 2:
+  rank 0: compute(ig) → ig_flows
+                        ↓
+  IG→WG (同层):
+    rank 0: compute(wg) ←── receiver_index[0] from layer[2] ig flows
+    rank 1: compute(wg) ←── receiver_index[1] from layer[2] ig flows
+  IG→previous layer (逆序):
+    Layer 1:
+      rank 0: compute(ig) ←── receiver_index[0] from layer[2] ig flows
+      rank 1: compute(ig) ←── receiver_index[1] from layer[2] ig flows
+
+Layer 1:
+  rank 0: compute(ig) → ig_flows
+                        ↓
+  IG→WG (同层):
+    rank 0: compute(wg) ←── receiver_index[0] from layer[1] ig flows
+  IG→previous layer (逆序):
+    Layer 0:
+      rank 0: compute(ig) ←── receiver_index[0] from layer[1] ig flows
+
+Layer 0:
+  rank 0: compute(ig) → ig_flows
+                        ↓
+  IG→WG (同层):
+    rank 0: compute(wg) ←── receiver_index[0] from layer[0] ig flows
+    rank 0: compute(wg) → wg_flows (WG 通信，non-blocking)
+                        ↓
+  GA bridge (如果有下一个 GA step):
+    next GA, Layer 0:
+      rank 0: compute(fwd) ←── receiver_index[0] from layer[0] wg flows
 ```
+
+#### 无通信场景
+
+当某层某 phase 的 comm 为 `NONE` 时，该 phase 无 flows，`FlowGroupResult` 为空。
+`_wire_per_node_phase_transition` 检测到后回退到 compute(R) → compute(R) 直连：
+
+```
+Layer 0 (fwd_comm=NONE):
+  rank 0: compute(fwd) ────→ rank 0: compute(ig)    ← 直连，无中间 flows
+  rank 1: compute(fwd) ────→ rank 1: compute(ig)
+```
+
+### 4.2 DAG 依赖图（单 rank R 视角）
+
+> **符号说明**：
+> - `compute(R) ══→ flow` 表示 compute 连接到该 rank 的**所有 src flows**（rank 作为 sender）
+> - `flow ══→ compute(R)` 表示该 rank 的**所有 receiver flows**（rank 作为 dst 的所有 flow）连接到下一个 compute
+> - `──→` 表示直连（无通信时的 compute→compute 回退）
+
+以 3 layers, GA=1, 所有 phase 都有通信为例：
+
+```
+layer[0].fwd_compute(R) ══→ layer[0].fwd_flows(R_src) ... layer[0].fwd_flows(R_dst) ══→ layer[1].fwd_compute(R)
+  layer[1].fwd_compute(R) ══→ layer[1].fwd_flows(R_src) ... layer[1].fwd_flows(R_dst) ══→ layer[2].fwd_compute(R)
+    layer[2].fwd_compute(R) ══→ layer[2].fwd_flows(R_src) ... layer[2].fwd_flows(R_dst) ══→ layer[2].ig_compute(R)
+      layer[2].ig_compute(R) ══→ layer[2].ig_flows(R_src) ... layer[2].ig_flows(R_dst) ─┬─→ layer[2].wg_compute(R)
+                                                                                          └─→ layer[1].ig_compute(R)
+        layer[1].ig_compute(R) ══→ layer[1].ig_flows(R_src) ... layer[1].ig_flows(R_dst) ─┬─→ layer[1].wg_compute(R)
+                                                                                             └─→ layer[0].ig_compute(R)
+          layer[0].ig_compute(R) ══→ layer[0].ig_flows(R_src) ... layer[0].ig_flows(R_dst) ─┬─→ layer[0].wg_compute(R)
+                                                                                               └─→ (no previous layer)
+            layer[0].wg_compute(R) ══→ layer[0].wg_flows(R_src) ... layer[0].wg_flows(R_dst) ══→ (GA bridge or end)
+```
+
+**关键观察**：
+1. 每条 `═══→` 连接中，sender 侧连接该 rank 的所有 src flows，receiver 侧连接该 rank 的所有 dst flows
+2. IG 产生的 flows 同时分叉到 WG（同层）和下一层 IG（逆序），形成 diamond dependency，允许 WG 与逆序 IG 并行
+3. WG 的 non-blocking 特性体现在：WG flows 不会阻塞逆序 IG 链，IG chain 只依赖 IG flows
+4. GA bridge 从 layer[0] 的 wg flows（或 wg computes，若无 WG 通信）连接到下一个 GA step 的 layer[0] fwd computes
 
 ---
 
@@ -553,8 +610,54 @@ self._wire_dependencies(item_tasks_list, num_layer_items, num_pre_items, header)
 | Pre/Post items 不参与 Fwd/Bwd 逆序 | Pre items 按线性处理，输出馈入 GA 循环；Post items 接收 GA 循环输出 |
 | GA 分组逻辑 | `(item_idx - num_pre_items) // vpp` 得到 ga_step，`% vpp` 得到 layer_idx_in_step |
 
+## 8. 后续优化：GA bridge WG/Fwd 重叠
+
+当前 GA bridge 是保守实现：`WG(0, GA=k) → fwd(0, GA=k+1)`，即下一个 GA step 的 forward pass 必须等待上一个 GA step 的 WG allreduce 完成后才启动。
+
+**数学分析**：在梯度累积中，forward pass 只读取模型权重，不涉及梯度缓冲区；权重在所有 GA steps 结束后才由 optimizer 更新。因此 `fwd(GA=k+1)` 不需要等 `WG(GA=k)` 完成。
+
+**理论上最优的依赖**：
+
+```
+当前实现（保守）:
+  WG(0, GA=k) 完成 → fwd(0, GA=k+1) 开始
+
+最优实现（WG 与 Fwd 重叠）:
+  IG(0, GA=k) 完成  → fwd(0, GA=k+1) 开始     ← backward chain 结束即可开始 forward
+  WG(GA=k) 完成     → IG(N-1, GA=k+1) 开始     ← 梯度缓冲区更新后才可开始下一轮 backward
+```
+
+**重叠效果示意**：
+
+```
+GA=k backward:  ... IG(0) → WG(0) ─── WG_comm(后台) ──────────┐
+GA=k+1 forward:          → fwd(0) → fwd(1) → ... → fwd(N-1)   │
+GA=k+1 backward:                                        ←──────┘ IG(N-1)
+```
+
+**实现方式**：将当前 `_wire_dependencies` 中的单一 GA bridge 拆分为两条依赖边：
+
+```python
+# 当前：
+self._wire_per_node_phase_transition(
+    ga_group[0].wg_result, ga_group[0].wg_computes,
+    next_ga_group[0].fwd_computes)
+
+# 改为：
+# 1. IG(0) → next fwd(0)（backward chain 完成即可开始 forward）
+self._wire_per_node_phase_transition(
+    ga_group[0].ig_result, ga_group[0].ig_computes,
+    next_ga_group[0].fwd_computes)
+# 2. WG → next IG(N-1)（梯度缓冲区更新后才可开始 backward）
+self._wire_per_node_phase_transition(
+    ga_group[0].wg_result, ga_group[0].wg_computes,
+    next_ga_group[-1].ig_computes)
+```
+
+**注意**：当前保守实现与 C++ 参考行为一致，作为基线是安全的。此优化应在对模拟精度有更高要求时实施，并需要验证与实际训练框架（Megatron/DeepSpeed）的行为是否一致。
+
 ---
 
 *创建时间：2026-04-10*
+*重构完成：2026-04-11*
 *参考实现：astra-sim Workload.cc / Layer.cc*
-*状态：待审查*

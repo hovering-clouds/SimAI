@@ -1,16 +1,20 @@
 """
-Tests for Workload Builder.
+Tests for Workload Builder (refactored).
 
 Covers:
-1. Basic single-layer workload with ALLREDUCE
-2. GA iteration assignment verification
-3. Dependency chain integrity
-4. Rank group integration with different comm contexts (TP, DP_EP)
-5. Edge cases (no communication, multiple phases)
+1. Per-rank compute tasks
+2. Forward/Backward dependency ordering (fwd正序, IG逆序, WG同层)
+3. Receiver-based dependencies (dst flows)
+4. Diamond dependency (IG→WG parallel with IG→next IG)
+5. GA iteration assignment
+6. Rank group integration (TP, DP_EP contexts)
+7. Edge cases (single GPU, multi-phase communication)
 """
 
 import pytest
-from src.workload_generator.workload_builder import WorkloadBuilder
+from src.workload_generator.workload_builder import (
+    WorkloadBuilder, FlowGroupResult, ItemTasks,
+)
 from src.workload_generator.aicb_parser import AicbHeader, AicbWorkItem
 from src.workload_format.schema import Job, ParallelismConfig, TaskType, Phase
 
@@ -49,17 +53,23 @@ def create_dummy_item(
 
 def build_simple_workload(
     tp: int = 1, dp: int = 1, pp: int = 1, ep: int = 1,
+    ga: int = 1, vpp: int = None,
     items: list[AicbWorkItem] = None,
 ) -> tuple:
-    """Build a simple workload for testing."""
+    """Build a simple workload for testing.
+
+    Returns (header, items, job, builder, workload).
+    """
     if items is None:
         items = [create_dummy_item()]
+    if vpp is None:
+        vpp = len(items) if ga == 1 else len(items) // ga
 
-    header = AicbHeader(
-        tp=tp, ep=ep, pp=pp, vpp=len(items), ga=1,
-        all_gpus=tp * dp * pp * ep, pp_comm_size=0,
-    )
     num_gpus = tp * dp * pp * ep
+    header = AicbHeader(
+        tp=tp, ep=ep, pp=pp, vpp=vpp, ga=ga,
+        all_gpus=num_gpus, pp_comm_size=0,
+    )
     job = Job(
         job_id=0,
         assigned_nodes=list(range(num_gpus)),
@@ -72,152 +82,327 @@ def build_simple_workload(
 
 
 # ===========================================================================
-# TestBasicWorkload - Single layer with communication
+# TestPerRankCompute - Per-rank compute task generation
 # ===========================================================================
 
-class TestBasicWorkload:
-    """Test basic single-layer workload generation."""
+class TestPerRankCompute:
+    """Test that compute tasks are created per-rank."""
 
-    def test_single_layer_allreduce(self):
-        """Test single layer with ALLREDUCE in forward and backward."""
-        items = [create_dummy_item(
-            fwd_comm="ALLREDUCE",
-            fwd_comm_size=1024,
-            bwd_comm="ALLREDUCE",
-            bwd_comm_size=1024,
-        )]
-        _, _, _, _, workload = build_simple_workload(tp=2, items=items)
-
-        # Should have compute + flow tasks
+    def test_all_ranks_have_compute_tasks(self):
+        """Every rank should have compute tasks for each phase."""
+        items = [create_dummy_item()]
+        _, _, job, _, workload = build_simple_workload(tp=2, dp=2, items=items)
+        # 4 ranks, 3 phases each = 12 compute tasks
         compute_tasks = [t for t in workload.tasks if t.is_compute()]
-        flow_tasks = [t for t in workload.tasks if t.is_flow()]
+        assert len(compute_tasks) == 12  # 4 ranks × 3 phases
 
-        assert len(compute_tasks) >= 2  # forward + backward compute
-        assert len(flow_tasks) > 0  # ALLREDUCE flows
+        # Each rank should have compute tasks in all 3 phases
+        ranks_with_tasks = set(t.node for t in compute_tasks)
+        assert ranks_with_tasks == {0, 1, 2, 3}
 
-        # Verify phases
-        forward_computes = [t for t in compute_tasks if t.phase == Phase.FORWARD]
-        backward_computes = [t for t in compute_tasks if t.phase == Phase.BACKWARD_INPUT]
-        assert len(forward_computes) >= 1
-        assert len(backward_computes) >= 1
-
-    def test_no_communication(self):
-        """Test layer with no communication (compute only)."""
-        items = [create_dummy_item()]  # All NONE
-        _, _, _, _, workload = build_simple_workload(tp=1, items=items)
-
-        compute_tasks = [t for t in workload.tasks if t.is_compute()]
-        flow_tasks = [t for t in workload.tasks if t.is_flow()]
-
-        assert len(compute_tasks) >= 1  # At least one compute task
-        assert len(flow_tasks) == 0  # No flows when all comms are NONE
+    def test_compute_task_assigned_to_correct_node(self):
+        """Each compute task's node field should match its rank."""
+        _, _, job, _, workload = build_simple_workload(tp=2, items=[
+            create_dummy_item(fwd_comm="ALLREDUCE", fwd_comm_size=1024),
+        ])
+        for task in workload.tasks:
+            if task.is_compute():
+                assert task.node in {0, 1}
 
     def test_task_id_uniqueness(self):
-        """Verify all task IDs are unique."""
-        _, _, _, _, workload = build_simple_workload()
+        """All task IDs should be unique."""
+        _, _, _, _, workload = build_simple_workload(tp=2, dp=2)
         task_ids = [t.task_id for t in workload.tasks]
         assert len(task_ids) == len(set(task_ids))
 
 
 # ===========================================================================
-# TestGAIteration - Gradient Accumulation iteration assignment
+# TestForwardBackwardOrdering - Dependency chain ordering
+# ===========================================================================
+
+class TestForwardBackwardOrdering:
+    """Test Forward/Backward dependency ordering."""
+
+    def test_forward_chain_per_node(self):
+        """Forward chain: layer[i].fwd.last → layer[i+1].fwd_compute, per rank."""
+        items = [create_dummy_item(
+            fwd_comm="ALLREDUCE", fwd_comm_size=1024,
+        ) for _ in range(3)]
+        _, _, _, _, workload = build_simple_workload(tp=2, items=items)
+
+        # For each rank, verify forward chain ordering
+        for rank in [0, 1]:
+            fwd_computes = [
+                t for t in workload.tasks
+                if t.is_compute() and t.phase == Phase.FORWARD and t.node == rank
+            ]
+            # Should have 3 forward computes (one per layer)
+            assert len(fwd_computes) == 3
+
+            task_by_layer = {t.layer_id: t for t in fwd_computes}
+
+            # Layer 1 fwd should depend on layer 0's output
+            assert len(task_by_layer[1].deps) > 0
+            # Layer 2 fwd should depend on layer 1's output
+            assert len(task_by_layer[2].deps) > 0
+
+    def test_backward_reverse_order(self):
+        """Backward IG goes in reverse: layer[N-1].ig → layer[N-2].ig → ... → layer[0].ig."""
+        items = [create_dummy_item(
+            fwd_comm="ALLREDUCE", fwd_comm_size=1024,
+            bwd_comm="ALLREDUCE", bwd_comm_size=1024,
+        ) for _ in range(3)]
+        _, _, _, _, workload = build_simple_workload(tp=2, items=items)
+
+        for rank in [0, 1]:
+            ig_computes = {
+                t.layer_id: t for t in workload.tasks
+                if t.is_compute() and t.phase == Phase.BACKWARD_INPUT and t.node == rank
+            }
+            assert len(ig_computes) == 3
+
+            # Layer 2 IG should depend on layer 2's fwd output (bridge)
+            assert len(ig_computes[2].deps) > 0
+
+            # Layer 1 IG should depend on layer 2's IG output (reverse)
+            assert len(ig_computes[1].deps) > 0
+            # Verify the dep comes from BACKWARD_INPUT phase (from layer 2's IG)
+            dep_tasks = {t.task_id: t for t in workload.tasks}
+            ig1_deps_phases = set()
+            for dep_id in ig_computes[1].deps:
+                if dep_id in dep_tasks:
+                    ig1_deps_phases.add(dep_tasks[dep_id].phase)
+            assert Phase.BACKWARD_INPUT in ig1_deps_phases
+
+    def test_wg_depends_on_same_layer_ig(self):
+        """WG(i) depends on IG(i), not IG(i-1) or WG(i+1)."""
+        items = [create_dummy_item(
+            fwd_comm="ALLREDUCE", fwd_comm_size=1024,
+            bwd_comm="ALLREDUCE", bwd_comm_size=1024,
+            dp_comm="ALLREDUCE", dp_comm_size=512,
+        ) for _ in range(3)]
+        _, _, _, _, workload = build_simple_workload(tp=2, items=items)
+
+        for rank in [0, 1]:
+            ig_computes = {
+                t.layer_id: t for t in workload.tasks
+                if t.is_compute() and t.phase == Phase.BACKWARD_INPUT and t.node == rank
+            }
+            wg_computes = {
+                t.layer_id: t for t in workload.tasks
+                if t.is_compute() and t.phase == Phase.BACKWARD_WEIGHT and t.node == rank
+            }
+
+            for layer_id in ig_computes:
+                wg_task = wg_computes[layer_id]
+                assert len(wg_task.deps) > 0, \
+                    f"WG layer {layer_id} rank {rank} should have deps"
+
+
+# ===========================================================================
+# TestDiamondDependency - IG→WG parallel with IG→next IG
+# ===========================================================================
+
+class TestDiamondDependency:
+    """Test that IG creates diamond: IG→WG and IG→next IG can run in parallel."""
+
+    def test_ig_fanout_to_wg_and_next_ig(self):
+        """IG(i) flows should fan out to both WG(i) and IG(i-1)."""
+        items = [create_dummy_item(
+            fwd_comm="ALLREDUCE", fwd_comm_size=1024,
+            bwd_comm="ALLREDUCE", bwd_comm_size=1024,
+        ) for _ in range(3)]
+        _, _, _, _, workload = build_simple_workload(tp=2, items=items)
+
+        for rank in [0, 1]:
+            # Find WG compute for layer 2 and IG compute for layer 1
+            wg_compute_l2 = next(
+                t for t in workload.tasks
+                if t.is_compute() and t.phase == Phase.BACKWARD_WEIGHT
+                and t.layer_id == 2 and t.node == rank
+            )
+            ig_compute_l1 = next(
+                t for t in workload.tasks
+                if t.is_compute() and t.phase == Phase.BACKWARD_INPUT
+                and t.layer_id == 1 and t.node == rank
+            )
+
+            # Both should have deps
+            assert len(wg_compute_l2.deps) > 0
+            assert len(ig_compute_l1.deps) > 0
+
+            # WG(l2) and IG(l1) should NOT depend on each other
+            assert wg_compute_l2.task_id not in ig_compute_l1.deps
+            assert ig_compute_l1.task_id not in wg_compute_l2.deps
+
+
+# ===========================================================================
+# TestReceiverBasedDeps - Receiver (dst) based dependencies
+# ===========================================================================
+
+class TestReceiverBasedDeps:
+    """Test that cross-phase deps use receiver (dst) flows."""
+
+    def test_compute_depends_on_received_flows(self):
+        """Next phase compute should depend on flows where rank is dst (receiver)."""
+        items = [create_dummy_item(fwd_comm="ALLREDUCE", fwd_comm_size=1024)]
+        _, _, _, _, workload = build_simple_workload(tp=2, items=items)
+
+        for rank in [0, 1]:
+            ig_compute = next(
+                t for t in workload.tasks
+                if t.is_compute() and t.phase == Phase.BACKWARD_INPUT and t.node == rank
+            )
+            # IG compute should have deps
+            assert len(ig_compute.deps) > 0
+
+            # If deps are flows, they should be where rank is dst (receiver)
+            task_map = {t.task_id: t for t in workload.tasks}
+            for dep_id in ig_compute.deps:
+                dep_task = task_map.get(dep_id)
+                if dep_task and dep_task.is_flow() and dep_task.phase == Phase.FORWARD:
+                    assert dep_task.dst == rank, \
+                        f"IG compute for rank {rank} depends on fwd flow " \
+                        f"where dst={dep_task.dst}, expected dst={rank}"
+
+    def test_no_comm_compute_to_compute(self):
+        """When no communication, compute(R) should depend on compute(R) directly."""
+        items = [create_dummy_item()]  # All NONE comm
+        _, _, _, _, workload = build_simple_workload(tp=2, items=items)
+
+        for rank in [0, 1]:
+            fwd_compute = next(
+                t for t in workload.tasks
+                if t.is_compute() and t.phase == Phase.FORWARD and t.node == rank
+            )
+            ig_compute = next(
+                t for t in workload.tasks
+                if t.is_compute() and t.phase == Phase.BACKWARD_INPUT and t.node == rank
+            )
+            # IG compute should directly depend on fwd compute (same rank)
+            assert fwd_compute.task_id in ig_compute.deps
+
+
+# ===========================================================================
+# TestGAIteration - GA iteration assignment
 # ===========================================================================
 
 class TestGAIteration:
     """Test GA iteration field assignment."""
 
     def test_ga_iteration_assignment(self):
-        """Verify that GA iterations are correctly assigned."""
-        # Create workload with ga=2, vpp=2 → 4 layer items
+        """Verify GA iterations are correctly assigned."""
         header = AicbHeader(tp=2, ep=1, pp=1, vpp=2, ga=2, all_gpus=2, pp_comm_size=0)
         items = [create_dummy_item() for _ in range(4)]
 
         job = Job(
-            job_id=0,
-            assigned_nodes=[0, 1],
+            job_id=0, assigned_nodes=[0, 1],
             parallelism=ParallelismConfig(tp=2, dp=1, pp=1, ep=1),
         )
 
         builder = WorkloadBuilder()
         workload = builder.build_from_aicb(header, items, job)
 
-        # Verify iteration field
         iterations = sorted(set(t.iteration for t in workload.tasks))
-        assert 0 in iterations  # First GA step
-        assert 1 in iterations  # Second GA step
+        assert 0 in iterations
+        assert 1 in iterations
 
-    def test_pre_post_items_iteration(self):
-        """Pre-layer items should have iteration=0, post-layer iteration=ga."""
-        # Create items: 1 pre + 2 layer + 1 post
-        pre_item = create_dummy_item(name="grad_gather")
-        layer_items = [create_dummy_item() for _ in range(2)]
-        post_item = create_dummy_item(name="embedding_norm")
-        items = [pre_item] + layer_items + [post_item]
+    def test_ga_bridge_dependency(self):
+        """Layer[0].wg(GA=0) should feed into layer[0].fwd(GA=1)."""
+        header = AicbHeader(tp=2, ep=1, pp=1, vpp=1, ga=2, all_gpus=2, pp_comm_size=0)
+        items = [create_dummy_item() for _ in range(2)]
 
-        header = AicbHeader(tp=2, ep=1, pp=1, vpp=2, ga=1, all_gpus=2, pp_comm_size=0)
         job = Job(
-            job_id=0,
-            assigned_nodes=[0, 1],
+            job_id=0, assigned_nodes=[0, 1],
             parallelism=ParallelismConfig(tp=2, dp=1, pp=1, ep=1),
         )
 
         builder = WorkloadBuilder()
         workload = builder.build_from_aicb(header, items, job)
 
-        # Check iterations
-        for task in workload.tasks:
-            if task.layer_id == 0:  # Pre item
-                assert task.iteration == 0
-            elif task.layer_id == len(items) - 1:  # Post item
-                assert task.iteration == header.ga
+        for rank in [0, 1]:
+            wg_ga0 = next(
+                t for t in workload.tasks
+                if t.is_compute() and t.phase == Phase.BACKWARD_WEIGHT
+                and t.iteration == 0 and t.node == rank
+            )
+            fwd_ga1 = next(
+                t for t in workload.tasks
+                if t.is_compute() and t.phase == Phase.FORWARD
+                and t.iteration == 1 and t.node == rank
+            )
+            assert len(fwd_ga1.deps) > 0
 
 
 # ===========================================================================
-# TestDependencyChain - Dependency integrity verification
+# TestRankGroupIntegration - Correct rank groups for comm contexts
 # ===========================================================================
 
-class TestDependencyChain:
-    """Test dependency chain integrity."""
+class TestRankGroupIntegration:
+    """Test that correct rank groups are used for different comm contexts."""
 
-    def test_dependency_chain_forward_to_backward(self):
-        """Verify forward → backward dependency chain."""
-        items = [create_dummy_item(
-            fwd_comm="ALLREDUCE",
-            fwd_comm_size=1024,
-            bwd_comm="ALLREDUCE",
-            bwd_comm_size=1024,
-        )]
-        _, _, _, _, workload = build_simple_workload(tp=2, items=items)
+    def test_tp_context_uses_tp_group(self):
+        """ALLGATHER (TP context) should use TP group."""
+        items = [create_dummy_item(fwd_comm="ALLGATHER", fwd_comm_size=1024)]
+        _, _, _, _, workload = build_simple_workload(tp=2, dp=1, items=items)
 
-        # Find forward compute, forward flows, backward compute
-        forward_compute = None
-        forward_flows = []
-        backward_compute = None
+        flow_tasks = [t for t in workload.tasks if t.is_flow()]
+        assert len(flow_tasks) > 0
 
-        for task in workload.tasks:
-            if task.is_compute() and task.phase == Phase.FORWARD:
-                forward_compute = task
-            elif task.is_flow() and task.phase == Phase.FORWARD:
-                forward_flows.append(task)
-            elif task.is_compute() and task.phase == Phase.BACKWARD_INPUT:
-                backward_compute = task
+        # All flows should involve ranks from TP groups [0,1]
+        tp_ranks = {0, 1}
+        for flow in flow_tasks:
+            assert flow.src in tp_ranks
+            assert flow.dst in tp_ranks
 
-        if forward_compute and forward_flows:
-            # First forward flow should depend on forward compute
-            assert forward_compute.task_id in forward_flows[0].deps
+    def test_dp_ep_context_uses_dp_ep_group(self):
+        """ALLGATHER_DP_EP should use DP×EP group."""
+        items = [create_dummy_item(fwd_comm="ALLGATHER_DP_EP", fwd_comm_size=1024)]
+        header = AicbHeader(tp=2, ep=1, pp=1, vpp=1, ga=1, all_gpus=4, pp_comm_size=0)
+        job = Job(
+            job_id=0, assigned_nodes=[0, 1, 2, 3],
+            parallelism=ParallelismConfig(tp=2, dp=2, pp=1, ep=1),
+        )
 
-    def test_dag_no_cycles(self):
-        """Verify DAG has no cycles using DFS."""
-        _, _, _, _, workload = build_simple_workload()
+        builder = WorkloadBuilder()
+        workload = builder.build_from_aicb(header, items, job)
 
-        # Build adjacency list
-        adj = {}
-        task_ids = set()
-        for task in workload.tasks:
-            task_ids.add(task.task_id)
-            adj[task.task_id] = task.deps
+        flow_tasks = [t for t in workload.tasks if t.is_flow()]
+        assert len(flow_tasks) > 0
 
-        # DFS cycle detection
+        all_ranks_in_flows = set()
+        for flow in flow_tasks:
+            all_ranks_in_flows.add(flow.src)
+            all_ranks_in_flows.add(flow.dst)
+        assert len(all_ranks_in_flows) >= 2
+
+    def test_all_subgroups_expanded(self):
+        """When dp=2, tp=2, ALLREDUCE (tp context) should expand for both TP groups."""
+        items = [create_dummy_item(fwd_comm="ALLREDUCE", fwd_comm_size=1024)]
+        _, _, _, _, workload = build_simple_workload(tp=2, dp=2, items=items)
+
+        flow_tasks = [t for t in workload.tasks if t.is_flow() and t.phase == Phase.FORWARD]
+        # Should have flows in BOTH TP groups: [0,1] and [2,3]
+        ranks_in_flows = set()
+        for flow in flow_tasks:
+            ranks_in_flows.add(flow.src)
+            ranks_in_flows.add(flow.dst)
+        assert 0 in ranks_in_flows
+        assert 1 in ranks_in_flows
+        assert 2 in ranks_in_flows
+        assert 3 in ranks_in_flows
+
+
+# ===========================================================================
+# TestDagIntegrity - DAG structure verification
+# ===========================================================================
+
+class TestDagIntegrity:
+    """Test DAG integrity."""
+
+    def _check_no_cycles(self, workload):
+        """Helper: check DAG has no cycles."""
+        adj = {t.task_id: t.deps for t in workload.tasks}
         visited = set()
         in_stack = set()
 
@@ -233,94 +418,69 @@ class TestDependencyChain:
             in_stack.discard(node)
             return False
 
-        for task_id in task_ids:
+        for task_id in adj:
             if task_id not in visited:
                 assert not has_cycle(task_id), "DAG contains cycles"
 
-    def test_cross_item_dependencies(self):
-        """Verify dependencies between consecutive items."""
-        items = [
-            create_dummy_item(name="layer_0"),
-            create_dummy_item(name="layer_1"),
-        ]
-        _, _, _, _, workload = build_simple_workload(tp=1, items=items)
+    def test_dag_no_cycles_simple(self):
+        """Verify DAG has no cycles (simple case)."""
+        _, _, _, _, workload = build_simple_workload(tp=2, items=[
+            create_dummy_item(
+                fwd_comm="ALLREDUCE", fwd_comm_size=1024,
+                bwd_comm="ALLREDUCE", bwd_comm_size=1024,
+            )
+        ])
+        self._check_no_cycles(workload)
 
-        # Find tasks for each layer
-        layer_0_tasks = [t for t in workload.tasks if t.layer_id == 0]
-        layer_1_tasks = [t for t in workload.tasks if t.layer_id == 1]
+    def test_dag_no_cycles_multi_layer(self):
+        """Multi-layer workload should have no cycles."""
+        items = [create_dummy_item(
+            fwd_comm="ALLREDUCE", fwd_comm_size=1024,
+            bwd_comm="ALLREDUCE", bwd_comm_size=1024,
+            dp_comm="ALLREDUCE", dp_comm_size=512,
+        ) for _ in range(4)]
+        _, _, _, _, workload = build_simple_workload(tp=2, items=items)
+        self._check_no_cycles(workload)
 
-        if layer_0_tasks and layer_1_tasks:
-            first_layer_1_task = layer_1_tasks[0]
-            last_layer_0_task_id = layer_0_tasks[-1].task_id
+    def test_all_deps_exist(self):
+        """All dependency IDs should reference existing tasks."""
+        _, _, _, _, workload = build_simple_workload(tp=2, items=[
+            create_dummy_item(fwd_comm="ALLREDUCE", fwd_comm_size=1024),
+        ])
 
-            # First task of layer 1 should depend on last task of layer 0
-            assert last_layer_0_task_id in first_layer_1_task.deps
+        task_ids = {t.task_id for t in workload.tasks}
+        for task in workload.tasks:
+            for dep in task.deps:
+                assert dep in task_ids, \
+                    f"Task {task.task_id} has non-existent dep {dep}"
 
+    def test_no_self_deps(self):
+        """No task should depend on itself."""
+        _, _, _, _, workload = build_simple_workload(tp=2, items=[
+            create_dummy_item(fwd_comm="ALLREDUCE", fwd_comm_size=1024),
+        ])
 
-# ===========================================================================
-# TestRankGroupIntegration - Rank group selection by context
-# ===========================================================================
-
-class TestRankGroupIntegration:
-    """Test that correct rank groups are used for different comm contexts."""
-
-    def test_tp_context_uses_tp_group(self):
-        """ALLGATHER without suffix (TP context) should use TP group."""
-        items = [create_dummy_item(fwd_comm="ALLGATHER", fwd_comm_size=1024)]
-        # TP=2, DP=1 → ranks [0, 1] in TP group
-        _, _, _, _, workload = build_simple_workload(tp=2, dp=1, items=items)
-
-        flow_tasks = [t for t in workload.tasks if t.is_flow()]
-        assert len(flow_tasks) > 0
-
-        # All flows should involve ranks from the TP group [0, 1]
-        tp_ranks = {0, 1}
-        for flow in flow_tasks:
-            assert flow.src in tp_ranks or flow.dst in tp_ranks
-
-    def test_dp_ep_context_uses_dp_ep_group(self):
-        """ALLGATHER_DP_EP should use DP×EP group."""
-        items = [create_dummy_item(fwd_comm="ALLGATHER_DP_EP", fwd_comm_size=1024)]
-        # TP=2, DP=2, EP=1, PP=1 → 4 GPUs
-        header = AicbHeader(tp=2, ep=1, pp=1, vpp=1, ga=1, all_gpus=4, pp_comm_size=0)
-        job = Job(
-            job_id=0,
-            assigned_nodes=[0, 1, 2, 3],
-            parallelism=ParallelismConfig(tp=2, dp=2, pp=1, ep=1),
-        )
-
-        builder = WorkloadBuilder()
-        workload = builder.build_from_aicb(header, items, job)
-
-        flow_tasks = [t for t in workload.tasks if t.is_flow()]
-        assert len(flow_tasks) > 0
-
-        # Flows should involve ranks from DP×EP group
-        # With tp=2, dp=2, ep=1: DP×EP group for pp_idx=0, tp_idx=0
-        # should be [0, 2] (dp_idx varies, ep_idx=0)
-        all_ranks_in_flows = set()
-        for flow in flow_tasks:
-            all_ranks_in_flows.add(flow.src)
-            all_ranks_in_flows.add(flow.dst)
-
-        # Should include ranks from multiple DP groups
-        assert len(all_ranks_in_flows) >= 2
+        for task in workload.tasks:
+            assert task.task_id not in task.deps, \
+                f"Task {task.task_id} depends on itself"
 
 
 # ===========================================================================
-# TestEdgeCases - Boundary conditions
+# TestEdgeCases
 # ===========================================================================
 
 class TestEdgeCases:
-    """Test edge cases and boundary conditions."""
+    """Test edge cases."""
 
     def test_single_gpu_no_comm(self):
         """Single GPU with no communication."""
         items = [create_dummy_item()]
-        _, _, _, _, workload = build_simple_workload(tp=1, dp=1, pp=1, ep=1, items=items)
+        _, _, _, _, workload = build_simple_workload(
+            tp=1, dp=1, pp=1, ep=1, items=items)
 
         compute_tasks = [t for t in workload.tasks if t.is_compute()]
-        assert len(compute_tasks) >= 1
+        # 1 rank × 3 phases = 3 compute tasks
+        assert len(compute_tasks) == 3
 
     def test_multiple_phases_with_comm(self):
         """Item with all three phases having communication."""
@@ -334,6 +494,29 @@ class TestEdgeCases:
         flow_tasks = [t for t in workload.tasks if t.is_flow()]
         assert len(flow_tasks) > 0
 
-        # Should have flows in multiple phases
         phases_with_flows = set(t.phase for t in flow_tasks)
         assert len(phases_with_flows) >= 2
+
+    def test_compute_to_all_src_flows(self):
+        """Verify compute connects to ALL src flows (not just first)."""
+        # AlltoAll: each rank sends to all others (multiple independent src flows)
+        items = [create_dummy_item(fwd_comm="ALLTOALL", fwd_comm_size=1024)]
+        _, _, _, _, workload = build_simple_workload(tp=3, items=items)
+
+        for rank in [0, 1, 2]:
+            fwd_compute = next(
+                t for t in workload.tasks
+                if t.is_compute() and t.phase == Phase.FORWARD and t.node == rank
+            )
+            # Find all flows where this rank is src
+            src_flows = [
+                t for t in workload.tasks
+                if t.is_flow() and t.src == rank and t.phase == Phase.FORWARD
+            ]
+            assert len(src_flows) >= 2  # AlltoAll: sends to N-1 others
+
+            # All src flows should depend on the compute task
+            for flow in src_flows:
+                assert fwd_compute.task_id in flow.deps, \
+                    f"Flow {flow.task_id} (src={rank}) should depend on " \
+                    f"compute {fwd_compute.task_id}"

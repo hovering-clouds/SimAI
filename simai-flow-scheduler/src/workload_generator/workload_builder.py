@@ -1,19 +1,21 @@
 """
 Workload Builder - Converts AICB workloads to P2P Workload format.
 
-This module orchestrates the conversion from AICB training workload format
-to P2P Workload IR by:
-1. Using RankGrouper to derive rank groups for communication operations
-2. Iterating through AICB work items and generating compute + flow tasks
-3. Building task dependency DAG (forward → backward → DP phases)
-4. Managing global task_id incrementing
+Two-phase generation approach:
+1. Phase 1: Generate all tasks (compute + flow) without cross-phase dependencies
+2. Phase 2: Wire dependencies per-node following Forward/Backward/WG ordering
 
-Key insight: AICB files already contain GA-expanded items.
-If ga=24 and vpp=80, there are 1920 layer items in the file.
-The builder does NOT need to loop over GA — it just assigns iteration IDs.
+Key design principles:
+- AICB files already contain GA-expanded items (outer=GA, inner=layers)
+- Compute tasks are per-rank (one per assigned node per phase)
+- Dependencies are per-node (each rank's chain is independent)
+- Forward goes layer 0→N-1, Backward (IG) goes N-1→0, WG same layer as IG
+- Cross-phase deps use receiver-based (dst) flows, not sender-based
 """
 
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Iterator
+
 from ..workload_format.schema import (
     P2PWorkload, Task, Job, Meta, Phase, TaskType, CommType
 )
@@ -26,21 +28,45 @@ from .collective_expander import (
 )
 
 
+@dataclass
+class FlowGroupResult:
+    """Result of expanding a collective communication into P2P flows.
+
+    receiver_index tracks which flows each rank receives (as dst),
+    incrementally maintained during flow generation for O(1) per-flow lookup.
+    """
+    flows: list[FlowTask]
+    receiver_index: dict[int, list[int]]  # rank → task_ids where rank is dst
+
+    @staticmethod
+    def empty() -> "FlowGroupResult":
+        return FlowGroupResult(flows=[], receiver_index={})
+
+    def add_flow(self, flow: FlowTask):
+        """Add a flow and update receiver index."""
+        self.flows.append(flow)
+        if flow.dst not in self.receiver_index:
+            self.receiver_index[flow.dst] = []
+        self.receiver_index[flow.dst].append(flow.task_id)
+
+
+@dataclass
+class ItemTasks:
+    """All tasks for one AICB work item, organized by phase.
+
+    Each *_computes dict maps rank → FlowTask (compute task for that rank).
+    Each *_result holds the expanded flows with receiver_index.
+    """
+    fwd_computes: dict[int, FlowTask] = field(default_factory=dict)
+    ig_computes: dict[int, FlowTask] = field(default_factory=dict)
+    wg_computes: dict[int, FlowTask] = field(default_factory=dict)
+    fwd_result: FlowGroupResult = field(default_factory=FlowGroupResult.empty)
+    ig_result: FlowGroupResult = field(default_factory=FlowGroupResult.empty)
+    wg_result: FlowGroupResult = field(default_factory=FlowGroupResult.empty)
+
+
 class WorkloadBuilder:
-    """
-    Convert AICB workload to P2P Workload.
-
-    Key insight: AICB file already contains GA-expanded items.
-    If ga=24 and vpp=80, there are 1920 layer items in the file.
-
-    Usage:
-        parser = AicbParser()
-        header, items = parser.parse("workload.txt")
-        job = Job(job_id=0, assigned_nodes=list(range(8)),
-                  parallelism=ParallelismConfig(tp=2, dp=2, pp=1, ep=1))
-        builder = WorkloadBuilder()
-        workload = builder.build_from_aicb(header, items, job)
-    """
+    """Convert AICB workload to P2P Workload using two-phase generation."""
 
     # Pre-layer item names (appear before GA loop)
     PRE_LAYER_NAMES = {
@@ -69,20 +95,15 @@ class WorkloadBuilder:
         job: Job,
         comm_algo: str = "ring",
     ) -> P2PWorkload:
-        """
-        Convert AICB workload to P2P Workload.
+        """Convert AICB workload to P2P Workload.
 
-        Algorithm:
-        1. Create RankGrouper from job.assigned_nodes + parallelism
-        2. Validate structure (pre/layer/post items, GA count)
-        3. Iterate through all aicb_items, generating tasks
-        4. Build dependency chains within and across items
-        5. Return complete P2PWorkload
+        Two-phase approach:
+        1. Generate all tasks (compute + flow) for all items
+        2. Wire dependencies following Forward/Backward/WG ordering
         """
-        # Step 1: Create RankGrouper
         grouper = RankGrouper(job.assigned_nodes, job.parallelism)
 
-        # Step 2: Validate structure
+        # Validate structure
         num_pre_items = self._count_pre_items(aicb_items)
         num_post_items = self._count_post_items(aicb_items)
         num_layer_items = len(aicb_items) - num_pre_items - num_post_items
@@ -90,231 +111,398 @@ class WorkloadBuilder:
         assert num_layer_items >= 0, \
             f"Invalid item count: {len(aicb_items)} total, " \
             f"{num_pre_items} pre, {num_post_items} post"
-        assert num_layer_items % aicb_header.ga == 0, \
-            f"Layer items ({num_layer_items}) not divisible by GA ({aicb_header.ga})"
-        assert num_layer_items // aicb_header.ga == aicb_header.vpp, \
-            f"Expected vpp={aicb_header.vpp}, got {num_layer_items // aicb_header.ga}"
+        if num_layer_items > 0:
+            assert num_layer_items % aicb_header.ga == 0, \
+                f"Layer items ({num_layer_items}) not divisible by GA ({aicb_header.ga})"
+            assert num_layer_items // aicb_header.ga == aicb_header.vpp, \
+                f"Expected vpp={aicb_header.vpp}, got {num_layer_items // aicb_header.ga}"
 
-        # Step 3: Initialize task collection
-        all_tasks: list[FlowTask] = []
+        # ===== Phase 1: Generate all tasks (no cross-phase deps) =====
+        all_flow_tasks: list[FlowTask] = []
+        item_tasks_list: list[ItemTasks] = []
         task_id_counter = 0
-        prev_last_task_id: Optional[int] = None
+        ranks = job.assigned_nodes
 
-        # Step 4: Iterate through all items
         for item_idx, item in enumerate(aicb_items):
-            # Calculate iteration and phase context
+            # Calculate iteration
             if item_idx < num_pre_items:
                 iteration = 0
-                is_pre_layer = True
-                is_post_layer = False
             elif item_idx >= num_pre_items + num_layer_items:
                 iteration = aicb_header.ga
-                is_pre_layer = False
-                is_post_layer = True
             else:
                 iteration = (item_idx - num_pre_items) // aicb_header.vpp
-                is_pre_layer = False
-                is_post_layer = False
 
             layer_id = item_idx
-
-            # Track first task ID of this item for cross-item dependency
-            first_task_of_item: Optional[int] = None
+            item_tasks = ItemTasks()
 
             # --- Forward phase ---
-            if item.forward_compute_time > 0:
-                compute_task = self._create_compute_task(
-                    task_id=task_id_counter,
-                    job_id=job.job_id,
-                    duration_us=item.forward_compute_time,
-                    node=job.assigned_nodes[0],
-                    phase=Phase.FORWARD,
-                    layer_id=layer_id,
-                    iteration=iteration,
-                )
-                if first_task_of_item is None:
-                    first_task_of_item = task_id_counter
-                all_tasks.append(compute_task)
-                task_id_counter += 1
-                last_compute_id = compute_task.task_id
+            item_tasks.fwd_computes, task_id_counter = \
+                self._create_compute_tasks_for_phase(
+                    ranks, item.forward_compute_time, Phase.FORWARD,
+                    layer_id, iteration, job.job_id, task_id_counter)
+            all_flow_tasks.extend(item_tasks.fwd_computes.values())
 
-                if item.forward_comm != "NONE":
-                    base_type, context = AicbParser.parse_comm_type(item.forward_comm)
-                    flows = self._expand_comm(
-                        base_type, context, item.forward_comm_size,
-                        grouper, pp_idx=0, dp_idx=0, ep_idx=0, tp_idx=0,
-                        phase=Phase.FORWARD, job_id=job.job_id,
-                        task_id_start=task_id_counter, algo=comm_algo,
-                    )
-                    # First flow depends on compute task
-                    if flows:
-                        flows[0].deps.append(last_compute_id)
-                    all_tasks.extend(flows)
-                    task_id_counter += len(flows)
+            if item.forward_comm != "NONE":
+                item_tasks.fwd_result, task_id_counter = \
+                    self._expand_comm_all_groups(
+                        item.forward_comm, item.forward_comm_size,
+                        grouper, Phase.FORWARD, job.job_id,
+                        task_id_counter, comm_algo)
+                all_flow_tasks.extend(item_tasks.fwd_result.flows)
+                self._wire_compute_to_flows(
+                    item_tasks.fwd_computes, item_tasks.fwd_result)
 
-            # --- Backward phase ---
-            if item.backward_compute_time > 0:
-                compute_task = self._create_compute_task(
-                    task_id=task_id_counter,
-                    job_id=job.job_id,
-                    duration_us=item.backward_compute_time,
-                    node=job.assigned_nodes[0],
-                    phase=Phase.BACKWARD_INPUT,
-                    layer_id=layer_id,
-                    iteration=iteration,
-                )
-                if first_task_of_item is None:
-                    first_task_of_item = task_id_counter
-                all_tasks.append(compute_task)
-                task_id_counter += 1
+            # --- Backward (IG) phase ---
+            item_tasks.ig_computes, task_id_counter = \
+                self._create_compute_tasks_for_phase(
+                    ranks, item.backward_compute_time, Phase.BACKWARD_INPUT,
+                    layer_id, iteration, job.job_id, task_id_counter)
+            all_flow_tasks.extend(item_tasks.ig_computes.values())
 
-                if item.backward_comm != "NONE":
-                    base_type, context = AicbParser.parse_comm_type(item.backward_comm)
-                    flows = self._expand_comm(
-                        base_type, context, item.backward_comm_size,
-                        grouper, pp_idx=0, dp_idx=0, ep_idx=0, tp_idx=0,
-                        phase=Phase.BACKWARD_INPUT, job_id=job.job_id,
-                        task_id_start=task_id_counter, algo=comm_algo,
-                    )
-                    if flows:
-                        flows[0].deps.append(compute_task.task_id)
-                    all_tasks.extend(flows)
-                    task_id_counter += len(flows)
+            if item.backward_comm != "NONE":
+                item_tasks.ig_result, task_id_counter = \
+                    self._expand_comm_all_groups(
+                        item.backward_comm, item.backward_comm_size,
+                        grouper, Phase.BACKWARD_INPUT, job.job_id,
+                        task_id_counter, comm_algo)
+                all_flow_tasks.extend(item_tasks.ig_result.flows)
+                self._wire_compute_to_flows(
+                    item_tasks.ig_computes, item_tasks.ig_result)
 
-            # --- DP phase ---
-            if item.dp_compute_time > 0:
-                compute_task = self._create_compute_task(
-                    task_id=task_id_counter,
-                    job_id=job.job_id,
-                    duration_us=item.dp_compute_time,
-                    node=job.assigned_nodes[0],
-                    phase=Phase.BACKWARD_WEIGHT,
-                    layer_id=layer_id,
-                    iteration=iteration,
-                )
-                if first_task_of_item is None:
-                    first_task_of_item = task_id_counter
-                all_tasks.append(compute_task)
-                task_id_counter += 1
+            # --- DP (WG) phase ---
+            item_tasks.wg_computes, task_id_counter = \
+                self._create_compute_tasks_for_phase(
+                    ranks, item.dp_compute_time, Phase.BACKWARD_WEIGHT,
+                    layer_id, iteration, job.job_id, task_id_counter)
+            all_flow_tasks.extend(item_tasks.wg_computes.values())
 
-                if item.dp_comm != "NONE":
-                    base_type, context = AicbParser.parse_comm_type(item.dp_comm)
-                    flows = self._expand_comm(
-                        base_type, context, item.dp_comm_size,
-                        grouper, pp_idx=0, dp_idx=0, ep_idx=0, tp_idx=0,
-                        phase=Phase.BACKWARD_WEIGHT, job_id=job.job_id,
-                        task_id_start=task_id_counter, algo=comm_algo,
-                    )
-                    if flows:
-                        flows[0].deps.append(compute_task.task_id)
-                    all_tasks.extend(flows)
-                    task_id_counter += len(flows)
+            if item.dp_comm != "NONE":
+                item_tasks.wg_result, task_id_counter = \
+                    self._expand_comm_all_groups(
+                        item.dp_comm, item.dp_comm_size,
+                        grouper, Phase.BACKWARD_WEIGHT, job.job_id,
+                        task_id_counter, comm_algo)
+                all_flow_tasks.extend(item_tasks.wg_result.flows)
+                self._wire_compute_to_flows(
+                    item_tasks.wg_computes, item_tasks.wg_result)
 
-            # Cross-item dependency: previous item's last task → current item's first task
-            if prev_last_task_id is not None and first_task_of_item is not None:
-                # Find the first task of current item and add dependency
-                for task in all_tasks:
-                    if task.task_id == first_task_of_item:
-                        task.deps.append(prev_last_task_id)
-                        break
+            item_tasks_list.append(item_tasks)
 
-            # Update prev_last_task_id
-            if all_tasks:
-                prev_last_task_id = all_tasks[-1].task_id
+        # ===== Phase 2: Wire dependencies =====
+        self._wire_dependencies(
+            item_tasks_list, num_layer_items, num_pre_items, aicb_header)
 
-        # Step 5: Build P2PWorkload
+        # Build P2PWorkload
         workload = P2PWorkload(
             version="1.0",
             meta=Meta(num_jobs=1, num_nodes=len(job.assigned_nodes)),
             jobs=[job],
-            tasks=[t.to_task() for t in all_tasks],
+            tasks=[t.to_task() for t in all_flow_tasks],
         )
         return workload
 
-    def _expand_comm(
+    # ------------------------------------------------------------------
+    # Phase 1 helpers: Task generation
+    # ------------------------------------------------------------------
+
+    def _create_compute_tasks_for_phase(
         self,
-        base_type: str,
-        context: str,
+        ranks: list[int],
+        duration_us: int,
+        phase: Phase,
+        layer_id: int,
+        iteration: int,
+        job_id: int,
+        task_id_counter: int,
+    ) -> tuple[dict[int, FlowTask], int]:
+        """Create a compute task for each rank.
+
+        Returns (rank→FlowTask dict, updated task_id_counter).
+        """
+        tasks: dict[int, FlowTask] = {}
+        for rank in ranks:
+            task = FlowTask(
+                task_id=task_id_counter,
+                job_id=job_id,
+                type=TaskType.COMPUTE,
+                node=rank,
+                duration_us=duration_us,
+                phase=phase,
+                layer_id=layer_id,
+                iteration=iteration,
+            )
+            tasks[rank] = task
+            task_id_counter += 1
+        return tasks, task_id_counter
+
+    def _expand_comm_all_groups(
+        self,
+        comm_type_str: str,
         comm_size: int,
         grouper: RankGrouper,
-        pp_idx: int, dp_idx: int, ep_idx: int, tp_idx: int,
         phase: Phase,
         job_id: int,
-        task_id_start: int,
+        task_id_counter: int,
         algo: str = "ring",
-    ) -> list[FlowTask]:
-        """
-        Expand a communication operation into P2P flows.
+    ) -> tuple[FlowGroupResult, int]:
+        """Expand communication for all parallel subgroups.
 
-        Context mapping to RankGrouper methods:
-        - "tp" → get_tp_group(pp_idx, dp_idx, ep_idx)
-        - "dp" → get_dp_group(pp_idx, ep_idx, tp_idx)
-        - "ep" → get_ep_group(pp_idx, dp_idx, tp_idx)
-        - "dp_ep" → get_dp_ep_group(pp_idx, tp_idx)
+        Iterates over all subgroups for the comm context (e.g. all TP groups),
+        expands each into P2P flows, and aggregates into a FlowGroupResult
+        with incrementally maintained receiver_index.
         """
-        # Select rank group based on context
+        base_type, context = AicbParser.parse_comm_type(comm_type_str)
+        result = FlowGroupResult.empty()
+
+        for subgroup in self._iter_subgroups(context, grouper):
+            if len(subgroup) >= 2:
+                flows = self._call_expander(
+                    base_type, subgroup, comm_size,
+                    job_id, task_id_counter, algo)
+                for flow in flows:
+                    flow.phase = phase
+                    result.add_flow(flow)
+                task_id_counter += len(flows)
+
+        return result, task_id_counter
+
+    def _iter_subgroups(
+        self, context: str, grouper: RankGrouper
+    ) -> Iterator[list[int]]:
+        """Yield all parallel subgroups for the given comm context."""
         if context == "tp":
-            ranks = grouper.get_tp_group(pp_idx, dp_idx, ep_idx)
+            for pp_idx in range(grouper.pp):
+                for dp_idx in range(grouper.dp):
+                    for ep_idx in range(grouper.ep):
+                        yield grouper.get_tp_group(pp_idx, dp_idx, ep_idx)
         elif context == "dp":
-            ranks = grouper.get_dp_group(pp_idx, ep_idx, tp_idx)
+            for pp_idx in range(grouper.pp):
+                for ep_idx in range(grouper.ep):
+                    for tp_idx in range(grouper.tp):
+                        yield grouper.get_dp_group(pp_idx, ep_idx, tp_idx)
         elif context == "ep":
-            ranks = grouper.get_ep_group(pp_idx, dp_idx, tp_idx)
+            for pp_idx in range(grouper.pp):
+                for dp_idx in range(grouper.dp):
+                    for tp_idx in range(grouper.tp):
+                        yield grouper.get_ep_group(pp_idx, dp_idx, tp_idx)
         elif context == "dp_ep":
-            ranks = grouper.get_dp_ep_group(pp_idx, tp_idx)
-        else:
-            raise ValueError(f"Unknown context: {context}")
+            for pp_idx in range(grouper.pp):
+                for tp_idx in range(grouper.tp):
+                    yield grouper.get_dp_ep_group(pp_idx, tp_idx)
 
-        # Call appropriate expander
+    def _call_expander(
+        self,
+        base_type: str,
+        ranks: list[int],
+        comm_size: int,
+        job_id: int,
+        task_id_start: int,
+        algo: str,
+    ) -> list[FlowTask]:
+        """Dispatch to the appropriate collective expander."""
         expander = self.expanders.get(base_type)
         if expander is None:
             raise ValueError(f"Unsupported comm type: {base_type}")
 
         if base_type == "ALLREDUCE":
-            flows = expander.expand_allreduce(
-                ranks, comm_size, algo, job_id, task_id_start
-            )
+            return expander.expand_allreduce(
+                ranks, comm_size, algo, job_id, task_id_start)
         elif base_type == "ALLGATHER":
-            flows = expander.expand_allgather(
-                ranks, comm_size, algo, job_id, task_id_start
-            )
+            return expander.expand_allgather(
+                ranks, comm_size, algo, job_id, task_id_start)
         elif base_type == "REDUCESCATTER":
-            flows = expander.expand_reducescatter(
-                ranks, comm_size, algo, job_id, task_id_start
-            )
+            return expander.expand_reducescatter(
+                ranks, comm_size, algo, job_id, task_id_start)
         elif base_type == "ALLTOALL":
-            flows = expander.expand_alltoall(
-                ranks, comm_size, job_id, task_id_start
-            )
+            return expander.expand_alltoall(
+                ranks, comm_size, job_id, task_id_start)
         else:
             raise ValueError(f"Unsupported base type: {base_type}")
 
-        # Set phase and iteration on all flows
-        for flow in flows:
-            flow.phase = phase
+    # ------------------------------------------------------------------
+    # Phase 2 helpers: Dependency wiring
+    # ------------------------------------------------------------------
 
-        return flows
-
-    def _create_compute_task(
+    def _wire_compute_to_flows(
         self,
-        task_id: int,
-        job_id: int,
-        duration_us: int,
-        node: int,
-        phase: Phase,
-        layer_id: int,
-        iteration: int,
-    ) -> FlowTask:
-        """Create a compute task."""
-        return FlowTask(
-            task_id=task_id,
-            job_id=job_id,
-            type=TaskType.COMPUTE,
-            node=node,
-            duration_us=duration_us,
-            phase=phase,
-            layer_id=layer_id,
-            iteration=iteration,
-        )
+        computes: dict[int, FlowTask],
+        result: FlowGroupResult,
+    ):
+        """Connect each rank's compute task to all its src (sender) flows.
+
+        rank R's compute must finish before R can start sending data.
+        A rank may have multiple independent src flows (e.g. AlltoAll),
+        so we connect to ALL of them.
+        """
+        for flow in result.flows:
+            if flow.src in computes:
+                flow.deps.append(computes[flow.src].task_id)
+
+    def _wire_per_node_phase_transition(
+        self,
+        src_result: FlowGroupResult,
+        src_computes: dict[int, FlowTask],
+        dst_computes: dict[int, FlowTask],
+    ):
+        """Wire per-node cross-phase dependencies.
+
+        If src has flows: dst_compute(R) depends on all flows where R is receiver (dst).
+        If src has no flows: fall back to compute(R) → compute(R) direct.
+        """
+        if not src_result.flows:
+            # No communication: direct compute(R) → compute(R)
+            for rank, dst_compute in dst_computes.items():
+                if rank in src_computes:
+                    dst_compute.deps.append(src_computes[rank].task_id)
+            return
+
+        # Has communication: depend on all receiver flows
+        for rank, dst_compute in dst_computes.items():
+            received_ids = src_result.receiver_index.get(rank, [])
+            dst_compute.deps.extend(received_ids)
+
+    def _wire_dependencies(
+        self,
+        item_tasks_list: list[ItemTasks],
+        num_layer_items: int,
+        num_pre_items: int,
+        header: AicbHeader,
+    ):
+        """Wire all dependencies following Forward/IG reverse/WG ordering.
+
+        GA group wiring:
+          Forward chain:  layer[0].fwd → layer[1].fwd → ... → layer[N-1].fwd
+          Bridge:         layer[N-1].fwd → layer[N-1].ig
+          IG reverse:     layer[N-1].ig → layer[N-2].ig → ... → layer[0].ig
+          WG same layer:  layer[i].ig → layer[i].wg (for each i)
+          GA bridge:      layer[0].wg(GA=k) → layer[0].fwd(GA=k+1)
+
+        Pre/post items are wired linearly (fwd→ig→wg within each item,
+        then chain across items).
+        """
+        vpp = header.vpp if num_layer_items > 0 else 1
+        ga_groups = self._group_items_by_ga(
+            item_tasks_list, num_pre_items, num_layer_items, vpp)
+        post_start = num_pre_items + num_layer_items
+
+        # --- Wire pre-items linearly ---
+        pre_items = item_tasks_list[:num_pre_items]
+        self._wire_linear_chain(pre_items)
+
+        # --- Wire GA groups ---
+        for ga_idx, ga_group in enumerate(ga_groups):
+            num_layers = len(ga_group)
+
+            # 1. Forward chain (正序 0 → N-1)
+            for i in range(num_layers - 1):
+                self._wire_per_node_phase_transition(
+                    src_result=ga_group[i].fwd_result,
+                    src_computes=ga_group[i].fwd_computes,
+                    dst_computes=ga_group[i + 1].fwd_computes)
+
+            # 2. Fwd→IG bridge (最后一层)
+            last_layer = ga_group[num_layers - 1]
+            self._wire_per_node_phase_transition(
+                src_result=last_layer.fwd_result,
+                src_computes=last_layer.fwd_computes,
+                dst_computes=last_layer.ig_computes)
+
+            # 3. IG reverse chain + WG same layer
+            for i in range(num_layers - 1, -1, -1):
+                # IG→WG same layer
+                self._wire_per_node_phase_transition(
+                    src_result=ga_group[i].ig_result,
+                    src_computes=ga_group[i].ig_computes,
+                    dst_computes=ga_group[i].wg_computes)
+                # IG→previous layer IG (reverse)
+                if i > 0:
+                    self._wire_per_node_phase_transition(
+                        src_result=ga_group[i].ig_result,
+                        src_computes=ga_group[i].ig_computes,
+                        dst_computes=ga_group[i - 1].ig_computes)
+
+            # 4. GA bridge
+            if ga_idx < len(ga_groups) - 1:
+                next_ga_group = ga_groups[ga_idx + 1]
+                self._wire_per_node_phase_transition(
+                    src_result=ga_group[0].wg_result,
+                    src_computes=ga_group[0].wg_computes,
+                    dst_computes=next_ga_group[0].fwd_computes)
+
+        # --- Wire post-items linearly ---
+        post_items = item_tasks_list[post_start:]
+        self._wire_linear_chain(post_items)
+
+        # --- Connect sections ---
+        # pre → GA
+        if pre_items and ga_groups:
+            self._wire_per_node_phase_transition(
+                src_result=pre_items[-1].wg_result,
+                src_computes=pre_items[-1].wg_computes,
+                dst_computes=ga_groups[0][0].fwd_computes)
+        elif pre_items and post_items:
+            # No GA groups, connect pre → post directly
+            self._wire_per_node_phase_transition(
+                src_result=pre_items[-1].wg_result,
+                src_computes=pre_items[-1].wg_computes,
+                dst_computes=post_items[0].fwd_computes)
+
+        # GA → post
+        if ga_groups and post_items:
+            self._wire_per_node_phase_transition(
+                src_result=ga_groups[-1][0].wg_result,
+                src_computes=ga_groups[-1][0].wg_computes,
+                dst_computes=post_items[0].fwd_computes)
+
+    def _wire_linear_chain(self, items: list[ItemTasks]):
+        """Wire a list of items as a linear chain (for pre/post items).
+
+        Within each item: fwd→ig→wg.
+        Between consecutive items: item[i-1].wg → item[i].fwd.
+        """
+        for i, item in enumerate(items):
+            # Wire internal phases: fwd→ig→wg
+            self._wire_per_node_phase_transition(
+                src_result=item.fwd_result,
+                src_computes=item.fwd_computes,
+                dst_computes=item.ig_computes)
+            self._wire_per_node_phase_transition(
+                src_result=item.ig_result,
+                src_computes=item.ig_computes,
+                dst_computes=item.wg_computes)
+            # Chain to next item
+            if i > 0:
+                self._wire_per_node_phase_transition(
+                    src_result=items[i - 1].wg_result,
+                    src_computes=items[i - 1].wg_computes,
+                    dst_computes=item.fwd_computes)
+
+    def _group_items_by_ga(
+        self,
+        item_tasks_list: list[ItemTasks],
+        num_pre_items: int,
+        num_layer_items: int,
+        vpp: int,
+    ) -> list[list[ItemTasks]]:
+        """Group layer items by GA step.
+
+        Items are in outer=GA, inner=layers order:
+          [pre...][GA0_L0, GA0_L1, ..., GA0_L(vpp-1), GA1_L0, ...][post...]
+        """
+        if num_layer_items == 0:
+            return []
+
+        num_ga_steps = num_layer_items // vpp
+        ga_groups = []
+        for g in range(num_ga_steps):
+            start = num_pre_items + g * vpp
+            ga_group = item_tasks_list[start:start + vpp]
+            ga_groups.append(ga_group)
+        return ga_groups
+
+    # ------------------------------------------------------------------
+    # Utility methods
+    # ------------------------------------------------------------------
 
     def _count_pre_items(self, items: list[AicbWorkItem]) -> int:
         """Count pre-layer items (grad_gather, etc.) at the start."""
@@ -323,7 +511,7 @@ class WorkloadBuilder:
             if item.name in self.PRE_LAYER_NAMES:
                 count += 1
             else:
-                break  # Stop at first non-pre-layer item
+                break
         return count
 
     def _count_post_items(self, items: list[AicbWorkItem]) -> int:
