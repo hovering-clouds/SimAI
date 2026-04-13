@@ -106,7 +106,9 @@ simai-flow-scheduler/
 │   ├── single_job/              # 单任务示例
 │   └── multi_job/               # 多任务示例
 ├── docs/
-│   └── WORKLOAD_FORMAT.md       # Workload 格式文档
+│   └── specs/                   # 架构与格式文档
+│       ├── WORKLOAD_FORMAT.md   # Workload 格式规范
+│       └── flow-scheduler-design.md  # 调度器设计文档
 ├── pyproject.toml
 ├── README.md
 └── LICENSE
@@ -147,6 +149,7 @@ simai-flow-scheduler/
       "iteration": 0,
       "phase": "forward",
       "layer_id": 0,
+      "item_id": 1,
       "type": "compute",
       "node": 2,
       "duration_us": 1500,
@@ -158,11 +161,12 @@ simai-flow-scheduler/
       "iteration": 0,
       "phase": "forward",
       "layer_id": 0,
+      "item_id": 1,
       "type": "flow",
       "src": 2,
       "dst": 3,
       "size_bytes": 134217728,
-      "comm_type": "TP_ALLREDUCE_RING",
+      "comm_type": "tp_allreduce_ring",
       "chunk_id": 0,
       "num_chunks": 8,
       "deps": [0]
@@ -173,11 +177,12 @@ simai-flow-scheduler/
       "iteration": 0,
       "phase": "forward",
       "layer_id": 0,
+      "item_id": 1,
       "type": "flow",
       "src": 3,
       "dst": 4,
       "size_bytes": 134217728,
-      "comm_type": "TP_ALLREDUCE_RING",
+      "comm_type": "tp_allreduce_ring",
       "chunk_id": 1,
       "num_chunks": 8,
       "deps": [1]
@@ -192,9 +197,10 @@ simai-flow-scheduler/
 |------|------|------|
 | `task_id` | int | 全局唯一任务 ID |
 | `job_id` | int | 所属任务 ID |
-| `iteration` | int | 训练迭代序号 |
+| `iteration` | int | GA 步骤索引（pre items: -1, layer items: 0..ga-1, post items: ga） |
 | `phase` | string | 阶段：`forward`, `backward_input`, `backward_weight`, `optimizer` |
-| `layer_id` | int | 模型层序号（-1 表示全局操作如 embedding/optimizer） |
+| `layer_id` | int | 迭代内的逻辑层索引 |
+| `item_id` | int | 全局 AICB workload item 索引（0-based，可选） |
 | `type` | string | 任务类型：`compute`（计算）或 `flow`（通信流） |
 | `node` | int | 计算任务所在节点 ID（仅 compute 类型） |
 | `src` | int | 流的源节点 ID（仅 flow 类型） |
@@ -206,12 +212,19 @@ simai-flow-scheduler/
 | `duration_us` | int | 计算任务预估耗时（微秒） |
 | `deps` | list[int] | 依赖任务 ID 列表，DAG 边 |
 
+**Scheduling hints**: `(iteration, layer_id, phase)` 三元组可用于复现 C++ 参考实现的执行顺序。调度器可以根据这些提示字段对任务进行排序，而不必依赖硬编码的跨 GA 依赖边。
+
+**Design principle**: `deps` 字段只包含真实的数据依赖。跨 GA 的执行顺序由调度器根据 scheduling hints 决定，允许灵活的调度策略（如 WG 通信与下一个 GA 的 forward 计算重叠）。
+
 ### 3.3 约束规则
 
 1. **DAG 完整性**：`deps` 中的所有 task_id 必须在同一文件中存在，且不能形成环
 2. **节点范围**：`node`, `src`, `dst` 的值必须在 `[0, num_nodes-1]` 范围内
 3. **Chunk 依赖**：同一 collective 展开的多个 chunk，chunk i 依赖于 chunk i-1（ring 的环依赖）
-4. **Phase 顺序**：同一 iteration 内，`forward` → `backward_input` → `backward_weight` → `optimizer` 顺序不能乱
+4. **Phase 顺序**：同一 iteration 内，`forward` → `backward_input` → `backward_weight` → `optimizer` 顺序由调度器根据 hints 决定
+5. **Scheduling field 一致性**：`iteration` 应遵循模式：pre items (-1), layer items (0 to ga-1), post items (ga)
+
+**注意**：跨 GA 的依赖（如 `GA[k].wg[0] → GA[k+1].fwd[0]`）**不**作为硬编码依赖边写入 `deps` 字段，而是由调度器根据 `(iteration, layer_id, phase)` 提示动态决定执行顺序。
 
 ---
 
