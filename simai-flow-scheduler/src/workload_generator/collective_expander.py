@@ -40,6 +40,7 @@ class FlowTask:
     iteration: int = 0
     phase: Phase = Phase.FORWARD
     layer_id: int = 0
+    item_id: int = 0
 
     def to_task(self) -> Task:
         """Convert FlowTask to Task object."""
@@ -50,6 +51,7 @@ class FlowTask:
             iteration=self.iteration,
             phase=self.phase,
             layer_id=self.layer_id,
+            item_id=self.item_id,
             node=self.node,
             duration_us=self.duration_us,
             src=self.src,

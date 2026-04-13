@@ -307,8 +307,13 @@ class TestGAIteration:
         assert 0 in iterations
         assert 1 in iterations
 
-    def test_ga_bridge_dependency(self):
-        """Layer[0].wg(GA=0) should feed into layer[0].fwd(GA=1)."""
+    def test_ga_bridge_no_hard_dependency(self):
+        """GA bridge is not a hard data dependency - scheduler can overlap.
+
+        The workload only contains true data dependencies (forward chain,
+        IG reverse chain, same-layer IG→WG). Cross-GA ordering is left to
+        the scheduler using (iteration, layer_id, phase) hints.
+        """
         header = AicbHeader(tp=2, ep=1, pp=1, vpp=1, ga=2, all_gpus=2, pp_comm_size=0)
         items = [create_dummy_item() for _ in range(2)]
 
@@ -320,6 +325,8 @@ class TestGAIteration:
         builder = WorkloadBuilder()
         workload = builder.build_from_aicb(header, items, job)
 
+        # Verify that GA[1].fwd does NOT depend on GA[0].wg
+        # (this is the intended design for Route C - flexible scheduling)
         for rank in [0, 1]:
             wg_ga0 = next(
                 t for t in workload.tasks
@@ -331,7 +338,8 @@ class TestGAIteration:
                 if t.is_compute() and t.phase == Phase.FORWARD
                 and t.iteration == 1 and t.node == rank
             )
-            assert len(fwd_ga1.deps) > 0
+            # No dependency: scheduler can use iteration/layer_id/phase hints
+            assert wg_ga0.task_id not in fwd_ga1.deps
 
 
 # ===========================================================================

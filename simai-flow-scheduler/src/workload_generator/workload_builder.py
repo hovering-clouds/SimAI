@@ -124,30 +124,36 @@ class WorkloadBuilder:
         ranks = job.assigned_nodes
 
         for item_idx, item in enumerate(aicb_items):
-            # Calculate iteration
+            # Calculate iteration and layer_id
             if item_idx < num_pre_items:
-                iteration = 0
+                # Pre items: iteration=-1, layer_id=sequential (0,1,2...)
+                iteration = -1
+                layer_id = item_idx
             elif item_idx >= num_pre_items + num_layer_items:
+                # Post items: iteration=ga, layer_id=sequential (0,1,2...)
                 iteration = aicb_header.ga
+                layer_id = item_idx - (num_pre_items + num_layer_items)
             else:
+                # Layer items: iteration=GA step, layer_id=layer within GA (0 to vpp-1)
                 iteration = (item_idx - num_pre_items) // aicb_header.vpp
+                layer_id = (item_idx - num_pre_items) % aicb_header.vpp
 
-            layer_id = item_idx
+            item_id = item_idx
             item_tasks = ItemTasks()
 
             # --- Forward phase ---
             item_tasks.fwd_computes, task_id_counter = \
                 self._create_compute_tasks_for_phase(
                     ranks, item.forward_compute_time, Phase.FORWARD,
-                    layer_id, iteration, job.job_id, task_id_counter)
+                    layer_id, iteration, item_id, job.job_id, task_id_counter)
             all_flow_tasks.extend(item_tasks.fwd_computes.values())
 
             if item.forward_comm != "NONE":
                 item_tasks.fwd_result, task_id_counter = \
                     self._expand_comm_all_groups(
                         item.forward_comm, item.forward_comm_size,
-                        grouper, Phase.FORWARD, job.job_id,
-                        task_id_counter, comm_algo)
+                        grouper, Phase.FORWARD, layer_id, iteration, item_id,
+                        job.job_id, task_id_counter, comm_algo)
                 all_flow_tasks.extend(item_tasks.fwd_result.flows)
                 self._wire_compute_to_flows(
                     item_tasks.fwd_computes, item_tasks.fwd_result)
@@ -156,15 +162,15 @@ class WorkloadBuilder:
             item_tasks.ig_computes, task_id_counter = \
                 self._create_compute_tasks_for_phase(
                     ranks, item.backward_compute_time, Phase.BACKWARD_INPUT,
-                    layer_id, iteration, job.job_id, task_id_counter)
+                    layer_id, iteration, item_id, job.job_id, task_id_counter)
             all_flow_tasks.extend(item_tasks.ig_computes.values())
 
             if item.backward_comm != "NONE":
                 item_tasks.ig_result, task_id_counter = \
                     self._expand_comm_all_groups(
                         item.backward_comm, item.backward_comm_size,
-                        grouper, Phase.BACKWARD_INPUT, job.job_id,
-                        task_id_counter, comm_algo)
+                        grouper, Phase.BACKWARD_INPUT, layer_id, iteration, item_id,
+                        job.job_id, task_id_counter, comm_algo)
                 all_flow_tasks.extend(item_tasks.ig_result.flows)
                 self._wire_compute_to_flows(
                     item_tasks.ig_computes, item_tasks.ig_result)
@@ -173,15 +179,15 @@ class WorkloadBuilder:
             item_tasks.wg_computes, task_id_counter = \
                 self._create_compute_tasks_for_phase(
                     ranks, item.dp_compute_time, Phase.BACKWARD_WEIGHT,
-                    layer_id, iteration, job.job_id, task_id_counter)
+                    layer_id, iteration, item_id, job.job_id, task_id_counter)
             all_flow_tasks.extend(item_tasks.wg_computes.values())
 
             if item.dp_comm != "NONE":
                 item_tasks.wg_result, task_id_counter = \
                     self._expand_comm_all_groups(
                         item.dp_comm, item.dp_comm_size,
-                        grouper, Phase.BACKWARD_WEIGHT, job.job_id,
-                        task_id_counter, comm_algo)
+                        grouper, Phase.BACKWARD_WEIGHT, layer_id, iteration, item_id,
+                        job.job_id, task_id_counter, comm_algo)
                 all_flow_tasks.extend(item_tasks.wg_result.flows)
                 self._wire_compute_to_flows(
                     item_tasks.wg_computes, item_tasks.wg_result)
@@ -212,6 +218,7 @@ class WorkloadBuilder:
         phase: Phase,
         layer_id: int,
         iteration: int,
+        item_id: int,
         job_id: int,
         task_id_counter: int,
     ) -> tuple[dict[int, FlowTask], int]:
@@ -230,6 +237,7 @@ class WorkloadBuilder:
                 phase=phase,
                 layer_id=layer_id,
                 iteration=iteration,
+                item_id=item_id,
             )
             tasks[rank] = task
             task_id_counter += 1
@@ -241,6 +249,9 @@ class WorkloadBuilder:
         comm_size: int,
         grouper: RankGrouper,
         phase: Phase,
+        layer_id: int,
+        iteration: int,
+        item_id: int,
         job_id: int,
         task_id_counter: int,
         algo: str = "ring",
@@ -261,6 +272,9 @@ class WorkloadBuilder:
                     job_id, task_id_counter, algo)
                 for flow in flows:
                     flow.phase = phase
+                    flow.layer_id = layer_id
+                    flow.iteration = iteration
+                    flow.item_id = item_id
                     result.add_flow(flow)
                 task_id_counter += len(flows)
 
@@ -421,13 +435,10 @@ class WorkloadBuilder:
                         src_computes=ga_group[i].ig_computes,
                         dst_computes=ga_group[i - 1].ig_computes)
 
-            # 4. GA bridge
-            if ga_idx < len(ga_groups) - 1:
-                next_ga_group = ga_groups[ga_idx + 1]
-                self._wire_per_node_phase_transition(
-                    src_result=ga_group[0].wg_result,
-                    src_computes=ga_group[0].wg_computes,
-                    dst_computes=next_ga_group[0].fwd_computes)
+            # 4. GA bridge removed - not a true data dependency
+            # Scheduler can use (iteration, layer_id, phase) hints to
+            # reproduce C++ order if needed, but we don't enforce it
+            # as a hard dependency, allowing WG/Fwd overlap optimizations.
 
         # --- Wire post-items linearly ---
         post_items = item_tasks_list[post_start:]

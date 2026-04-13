@@ -105,6 +105,15 @@ class Task:
     - dst: destination node rank
     - size_bytes: amount of data to transfer
     - chunk_id, num_chunks: for collective decomposition
+
+    Scheduling fields:
+    - iteration: GA step index for layer items (0 to ga-1)
+                 Pre items: -1, Post items: ga
+    - layer_id: Logical layer index within the iteration (0-based)
+                For pre/post items: sequential index (0, 1, 2...)
+    - item_id: AICB workload item index (global, 0-based)
+
+    Scheduler can use (iteration, layer_id, phase) for C++ order.
     """
     task_id: int
     job_id: int
@@ -112,6 +121,7 @@ class Task:
     iteration: int = 0
     phase: Phase = Phase.FORWARD
     layer_id: int = 0
+    item_id: int = 0
     deps: list[int] = field(default_factory=list)
 
     # Compute-specific fields
