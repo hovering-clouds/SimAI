@@ -1,0 +1,2740 @@
+{
+  "version": "1.0",
+  "meta": {
+    "num_jobs": 2,
+    "num_nodes": 8
+  },
+  "network": {
+    "topology_file": "topologies/spectrum-x-8g.json"
+  },
+  "jobs": [
+    {
+      "job_id": 0,
+      "assigned_nodes": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "name": "attention-model",
+      "model": "attention-test",
+      "parallelism": {
+        "tp": 2,
+        "dp": 2,
+        "pp": 1,
+        "ep": 1
+      }
+    },
+    {
+      "job_id": 1,
+      "assigned_nodes": [
+        4,
+        5,
+        6,
+        7
+      ],
+      "name": "embedding-model",
+      "model": "embedding-test",
+      "parallelism": {
+        "tp": 4,
+        "dp": 1,
+        "pp": 1,
+        "ep": 1
+      }
+    }
+  ],
+  "tasks": [
+    {
+      "task_id": 0,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [],
+      "node": 0,
+      "duration_us": 1000
+    },
+    {
+      "task_id": 1,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [],
+      "node": 1,
+      "duration_us": 1000
+    },
+    {
+      "task_id": 2,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [],
+      "node": 2,
+      "duration_us": 1000
+    },
+    {
+      "task_id": 3,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [],
+      "node": 3,
+      "duration_us": 1000
+    },
+    {
+      "task_id": 4,
+      "job_id": 0,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        0
+      ],
+      "src": 0,
+      "dst": 1,
+      "size_bytes": 67108864,
+      "comm_type": "tp_allgather_ring",
+      "chunk_id": 0,
+      "num_chunks": 1
+    },
+    {
+      "task_id": 5,
+      "job_id": 0,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        1
+      ],
+      "src": 1,
+      "dst": 0,
+      "size_bytes": 67108864,
+      "comm_type": "tp_allgather_ring",
+      "chunk_id": 0,
+      "num_chunks": 1
+    },
+    {
+      "task_id": 6,
+      "job_id": 0,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        2
+      ],
+      "src": 2,
+      "dst": 3,
+      "size_bytes": 67108864,
+      "comm_type": "tp_allgather_ring",
+      "chunk_id": 0,
+      "num_chunks": 1
+    },
+    {
+      "task_id": 7,
+      "job_id": 0,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        3
+      ],
+      "src": 3,
+      "dst": 2,
+      "size_bytes": 67108864,
+      "comm_type": "tp_allgather_ring",
+      "chunk_id": 0,
+      "num_chunks": 1
+    },
+    {
+      "task_id": 8,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        33
+      ],
+      "node": 0,
+      "duration_us": 2000
+    },
+    {
+      "task_id": 9,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        32
+      ],
+      "node": 1,
+      "duration_us": 2000
+    },
+    {
+      "task_id": 10,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        35
+      ],
+      "node": 2,
+      "duration_us": 2000
+    },
+    {
+      "task_id": 11,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        34
+      ],
+      "node": 3,
+      "duration_us": 2000
+    },
+    {
+      "task_id": 12,
+      "job_id": 0,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        8
+      ],
+      "src": 0,
+      "dst": 1,
+      "size_bytes": 67108864,
+      "comm_type": "tp_reducescatter_ring",
+      "chunk_id": 0,
+      "num_chunks": 1
+    },
+    {
+      "task_id": 13,
+      "job_id": 0,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        9
+      ],
+      "src": 1,
+      "dst": 0,
+      "size_bytes": 67108864,
+      "comm_type": "tp_reducescatter_ring",
+      "chunk_id": 0,
+      "num_chunks": 1
+    },
+    {
+      "task_id": 14,
+      "job_id": 0,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        10
+      ],
+      "src": 2,
+      "dst": 3,
+      "size_bytes": 67108864,
+      "comm_type": "tp_reducescatter_ring",
+      "chunk_id": 0,
+      "num_chunks": 1
+    },
+    {
+      "task_id": 15,
+      "job_id": 0,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        11
+      ],
+      "src": 3,
+      "dst": 2,
+      "size_bytes": 67108864,
+      "comm_type": "tp_reducescatter_ring",
+      "chunk_id": 0,
+      "num_chunks": 1
+    },
+    {
+      "task_id": 16,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_weight",
+      "layer_id": 0,
+      "deps": [
+        13
+      ],
+      "node": 0,
+      "duration_us": 500
+    },
+    {
+      "task_id": 17,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_weight",
+      "layer_id": 0,
+      "deps": [
+        12
+      ],
+      "node": 1,
+      "duration_us": 500
+    },
+    {
+      "task_id": 18,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_weight",
+      "layer_id": 0,
+      "deps": [
+        15
+      ],
+      "node": 2,
+      "duration_us": 500
+    },
+    {
+      "task_id": 19,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_weight",
+      "layer_id": 0,
+      "deps": [
+        14
+      ],
+      "node": 3,
+      "duration_us": 500
+    },
+    {
+      "task_id": 20,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        5
+      ],
+      "node": 0,
+      "duration_us": 1500
+    },
+    {
+      "task_id": 21,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        4
+      ],
+      "node": 1,
+      "duration_us": 1500
+    },
+    {
+      "task_id": 22,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        7
+      ],
+      "node": 2,
+      "duration_us": 1500
+    },
+    {
+      "task_id": 23,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        6
+      ],
+      "node": 3,
+      "duration_us": 1500
+    },
+    {
+      "task_id": 24,
+      "job_id": 0,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        20
+      ],
+      "src": 0,
+      "dst": 1,
+      "size_bytes": 67108864,
+      "comm_type": "tp_reducescatter_ring",
+      "chunk_id": 0,
+      "num_chunks": 1
+    },
+    {
+      "task_id": 25,
+      "job_id": 0,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        21
+      ],
+      "src": 1,
+      "dst": 0,
+      "size_bytes": 67108864,
+      "comm_type": "tp_reducescatter_ring",
+      "chunk_id": 0,
+      "num_chunks": 1
+    },
+    {
+      "task_id": 26,
+      "job_id": 0,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        22
+      ],
+      "src": 2,
+      "dst": 3,
+      "size_bytes": 67108864,
+      "comm_type": "tp_reducescatter_ring",
+      "chunk_id": 0,
+      "num_chunks": 1
+    },
+    {
+      "task_id": 27,
+      "job_id": 0,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        23
+      ],
+      "src": 3,
+      "dst": 2,
+      "size_bytes": 67108864,
+      "comm_type": "tp_reducescatter_ring",
+      "chunk_id": 0,
+      "num_chunks": 1
+    },
+    {
+      "task_id": 28,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        25
+      ],
+      "node": 0,
+      "duration_us": 2500
+    },
+    {
+      "task_id": 29,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        24
+      ],
+      "node": 1,
+      "duration_us": 2500
+    },
+    {
+      "task_id": 30,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        27
+      ],
+      "node": 2,
+      "duration_us": 2500
+    },
+    {
+      "task_id": 31,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        26
+      ],
+      "node": 3,
+      "duration_us": 2500
+    },
+    {
+      "task_id": 32,
+      "job_id": 0,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        28
+      ],
+      "src": 0,
+      "dst": 1,
+      "size_bytes": 67108864,
+      "comm_type": "tp_allgather_ring",
+      "chunk_id": 0,
+      "num_chunks": 1
+    },
+    {
+      "task_id": 33,
+      "job_id": 0,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        29
+      ],
+      "src": 1,
+      "dst": 0,
+      "size_bytes": 67108864,
+      "comm_type": "tp_allgather_ring",
+      "chunk_id": 0,
+      "num_chunks": 1
+    },
+    {
+      "task_id": 34,
+      "job_id": 0,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        30
+      ],
+      "src": 2,
+      "dst": 3,
+      "size_bytes": 67108864,
+      "comm_type": "tp_allgather_ring",
+      "chunk_id": 0,
+      "num_chunks": 1
+    },
+    {
+      "task_id": 35,
+      "job_id": 0,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        31
+      ],
+      "src": 3,
+      "dst": 2,
+      "size_bytes": 67108864,
+      "comm_type": "tp_allgather_ring",
+      "chunk_id": 0,
+      "num_chunks": 1
+    },
+    {
+      "task_id": 36,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_weight",
+      "layer_id": 1,
+      "deps": [
+        33
+      ],
+      "node": 0,
+      "duration_us": 600
+    },
+    {
+      "task_id": 37,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_weight",
+      "layer_id": 1,
+      "deps": [
+        32
+      ],
+      "node": 1,
+      "duration_us": 600
+    },
+    {
+      "task_id": 38,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_weight",
+      "layer_id": 1,
+      "deps": [
+        35
+      ],
+      "node": 2,
+      "duration_us": 600
+    },
+    {
+      "task_id": 39,
+      "job_id": 0,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_weight",
+      "layer_id": 1,
+      "deps": [
+        34
+      ],
+      "node": 3,
+      "duration_us": 600
+    },
+    {
+      "task_id": 40,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [],
+      "node": 4,
+      "duration_us": 800
+    },
+    {
+      "task_id": 41,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [],
+      "node": 5,
+      "duration_us": 800
+    },
+    {
+      "task_id": 42,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [],
+      "node": 6,
+      "duration_us": 800
+    },
+    {
+      "task_id": 43,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [],
+      "node": 7,
+      "duration_us": 800
+    },
+    {
+      "task_id": 44,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        40
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 45,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        41
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 46,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        42
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 47,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        43
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 48,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        47,
+        40
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 49,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        44,
+        41
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 50,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        45,
+        42
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 51,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        46,
+        43
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 52,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        51,
+        40
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 53,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        48,
+        41
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 54,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        49,
+        42
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 55,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        50,
+        43
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 56,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        55,
+        40
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 57,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        52,
+        41
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 58,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        53,
+        42
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 59,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        54,
+        43
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 60,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        59,
+        40
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 4,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 61,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        56,
+        41
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 4,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 62,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        57,
+        42
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 4,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 63,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        58,
+        43
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 4,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 64,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        63,
+        40
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 5,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 65,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        60,
+        41
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 5,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 66,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        61,
+        42
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 5,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 67,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 0,
+      "deps": [
+        62,
+        43
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 5,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 68,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        135,
+        139,
+        143,
+        147,
+        151,
+        155
+      ],
+      "node": 4,
+      "duration_us": 1200
+    },
+    {
+      "task_id": 69,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        132,
+        136,
+        140,
+        144,
+        148,
+        152
+      ],
+      "node": 5,
+      "duration_us": 1200
+    },
+    {
+      "task_id": 70,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        133,
+        137,
+        141,
+        145,
+        149,
+        153
+      ],
+      "node": 6,
+      "duration_us": 1200
+    },
+    {
+      "task_id": 71,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        134,
+        138,
+        142,
+        146,
+        150,
+        154
+      ],
+      "node": 7,
+      "duration_us": 1200
+    },
+    {
+      "task_id": 72,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        68
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 73,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        69
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 74,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        70
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 75,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        71
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 76,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        75,
+        68
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 77,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        72,
+        69
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 78,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        73,
+        70
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 79,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        74,
+        71
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 80,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        79,
+        68
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 81,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        76,
+        69
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 82,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        77,
+        70
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 83,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        78,
+        71
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 84,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        83,
+        68
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 85,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        80,
+        69
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 86,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        81,
+        70
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 87,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        82,
+        71
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 88,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        87,
+        68
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 4,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 89,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        84,
+        69
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 4,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 90,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        85,
+        70
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 4,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 91,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        86,
+        71
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 4,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 92,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        91,
+        68
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 5,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 93,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        88,
+        69
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 5,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 94,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        89,
+        70
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 5,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 95,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 0,
+      "deps": [
+        90,
+        71
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 5,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 96,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_weight",
+      "layer_id": 0,
+      "deps": [
+        75,
+        79,
+        83,
+        87,
+        91,
+        95
+      ],
+      "node": 4,
+      "duration_us": 400
+    },
+    {
+      "task_id": 97,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_weight",
+      "layer_id": 0,
+      "deps": [
+        72,
+        76,
+        80,
+        84,
+        88,
+        92
+      ],
+      "node": 5,
+      "duration_us": 400
+    },
+    {
+      "task_id": 98,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_weight",
+      "layer_id": 0,
+      "deps": [
+        73,
+        77,
+        81,
+        85,
+        89,
+        93
+      ],
+      "node": 6,
+      "duration_us": 400
+    },
+    {
+      "task_id": 99,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_weight",
+      "layer_id": 0,
+      "deps": [
+        74,
+        78,
+        82,
+        86,
+        90,
+        94
+      ],
+      "node": 7,
+      "duration_us": 400
+    },
+    {
+      "task_id": 100,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        47,
+        51,
+        55,
+        59,
+        63,
+        67
+      ],
+      "node": 4,
+      "duration_us": 900
+    },
+    {
+      "task_id": 101,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        44,
+        48,
+        52,
+        56,
+        60,
+        64
+      ],
+      "node": 5,
+      "duration_us": 900
+    },
+    {
+      "task_id": 102,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        45,
+        49,
+        53,
+        57,
+        61,
+        65
+      ],
+      "node": 6,
+      "duration_us": 900
+    },
+    {
+      "task_id": 103,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        46,
+        50,
+        54,
+        58,
+        62,
+        66
+      ],
+      "node": 7,
+      "duration_us": 900
+    },
+    {
+      "task_id": 104,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        100
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 105,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        101
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 106,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        102
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 107,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        103
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 108,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        107,
+        100
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 109,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        104,
+        101
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 110,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        105,
+        102
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 111,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        106,
+        103
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 112,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        111,
+        100
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 113,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        108,
+        101
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 114,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        109,
+        102
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 115,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        110,
+        103
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 116,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        115,
+        100
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 117,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        112,
+        101
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 118,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        113,
+        102
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 119,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        114,
+        103
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 120,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        119,
+        100
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 4,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 121,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        116,
+        101
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 4,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 122,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        117,
+        102
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 4,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 123,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        118,
+        103
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 4,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 124,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        123,
+        100
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 5,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 125,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        120,
+        101
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 5,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 126,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        121,
+        102
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 5,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 127,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "forward",
+      "layer_id": 1,
+      "deps": [
+        122,
+        103
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 5,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 128,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        107,
+        111,
+        115,
+        119,
+        123,
+        127
+      ],
+      "node": 4,
+      "duration_us": 1300
+    },
+    {
+      "task_id": 129,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        104,
+        108,
+        112,
+        116,
+        120,
+        124
+      ],
+      "node": 5,
+      "duration_us": 1300
+    },
+    {
+      "task_id": 130,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        105,
+        109,
+        113,
+        117,
+        121,
+        125
+      ],
+      "node": 6,
+      "duration_us": 1300
+    },
+    {
+      "task_id": 131,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        106,
+        110,
+        114,
+        118,
+        122,
+        126
+      ],
+      "node": 7,
+      "duration_us": 1300
+    },
+    {
+      "task_id": 132,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        128
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 133,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        129
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 134,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        130
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 135,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        131
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 0,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 136,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        135,
+        128
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 137,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        132,
+        129
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 138,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        133,
+        130
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 139,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        134,
+        131
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 1,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 140,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        139,
+        128
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 141,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        136,
+        129
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 142,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        137,
+        130
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 143,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        138,
+        131
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 2,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 144,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        143,
+        128
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 145,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        140,
+        129
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 146,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        141,
+        130
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 147,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        142,
+        131
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 3,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 148,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        147,
+        128
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 4,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 149,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        144,
+        129
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 4,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 150,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        145,
+        130
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 4,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 151,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        146,
+        131
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 4,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 152,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        151,
+        128
+      ],
+      "src": 4,
+      "dst": 5,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 5,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 153,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        148,
+        129
+      ],
+      "src": 5,
+      "dst": 6,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 5,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 154,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        149,
+        130
+      ],
+      "src": 6,
+      "dst": 7,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 5,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 155,
+      "job_id": 1,
+      "type": "flow",
+      "iteration": 0,
+      "phase": "backward_input",
+      "layer_id": 1,
+      "deps": [
+        150,
+        131
+      ],
+      "src": 7,
+      "dst": 4,
+      "size_bytes": 16777216,
+      "comm_type": "tp_allreduce_ring",
+      "chunk_id": 5,
+      "num_chunks": 6
+    },
+    {
+      "task_id": 156,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_weight",
+      "layer_id": 1,
+      "deps": [
+        135,
+        139,
+        143,
+        147,
+        151,
+        155
+      ],
+      "node": 4,
+      "duration_us": 450
+    },
+    {
+      "task_id": 157,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_weight",
+      "layer_id": 1,
+      "deps": [
+        132,
+        136,
+        140,
+        144,
+        148,
+        152
+      ],
+      "node": 5,
+      "duration_us": 450
+    },
+    {
+      "task_id": 158,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_weight",
+      "layer_id": 1,
+      "deps": [
+        133,
+        137,
+        141,
+        145,
+        149,
+        153
+      ],
+      "node": 6,
+      "duration_us": 450
+    },
+    {
+      "task_id": 159,
+      "job_id": 1,
+      "type": "compute",
+      "iteration": 0,
+      "phase": "backward_weight",
+      "layer_id": 1,
+      "deps": [
+        134,
+        138,
+        142,
+        146,
+        150,
+        154
+      ],
+      "node": 7,
+      "duration_us": 450
+    }
+  ]
+}
