@@ -23,6 +23,10 @@ from .contention_analysis import (
     LinkContentionGroup,
     find_contention_groups,
 )
+from .node_view import (
+    NodeLocalView,
+    build_node_views,
+)
 
 __all__ = [
     "TopologyLoader",
@@ -40,4 +44,6 @@ __all__ = [
     "analyze_cpm",
     "LinkContentionGroup",
     "find_contention_groups",
+    "NodeLocalView",
+    "build_node_views",
 ]
