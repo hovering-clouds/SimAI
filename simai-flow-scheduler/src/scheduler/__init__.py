@@ -19,6 +19,10 @@ from .critical_path import (
     analyze_critical_path,
     analyze_cpm,
 )
+from .contention_analysis import (
+    LinkContentionGroup,
+    find_contention_groups,
+)
 
 __all__ = [
     "TopologyLoader",
@@ -34,4 +38,6 @@ __all__ = [
     "CriticalPathStrategy",
     "analyze_critical_path",
     "analyze_cpm",
+    "LinkContentionGroup",
+    "find_contention_groups",
 ]
