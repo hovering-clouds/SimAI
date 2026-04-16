@@ -12,6 +12,11 @@ from .routing_hints import (
     bfs_shortest_path,
     RoutingStrategy,
 )
+from .critical_path import (
+    TaskTimingInfo,
+    CriticalPathInfo,
+    analyze_critical_path,
+)
 
 __all__ = [
     "TopologyLoader",
@@ -22,4 +27,7 @@ __all__ = [
     "compute_routing_hints",
     "bfs_shortest_path",
     "RoutingStrategy",
+    "TaskTimingInfo",
+    "CriticalPathInfo",
+    "analyze_critical_path",
 ]
