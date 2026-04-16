@@ -1534,26 +1534,24 @@ class NodeLocalView:
   
     # Estimated schedule (based on ASAP from critical path)
     estimated_send_times: list[tuple[int, int]] = field(default_factory=list)
-    # (start_time_us, task_id)
-  
+    # (start_time_us, task_id) — 发送方开始传输时刻 (earliest_start_us)
+
     estimated_receive_times: list[tuple[int, int]] = field(default_factory=list)
-  
-    # Bottleneck links for this node
-    busiest_outgoing_link: Optional[tuple[int, int]] = None
-    busiest_incoming_link: Optional[tuple[int, int]] = None
-  
-    # Estimated busy ratio (time spent communicating / total time)
-    estimated_busy_ratio: float = 0.0
+    # (arrival_time_us, task_id) — 接收方数据到达时刻 (earliest_finish_us)
+
+    # Estimated idle ratio (communication time / total active time)
+    # High value = node spends more time waiting on communication
+    estimated_idle_ratio: float = 0.0
   
     def add_send_flow(self, task_id: int, size_bytes: int, start_time: int):
         self.send_tasks.append(task_id)
         self.total_send_bytes += size_bytes
         self.estimated_send_times.append((start_time, task_id))
   
-    def add_receive_flow(self, task_id: int, size_bytes: int, start_time: int):
+    def add_receive_flow(self, task_id: int, size_bytes: int, arrival_time: int):
         self.receive_tasks.append(task_id)
         self.total_receive_bytes += size_bytes
-        self.estimated_receive_times.append((start_time, task_id))
+        self.estimated_receive_times.append((arrival_time, task_id))
 ```
 
 #### 4.2 算法
@@ -1571,15 +1569,16 @@ def build_node_views(
     2. Collect receive flows (where node is dst)
     3. Collect compute tasks (where node is node)
     4. Estimate schedule using ASAP times from critical path
+    5. Compute idle ratio (comm time / total active time)
     """
     views: dict[int, NodeLocalView] = {}
   
     # Initialize views for all nodes
     all_nodes = set()
     for task in workload.tasks:
-        if task.type.value == "compute" and task.node is not None:
+        if task.is_compute() and task.node is not None:
             all_nodes.add(task.node)
-        if task.type.value == "flow":
+        if task.is_flow():
             if task.src is not None:
                 all_nodes.add(task.src)
             if task.dst is not None:
@@ -1590,34 +1589,38 @@ def build_node_views(
   
     # Populate views
     for task in workload.tasks:
-        if task.type.value == "compute" and task.node is not None:
+        if task.is_compute() and task.node is not None:
             node_id = task.node
             views[node_id].compute_tasks.append(task.task_id)
             views[node_id].total_compute_time_us += task.duration_us or 0
       
-        elif task.type.value == "flow":
+        elif task.is_flow():
+            # Raises ValueError if task not in critical_path.task_timings
+            timing = critical_path.task_timings[task.task_id]
+            size_bytes = task.size_bytes or 0
+
             if task.src is not None:
                 views[task.src].add_send_flow(
-                    task.task_id,
-                    task.size_bytes or 0,
-                    critical_path.earliest_start_us.get(task.task_id, 0),
+                    task.task_id, size_bytes,
+                    timing.earliest_start_us,   # 发送方：开始传输时刻
                 )
             if task.dst is not None:
                 views[task.dst].add_receive_flow(
-                    task.task_id,
-                    task.size_bytes or 0,
-                    critical_path.earliest_start_us.get(task.task_id, 0),
+                    task.task_id, size_bytes,
+                    timing.earliest_finish_us,  # 接收方：数据到达时刻
                 )
   
-    # Compute busy ratios and bottleneck links
+    # Compute idle ratios using flow durations from critical path
     for node_id, view in views.items():
+        node_flow_ids = send_task_ids[node_id] | recv_task_ids[node_id]
         total_comm_time = sum(
-            t.size_bytes for t in workload.tasks
-            if t.task_id in view.send_tasks or t.task_id in view.receive_tasks
+            critical_path.task_timings[tid].earliest_finish_us
+            - critical_path.task_timings[tid].earliest_start_us
+            for tid in node_flow_ids
         )
         total_time = view.total_compute_time_us + total_comm_time
         if total_time > 0:
-            view.estimated_busy_ratio = total_comm_time / total_time
+            view.estimated_idle_ratio = total_comm_time / total_time
   
     return views
 ```
@@ -1627,11 +1630,17 @@ def build_node_views(
 **文件**: `tests/test_node_view.py`
 
 ```python
-def test_node_send_receive_counts():
-    """Verify send/receive task counts."""
-  
-def test_busy_ratio():
-    """Verify busy ratio calculation."""
+def test_send_time_is_earliest_start():
+    """Sender's estimated_send_times uses earliest_start_us."""
+
+def test_receive_time_is_earliest_finish():
+    """Receiver's estimated_receive_times uses earliest_finish_us."""
+
+def test_idle_ratio_mixed_node():
+    """Verify idle ratio for node with both compute and flow tasks."""
+
+def test_raises_on_missing_critical_path_timing():
+    """If a task is not in critical_path.task_timings, raise ValueError."""
 ```
 
 ---

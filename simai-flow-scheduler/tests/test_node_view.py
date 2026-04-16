@@ -7,7 +7,7 @@ and build_node_views integration with critical path analysis.
 
 import pytest
 
-from src.scheduler.critical_path import analyze_critical_path
+from src.scheduler.critical_path import analyze_critical_path, CriticalPathInfo, TaskTimingInfo
 from src.scheduler.node_view import NodeLocalView, build_node_views
 from src.scheduler.routing_hints import compute_routing_hints
 from src.scheduler.topology_loader import Link, NetworkTopology
@@ -84,7 +84,7 @@ class TestNodeLocalView:
 
     def test_add_receive_flow(self):
         v = NodeLocalView(node_id=0)
-        v.add_receive_flow(task_id=2, size_bytes=2000, start_time=20)
+        v.add_receive_flow(task_id=2, size_bytes=2000, arrival_time=20)
         assert v.receive_tasks == [2]
         assert v.total_receive_bytes == 2000
         assert v.estimated_receive_times == [(20, 2)]
@@ -105,9 +105,7 @@ class TestNodeLocalView:
         assert v.total_send_bytes == 0
         assert v.total_receive_bytes == 0
         assert v.total_compute_time_us == 0
-        assert v.estimated_busy_ratio == 0.0
-        assert v.busiest_outgoing_link is None
-        assert v.busiest_incoming_link is None
+        assert v.estimated_idle_ratio == 0.0
 
 
 # ============================================================
@@ -136,7 +134,7 @@ class TestBuildNodeViews:
         assert v.total_compute_time_us == 1000
         assert v.send_tasks == []
         assert v.receive_tasks == []
-        assert v.estimated_busy_ratio == 0.0  # no comm
+        assert v.estimated_idle_ratio == 0.0  # no comm
 
     def test_single_flow(self):
         topo = _make_star_topo()
@@ -166,24 +164,40 @@ class TestBuildNodeViews:
         assert v0.send_tasks == [0, 1]
         assert v0.total_send_bytes == 3000
 
-    def test_send_receive_times_from_critical_path(self):
-        """Estimated times come from critical path ASAP analysis."""
+    def test_send_time_is_earliest_start(self):
+        """Sender's estimated_send_times uses earliest_start_us."""
         topo = _make_star_topo()
         c0 = _make_compute(0, 500, node=0)
         f0 = _make_flow(1, src=0, dst=1, size_bytes=1024, deps=[0])
         wl = _make_workload([c0, f0])
         views = _analyze(wl, topo)
 
-        # Flow starts after compute finishes
+        # Flow starts after compute finishes at 500us
         v0 = views[0]
         assert len(v0.estimated_send_times) == 1
         assert v0.estimated_send_times[0] == (500, 1)  # starts at 500us
 
+    def test_receive_time_is_earliest_finish(self):
+        """Receiver's estimated_receive_times uses earliest_finish_us."""
+        topo = _make_star_topo()
+        c0 = _make_compute(0, 500, node=0)
+        f0 = _make_flow(1, src=0, dst=1, size_bytes=1024, deps=[0])
+        wl = _make_workload([c0, f0])
+
+        hints = compute_routing_hints(topo, wl)
+        cp = analyze_critical_path(wl, topo, hints)
+        views = build_node_views(wl, cp)
+
+        # Receiver gets data at flow finish time, not start time
         v1 = views[1]
         assert len(v1.estimated_receive_times) == 1
-        assert v1.estimated_receive_times[0][1] == 1  # task_id
+        recv_time, task_id = v1.estimated_receive_times[0]
+        assert task_id == 1
+        # receive_time should be earliest_finish_us, which > earliest_start_us
+        assert recv_time == cp.task_timings[1].earliest_finish_us
+        assert recv_time > cp.task_timings[1].earliest_start_us
 
-    def test_busy_ratio_mixed_node(self):
+    def test_idle_ratio_mixed_node(self):
         """Node with both compute and flow tasks."""
         topo = _make_star_topo()
         c0 = _make_compute(0, 1000, node=0)
@@ -195,11 +209,11 @@ class TestBuildNodeViews:
         assert v0.compute_tasks == [0]
         assert v0.total_compute_time_us == 1000
         assert v0.send_tasks == [1]
-        # busy_ratio = comm_time / (compute_time + comm_time)
-        assert 0.0 < v0.estimated_busy_ratio < 1.0
+        # idle_ratio = comm_time / (compute_time + comm_time)
+        assert 0.0 < v0.estimated_idle_ratio < 1.0
 
-    def test_busy_ratio_flow_only_node(self):
-        """Node with only flow tasks has busy_ratio == 1.0."""
+    def test_idle_ratio_flow_only_node(self):
+        """Node with only flow tasks has idle_ratio == 1.0."""
         topo = _make_star_topo()
         f0 = _make_flow(0, src=1, dst=2, size_bytes=1024)
         wl = _make_workload([f0])
@@ -209,16 +223,16 @@ class TestBuildNodeViews:
         assert v1.compute_tasks == []
         assert v1.total_compute_time_us == 0
         assert v1.send_tasks == [0]
-        assert v1.estimated_busy_ratio == 1.0  # all time is comm
+        assert v1.estimated_idle_ratio == 1.0  # all time is comm (idle)
 
-    def test_busy_ratio_compute_only_node(self):
-        """Node with only compute tasks has busy_ratio == 0.0."""
+    def test_idle_ratio_compute_only_node(self):
+        """Node with only compute tasks has idle_ratio == 0.0."""
         topo = _make_star_topo()
         c0 = _make_compute(0, 500, node=0)
         wl = _make_workload([c0])
         views = _analyze(wl, topo)
 
-        assert views[0].estimated_busy_ratio == 0.0
+        assert views[0].estimated_idle_ratio == 0.0
 
     def test_node_collects_all_task_types(self):
         """A node can have compute, send, and receive tasks simultaneously."""
@@ -234,14 +248,6 @@ class TestBuildNodeViews:
         assert 1 in v0.send_tasks
         assert 2 in v0.receive_tasks
 
-    def test_skips_tasks_without_node_info(self):
-        """Flow with None src/dst doesn't crash."""
-        topo = _make_star_topo()
-        f0 = _make_flow(0, src=0, dst=1, size_bytes=100)
-        wl = _make_workload([f0])
-        views = _analyze(wl, topo)
-        assert len(views) >= 2
-
     def test_different_nodes_independent(self):
         """Tasks on different nodes are correctly separated."""
         topo = _make_star_topo()
@@ -254,3 +260,20 @@ class TestBuildNodeViews:
         assert views[0].total_compute_time_us == 100
         assert views[1].compute_tasks == [1]
         assert views[1].total_compute_time_us == 200
+
+    def test_raises_on_missing_critical_path_timing(self):
+        """If a task is not in critical_path.task_timings, raise ValueError."""
+        topo = _make_star_topo()
+        f0 = _make_flow(0, src=0, dst=1, size_bytes=1024)
+        wl = _make_workload([f0])
+
+        # Create an empty CriticalPathInfo (missing timing for task 0)
+        empty_cp = CriticalPathInfo(
+            task_timings={},
+            critical_tasks=[],
+            makespan_us=0,
+            analysis_method="cpm",
+        )
+
+        with pytest.raises(ValueError, match="not found in critical_path"):
+            build_node_views(wl, empty_cp)
