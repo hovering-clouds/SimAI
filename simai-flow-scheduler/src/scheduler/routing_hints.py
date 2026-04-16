@@ -5,15 +5,33 @@ Computes BFS shortest paths for all flow (src, dst) pairs in the workload,
 caches them for reuse by critical path analysis (Task 2) and contention
 analysis (Task 3). Also aggregates per-link flow counts for hotspot detection.
 
+Supports custom routing strategies for flexibility (e.g., bandwidth-aware,
+latency-aware, ECMP). Default strategy is BFS by hop count.
+
 Memory:  O(P * L) where P = unique (src, dst) pairs, L = avg path length
 Compute: O(F * (V+E)) where F = num flow tasks, V = topology nodes, E = links
 """
 
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Callable
 
 from ..workload_format.schema import P2PWorkload, Task, TaskType
 from .topology_loader import NetworkTopology
+
+# Type alias for routing strategy functions
+RoutingStrategy = Callable[[NetworkTopology, int, int], list[int] | None]
+"""
+Routing strategy function signature.
+
+Args:
+    topology: Network topology graph
+    src: Source node ID
+    dst: Destination node ID
+
+Returns:
+    Path as list of node IDs [src, hop1, ..., dst], or None if no path exists
+"""
 
 
 @dataclass
@@ -25,10 +43,14 @@ class RoutingHints:
     - _cached_paths stores node-level paths [src, hop1, hop2, ..., dst]
     - When needed, convert path → links on demand
     - link_loads aggregates statistics for quick contention analysis
+    - routing_strategy allows custom routing algorithms (default: BFS)
 
     Computed eagerly in Phase 3 Task 1 so that Task 2 (critical path)
     can use accurate multi-hop duration estimates.
     """
+
+    # Routing strategy function (default: BFS shortest path)
+    routing_strategy: RoutingStrategy = field(default=None, repr=False)
 
     # Shortest paths between actual (src, dst) pairs in the workload
     # Computed eagerly during initialization
@@ -40,16 +62,21 @@ class RoutingHints:
     # link_id → number of flows using this link
     link_loads: dict[tuple[int, int], int] = field(default_factory=dict)
 
+    def __post_init__(self):
+        """Set default routing strategy if not provided."""
+        if self.routing_strategy is None:
+            self.routing_strategy = bfs_shortest_path
+
     def get_path(self, topology: NetworkTopology, src: int, dst: int) -> list[int]:
         """
-        Path lookup: compute via BFS on first access, cache for reuse.
+        Path lookup: compute via routing strategy on first access, cache for reuse.
 
         Raises:
             ValueError: If no path exists between src and dst (indicates topology issue)
         """
         key = (src, dst)
         if key not in self._cached_paths:
-            path = _bfs_shortest_path(topology, src, dst)
+            path = self.routing_strategy(topology, src, dst)
             if path is None:
                 raise ValueError(
                     f"No path found from node {src} to node {dst}. "
@@ -86,19 +113,28 @@ class RoutingHints:
 def compute_routing_hints(
     topology: NetworkTopology,
     workload: P2PWorkload,
+    routing_strategy: RoutingStrategy | None = None,
 ) -> RoutingHints:
     """
     Compute routing hints by finding shortest paths for all flows.
 
+    Args:
+        topology: Network topology graph
+        workload: P2P workload with flow tasks
+        routing_strategy: Custom routing function. If None, uses BFS shortest path.
+
     Steps:
-    1. For each flow task, find shortest path via BFS
+    1. For each flow task, find shortest path via routing strategy
     2. Cache the path for later use by critical path analysis
     3. Aggregate link_loads for quick hotspot detection
 
     Memory: O(P * L) where P = unique (src,dst) pairs, L = avg path length
-    Compute: O(F * (V+E)) - BFS for each flow task
+    Compute: O(F * (V+E)) - routing strategy for each flow task
     """
-    hints = RoutingHints()
+    if routing_strategy is None:
+        routing_strategy = bfs_shortest_path
+
+    hints = RoutingHints(routing_strategy=routing_strategy)
 
     # Process each flow task
     for task in workload.tasks:
@@ -118,12 +154,22 @@ def compute_routing_hints(
     return hints
 
 
-def _bfs_shortest_path(
+def bfs_shortest_path(
     topology: NetworkTopology,
     src: int,
     dst: int,
 ) -> list[int] | None:
-    """BFS to find shortest path (by hop count) from src to dst."""
+    """
+    BFS shortest path by hop count (default routing strategy).
+
+    Args:
+        topology: Network topology graph
+        src: Source node ID
+        dst: Destination node ID
+
+    Returns:
+        Path as list of node IDs, or None if no path exists
+    """
     if src == dst:
         return [src]
 

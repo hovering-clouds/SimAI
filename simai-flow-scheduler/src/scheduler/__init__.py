@@ -6,7 +6,12 @@ link contention analysis, and unified workload analysis.
 """
 
 from .topology_loader import TopologyLoader, NetworkTopology, Link, NodeType
-from .routing_hints import RoutingHints, compute_routing_hints
+from .routing_hints import (
+    RoutingHints,
+    compute_routing_hints,
+    bfs_shortest_path,
+    RoutingStrategy,
+)
 
 __all__ = [
     "TopologyLoader",
@@ -15,4 +20,6 @@ __all__ = [
     "NodeType",
     "RoutingHints",
     "compute_routing_hints",
+    "bfs_shortest_path",
+    "RoutingStrategy",
 ]

@@ -9,7 +9,7 @@ import os
 
 import pytest
 
-from src.scheduler.routing_hints import RoutingHints, compute_routing_hints, _bfs_shortest_path
+from src.scheduler.routing_hints import RoutingHints, compute_routing_hints, bfs_shortest_path
 from src.scheduler.topology_loader import Link, NetworkTopology, TopologyLoader
 from src.workload_format.schema import (
     CommType,
@@ -94,7 +94,7 @@ def _make_workload_with_flows(
 
 
 # ============================================================
-# Tests for _bfs_shortest_path
+# Tests for bfs_shortest_path
 # ============================================================
 
 
@@ -104,25 +104,25 @@ class TestBfsShortestPath:
     def test_same_node(self):
         """src == dst returns [src]."""
         topo = _make_linear_topo(3)
-        result = _bfs_shortest_path(topo, 1, 1)
+        result = bfs_shortest_path(topo, 1, 1)
         assert result == [1]
 
     def test_direct_neighbor(self):
         """Adjacent nodes: path = [src, dst]."""
         topo = _make_linear_topo(3)
-        result = _bfs_shortest_path(topo, 0, 1)
+        result = bfs_shortest_path(topo, 0, 1)
         assert result == [0, 1]
 
     def test_two_hop_path(self):
         """Two hops: 0 → 1 → 2."""
         topo = _make_linear_topo(3)
-        result = _bfs_shortest_path(topo, 0, 2)
+        result = bfs_shortest_path(topo, 0, 2)
         assert result == [0, 1, 2]
 
     def test_multi_hop_linear(self):
         """Linear 0 → 1 → 2 → 3 → 4."""
         topo = _make_linear_topo(5)
-        result = _bfs_shortest_path(topo, 0, 4)
+        result = bfs_shortest_path(topo, 0, 4)
         assert result == [0, 1, 2, 3, 4]
 
     def test_no_path_returns_none(self):
@@ -130,13 +130,13 @@ class TestBfsShortestPath:
         topo = NetworkTopology()
         # Only one link: 0→1, no path from 0 to 2
         topo.add_link(Link(src=0, dst=1, bandwidth_gbps=100.0, latency_us=1.0, error_rate=0))
-        result = _bfs_shortest_path(topo, 0, 2)
+        result = bfs_shortest_path(topo, 0, 2)
         assert result is None
 
     def test_star_two_hop(self):
         """Star topology: leaf → center → other leaf."""
         topo = _make_star_topo(center=10, leaves=[0, 1, 2])
-        result = _bfs_shortest_path(topo, 0, 1)
+        result = bfs_shortest_path(topo, 0, 1)
         assert result == [0, 10, 1]
 
     def test_chooses_shortest_not_first(self):
@@ -148,7 +148,7 @@ class TestBfsShortestPath:
         topo.add_link(Link(src=0, dst=1, bandwidth_gbps=100.0, latency_us=1.0, error_rate=0))
         topo.add_link(Link(src=1, dst=2, bandwidth_gbps=100.0, latency_us=1.0, error_rate=0))
 
-        result = _bfs_shortest_path(topo, 0, 2)
+        result = bfs_shortest_path(topo, 0, 2)
         assert result == [0, 2]  # Direct link is shorter
 
 
@@ -468,3 +468,93 @@ class TestIntegrationSpectrumX:
         assert hints.link_loads[(0, 9)] == 2    # Used by flows 0→9 and 0→17
         assert hints.link_loads[(9, 17)] == 1   # Used by flow 0→17
         assert hints.link_loads[(4, 13)] == 1   # Used by flow 4→13
+
+
+# ============================================================
+# Tests for custom routing strategies
+# ============================================================
+
+
+class TestCustomRoutingStrategy:
+    """Tests for custom routing strategy support."""
+
+    def test_custom_strategy_called(self):
+        """Custom routing strategy is invoked instead of default BFS."""
+        topo = _make_linear_topo(3)
+
+        # Custom strategy that always returns a fixed path
+        def custom_strategy(topology, src, dst):
+            return [src, dst]  # Direct path regardless of topology
+
+        hints = RoutingHints(routing_strategy=custom_strategy)
+        path = hints.get_path(topo, 0, 2)
+
+        # Should use custom strategy, not BFS (which would return [0, 1, 2])
+        assert path == [0, 2]
+
+    def test_custom_strategy_with_compute_routing_hints(self):
+        """compute_routing_hints accepts custom routing strategy."""
+        topo = _make_linear_topo(3)
+        workload = _make_workload_with_flows([(0, 2, 1000)])
+
+        # Custom strategy that returns direct paths
+        def direct_routing(topology, src, dst):
+            if src == dst:
+                return [src]
+            return [src, dst]
+
+        hints = compute_routing_hints(topo, workload, routing_strategy=direct_routing)
+
+        # Path should be direct, not multi-hop
+        assert hints.get_path(topo, 0, 2) == [0, 2]
+        # Link loads should reflect direct path
+        assert hints.link_loads == {(0, 2): 1}
+
+    def test_default_strategy_when_none_provided(self):
+        """Default BFS strategy is used when no custom strategy provided."""
+        topo = _make_linear_topo(3)
+
+        # No custom strategy provided
+        hints = RoutingHints()
+        path = hints.get_path(topo, 0, 2)
+
+        # Should use default BFS
+        assert path == [0, 1, 2]
+
+    def test_custom_strategy_no_path_raises_exception(self):
+        """Custom strategy returning None raises ValueError."""
+        topo = _make_linear_topo(3)
+
+        # Custom strategy that always returns None
+        def broken_strategy(topology, src, dst):
+            return None
+
+        hints = RoutingHints(routing_strategy=broken_strategy)
+
+        with pytest.raises(ValueError, match="No path found from node 0 to node 2"):
+            hints.get_path(topo, 0, 2)
+
+    def test_custom_strategy_caching(self):
+        """Custom strategy results are cached."""
+        topo = _make_linear_topo(3)
+
+        call_count = 0
+
+        def counting_strategy(topology, src, dst):
+            nonlocal call_count
+            call_count += 1
+            if src == dst:
+                return [src]
+            return [src, dst]
+
+        hints = RoutingHints(routing_strategy=counting_strategy)
+
+        # First call
+        path1 = hints.get_path(topo, 0, 2)
+        assert call_count == 1
+
+        # Second call should use cache
+        path2 = hints.get_path(topo, 0, 2)
+        assert call_count == 1  # Not incremented
+        assert path1 is path2  # Same cached object
+
