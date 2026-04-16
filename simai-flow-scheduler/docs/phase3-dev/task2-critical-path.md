@@ -7,13 +7,15 @@ Task 2 的目标是实现基于 CPM（Critical Path Method）的关键路径分�
 **包含**：
 - `TaskTimingInfo` 数据类：单个任务的时间分析结果
 - `CriticalPathInfo` 数据类：整体分析结果 + 访问方法
-- `analyze_critical_path(workload, topology, routing_hints)` 函数：CPM 前向/后向传播
+- `analyze_critical_path(workload, topology, routing_hints, analysis_strategy)` 函数：可插拔策略入口，默认 CPM
+- `analyze_cpm(workload, topology, routing_hints)` 函数：CPM 前向/后向传播（默认策略）
+- `CriticalPathStrategy` 类型别名：自定义分析策略函数签名
 - `_estimate_duration(task, topology, routing_hints)`：多跳 flow 持续时间估算
 - `_topological_sort(tasks)`：拓扑排序
 
 **不包含**：
-- TTE（Time-to-Exposed）分析（未来扩展，接口已预留）
-- RCPSP（资源约束关键路径）（未来扩展）
+- TTE（Time-to-Exposed）分析（可通过自定义策略实现）
+- RCPSP（资源约束关键路径）（可通过自定义策略实现）
 - Per-link 时序分析（Task 3 的职责）
 
 ---
@@ -61,7 +63,17 @@ def analyze_critical_path(
     workload: P2PWorkload,
     topology: NetworkTopology,
     routing_hints: RoutingHints,
+    analysis_strategy: CriticalPathStrategy | None = None,
 ) -> CriticalPathInfo
+
+def analyze_cpm(
+    workload: P2PWorkload,
+    topology: NetworkTopology,
+    routing_hints: RoutingHints,
+) -> CriticalPathInfo
+
+# 自定义策略类型别名
+CriticalPathStrategy = Callable[[P2PWorkload, NetworkTopology, RoutingHints], CriticalPathInfo]
 ```
 
 ---
@@ -105,6 +117,45 @@ propagation_delay = sum(link.latency_us for all hops)
 - 三种算法（CPM / TTE / RCPSP）填充相同的数据结构
 - Phase 4 只需读取 `slack_us` 和 `is_critical`，无需感知底层算法
 
+### 3.5 自定义分析策略（2026-04-16 扩展）
+
+**设计目标**：支持 TTE、RCPSP 等替代分析方法，而不修改核心接口。
+
+**实现方式**：策略模式，与 Task 1 的 `RoutingStrategy` 一致。
+
+```python
+# 类型别名
+CriticalPathStrategy = Callable[
+    [P2PWorkload, NetworkTopology, RoutingHints],
+    CriticalPathInfo,
+]
+
+# 策略调度入口
+def analyze_critical_path(workload, topology, routing_hints,
+                          analysis_strategy=None):
+    strategy = analysis_strategy or analyze_cpm
+    return strategy(workload, topology, routing_hints)
+
+# CPM 作为公开的默认策略
+def analyze_cpm(workload, topology, routing_hints) -> CriticalPathInfo:
+    ...
+```
+
+**使用示例**：
+
+```python
+# 默认 CPM（向后兼容）
+result = analyze_critical_path(workload, topology, hints)
+
+# 自定义 TTE 策略
+def analyze_tte(workload, topology, routing_hints):
+    # Forward pass only, compute TTE per flow
+    ...
+    return CriticalPathInfo(..., analysis_method="tte")
+
+result = analyze_critical_path(workload, topology, hints, analysis_strategy=analyze_tte)
+```
+
 ---
 
 ## 4. 测试结果
@@ -112,8 +163,8 @@ propagation_delay = sum(link.latency_us for all hops)
 ### 4.1 最终结果
 
 ```
-tests/test_critical_path.py: 22 passed
-tests/ (完整回归): 266 passed (244 原有 + 22 critical path)
+tests/test_critical_path.py: 25 passed (22 原有 + 3 自定义策略)
+tests/ (完整回归): 269 passed (244 原有 + 25 critical path)
 ```
 
 无回归，所有原有测试通过。
@@ -125,6 +176,7 @@ tests/ (完整回归): 266 passed (244 原有 + 22 critical path)
 | `TestEstimateDuration` | 6 | compute 任务持续时间、flow 直连链路、flow 多跳、零大小、None src |
 | `TestTopologicalSort` | 4 | 空列表、单任务、线性链、菱形依赖 |
 | `TestAnalyzeCriticalPath` | 12 | 空workload、单任务、线性链全关键、并行分支、独立任务、makespan、slack 非负、flow 在链中、菱形+flow、analysis_method、访问方法 |
+| `TestCustomAnalysisStrategy` | 3 | 默认策略为 CPM、显式传入 CPM、自定义 mock 策略 |
 
 ---
 
@@ -159,5 +211,5 @@ Task 2 的输出 (`CriticalPathInfo`) 将被以下模块使用：
 ---
 
 *开发时间：2026-04-16*
-*测试状态：22 passed（critical path）+ 244 passed（原有）= 266 total*
-*关键设计：输出格式与分析算法解耦，支持 CPM → TTE → RCPSP 渐进升级*
+*测试状态：25 passed（critical path）+ 244 passed（原有）= 269 total*
+*关键设计：输出格式与分析算法解耦，支持 CPM → TTE → RCPSP 渐进升级；自定义分析策略通过 CriticalPathStrategy 类型别名实现*

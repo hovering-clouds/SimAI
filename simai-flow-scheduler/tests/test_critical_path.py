@@ -10,9 +10,11 @@ import pytest
 
 from src.scheduler.critical_path import (
     CriticalPathInfo,
+    CriticalPathStrategy,
     TaskTimingInfo,
     _estimate_duration,
     _topological_sort,
+    analyze_cpm,
     analyze_critical_path,
 )
 from src.scheduler.routing_hints import RoutingHints, compute_routing_hints
@@ -400,3 +402,62 @@ class TestAnalyzeCriticalPath:
         assert result.is_critical(1)
         assert result.get_earliest_start(0) == 0
         assert result.get_earliest_start(1) == 100
+
+
+# ============================================================
+# Tests for custom analysis strategy
+# ============================================================
+
+
+class TestCustomAnalysisStrategy:
+    """Tests for pluggable critical path analysis strategy."""
+
+    def test_default_is_cpm(self):
+        """Without strategy argument, uses CPM."""
+        topo = _make_simple_topo()
+        wl = _make_workload([_make_compute_task(0, 100)])
+        hints = RoutingHints()
+        result = analyze_critical_path(wl, topo, hints)
+        assert result.analysis_method == "cpm"
+
+    def test_explicit_cpm_strategy(self):
+        """Passing analyze_cpm explicitly gives same result."""
+        topo = _make_simple_topo()
+        t0 = _make_compute_task(0, 100)
+        t1 = _make_compute_task(1, 200, deps=[0])
+        wl = _make_workload([t0, t1])
+        hints = RoutingHints()
+
+        default = analyze_critical_path(wl, topo, hints)
+        explicit = analyze_critical_path(wl, topo, hints, analysis_strategy=analyze_cpm)
+
+        assert default.makespan_us == explicit.makespan_us
+        assert default.critical_tasks == explicit.critical_tasks
+
+    def test_custom_strategy(self):
+        """Custom strategy is invoked and its result returned."""
+        topo = _make_simple_topo()
+        wl = _make_workload([_make_compute_task(0, 100)])
+        hints = RoutingHints()
+
+        def mock_strategy(workload, topology, routing_hints):
+            return CriticalPathInfo(
+                task_timings={
+                    0: TaskTimingInfo(
+                        task_id=0,
+                        earliest_start_us=0,
+                        earliest_finish_us=42,
+                        latest_start_us=0,
+                        latest_finish_us=42,
+                        slack_us=0.0,
+                        is_critical=True,
+                    )
+                },
+                critical_tasks=[0],
+                makespan_us=42,
+                analysis_method="mock",
+            )
+
+        result = analyze_critical_path(wl, topo, hints, analysis_strategy=mock_strategy)
+        assert result.analysis_method == "mock"
+        assert result.makespan_us == 42

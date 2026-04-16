@@ -6,6 +6,9 @@ Implements CPM (Critical Path Method) with multi-hop delay estimation:
 - Backward pass (ALAP): compute latest start/finish times
 - Slack = latest_start - earliest_start; critical tasks have slack == 0
 
+Supports custom analysis strategies (e.g., TTE, RCPSP) via CriticalPathStrategy.
+Default strategy is CPM.
+
 Flow duration estimation:
 - Transmission delay = size_bits / bottleneck_bandwidth (min bw along path)
 - Propagation delay = sum of all link latencies along path
@@ -13,10 +16,28 @@ Flow duration estimation:
 """
 
 from dataclasses import dataclass
+from typing import Callable
 
 from ..workload_format.schema import P2PWorkload, Task, TaskType
 from .routing_hints import RoutingHints
 from .topology_loader import NetworkTopology
+
+# Type alias for critical path analysis strategies
+CriticalPathStrategy = Callable[
+    [P2PWorkload, NetworkTopology, RoutingHints],
+    "CriticalPathInfo",
+]
+"""
+Critical path analysis strategy function signature.
+
+Args:
+    workload: P2P workload with tasks and dependencies
+    topology: Network topology graph
+    routing_hints: Precomputed routing information
+
+Returns:
+    CriticalPathInfo with per-task timing and critical task identification
+"""
 
 
 @dataclass
@@ -83,9 +104,34 @@ def analyze_critical_path(
     workload: P2PWorkload,
     topology: NetworkTopology,
     routing_hints: RoutingHints,
+    analysis_strategy: CriticalPathStrategy | None = None,
 ) -> CriticalPathInfo:
     """
-    Critical path analysis with multi-hop latency estimation (CPM).
+    Critical path analysis with pluggable strategy.
+
+    Default strategy is CPM (Critical Path Method).
+    Pass a custom analysis_strategy to use TTE, RCPSP, or other methods.
+
+    Args:
+        workload: P2P workload with tasks and dependencies
+        topology: Network topology graph
+        routing_hints: Precomputed routing information
+        analysis_strategy: Custom analysis function. If None, uses CPM.
+
+    Returns:
+        CriticalPathInfo with per-task timing and critical task identification
+    """
+    strategy = analysis_strategy or analyze_cpm
+    return strategy(workload, topology, routing_hints)
+
+
+def analyze_cpm(
+    workload: P2PWorkload,
+    topology: NetworkTopology,
+    routing_hints: RoutingHints,
+) -> CriticalPathInfo:
+    """
+    CPM (Critical Path Method) analysis with multi-hop delay estimation.
 
     Flow duration = transmission_delay + propagation_delay
     - transmission_delay = size / bottleneck_bandwidth (min bw along path)

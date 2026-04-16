@@ -15,7 +15,9 @@ from .routing_hints import (
 from .critical_path import (
     TaskTimingInfo,
     CriticalPathInfo,
+    CriticalPathStrategy,
     analyze_critical_path,
+    analyze_cpm,
 )
 
 __all__ = [
@@ -29,5 +31,7 @@ __all__ = [
     "RoutingStrategy",
     "TaskTimingInfo",
     "CriticalPathInfo",
+    "CriticalPathStrategy",
     "analyze_critical_path",
+    "analyze_cpm",
 ]
