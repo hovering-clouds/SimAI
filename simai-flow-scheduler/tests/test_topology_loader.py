@@ -10,7 +10,7 @@ import tempfile
 
 import pytest
 
-from src.scheduler.topology_loader import Link, NetworkTopology, NodeType, TopologyLoader
+from src.static_analysis.topology_loader import Link, NetworkTopology, NodeType, TopologyLoader
 
 
 # Path to real topology files (relative from simai-flow-scheduler/)

@@ -1,5 +1,5 @@
 """
-Scheduler module - workload analysis and scheduling infrastructure.
+Static analysis module - pre-scheduling workload analysis infrastructure.
 
 Provides topology loading, routing hints, critical path analysis,
 link contention analysis, and unified workload analysis.

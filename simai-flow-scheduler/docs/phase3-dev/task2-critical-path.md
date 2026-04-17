@@ -26,7 +26,7 @@ Task 2 的目标是实现基于 CPM（Critical Path Method）的关键路径分�
 
 ```
 simai-flow-scheduler/
-├── src/scheduler/
+├── src/static_analysis/
 │   ├── __init__.py              # 更新：导出 TaskTimingInfo, CriticalPathInfo, analyze_critical_path
 │   └── critical_path.py         # 新增：关键路径分析完整实现
 ├── tests/

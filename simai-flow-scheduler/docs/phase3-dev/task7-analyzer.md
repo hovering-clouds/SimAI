@@ -19,7 +19,7 @@ Task 7 的目标是提供统一的 workload 分析入口，整合 Task 1-6 的�
 
 ```
 simai-flow-scheduler/
-├── src/scheduler/
+├── src/static_analysis/
 │   ├── __init__.py          # 更新：导出 WorkloadAnalysisResult, WorkloadAnalyzer
 │   └── analyzer.py          # 新增：统一分析接口完整实现
 ├── tests/

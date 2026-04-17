@@ -24,7 +24,7 @@ Task 0 是 Phase 3 的基础设施，目标是解析 astra-sim 格式的网络�
 
 ```
 simai-flow-scheduler/
-├── src/scheduler/
+├── src/static_analysis/
 │   ├── __init__.py              # 新增：模块初始化，导出核心类型
 │   └── topology_loader.py       # 新增：拓扑加载器完整实现
 └── tests/

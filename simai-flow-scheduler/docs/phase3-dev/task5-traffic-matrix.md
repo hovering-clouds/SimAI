@@ -21,7 +21,7 @@ Task 5 的目标是统计节点间的流量分布，识别 top senders/receivers
 
 ```
 simai-flow-scheduler/
-├── src/scheduler/
+├── src/static_analysis/
 │   ├── __init__.py                # 更新：导出 TrafficMatrix, compute_traffic_matrix
 │   └── traffic_matrix.py          # 新增：流量矩阵完整实现
 ├── tests/

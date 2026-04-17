@@ -19,7 +19,7 @@ Task 6 的目标是生成 workload 的全局统计信息，包括基本统计、
 
 ```
 simai-flow-scheduler/
-├── src/scheduler/
+├── src/static_analysis/
 │   ├── __init__.py                  # 更新：导出 WorkloadSummary, compute_workload_summary
 │   └── workload_summary.py          # 新增：工作负载摘要完整实现
 ├── tests/

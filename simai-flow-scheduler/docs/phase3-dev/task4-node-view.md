@@ -19,7 +19,7 @@ Task 4 的目标是为每个节点预计算其局部调度视图，包括发送/
 
 ```
 simai-flow-scheduler/
-├── src/scheduler/
+├── src/static_analysis/
 │   ├── __init__.py              # 更新：导出 NodeLocalView, build_node_views
 │   └── node_view.py             # 新增：节点局部视图完整实现
 ├── tests/

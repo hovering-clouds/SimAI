@@ -8,13 +8,13 @@ routing hints and critical path analysis.
 
 import pytest
 
-from src.scheduler.critical_path import analyze_critical_path
-from src.scheduler.contention_analysis import (
+from src.static_analysis.critical_path import analyze_critical_path
+from src.static_analysis.contention_analysis import (
     LinkContentionGroup,
     find_contention_groups,
 )
-from src.scheduler.routing_hints import RoutingHints, compute_routing_hints
-from src.scheduler.topology_loader import Link, NetworkTopology
+from src.static_analysis.routing_hints import RoutingHints, compute_routing_hints
+from src.static_analysis.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
     Meta,

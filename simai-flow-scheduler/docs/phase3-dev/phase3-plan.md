@@ -96,7 +96,7 @@ class WorkloadAnalysisResult:
 
 ### Task 0: TopologyLoader（拓扑加载器）
 
-**文件**: `src/scheduler/topology_loader.py`
+**文件**: `src/static_analysis/topology_loader.py`
 
 **功能**：解析 astra-sim 格式的拓扑文件，构建内存中的网络拓扑图。
 
@@ -453,7 +453,7 @@ def test_invalid_file():
 
 ### Task 1: 路由信息（Routing Hints）
 
-**文件**: `src/scheduler/routing_hints.py`
+**文件**: `src/static_analysis/routing_hints.py`
 
 **功能**：预计算拓扑的路由信息，为关键路径分析提供多跳路径信息。
 
@@ -622,7 +622,7 @@ def test_no_path_fallback():
 
 ### Task 2: 关键路径分析（Critical Path Analysis）
 
-**文件**: `src/scheduler/critical_path.py`
+**文件**: `src/static_analysis/critical_path.py`
 
 **功能**：基于时间的关键路径分析，计算每个 task 的时间窗口和 slack。
 
@@ -926,7 +926,7 @@ def test_makespan_equals_max_finish():
 
 ### Task 3: 链路竞争分析（Link Contention Analysis）
 
-**文件**: `src/scheduler/contention_analysis.py`
+**文件**: `src/static_analysis/contention_analysis.py`
 
 **功能**：识别哪些 flows 会竞争同一条物理链路，并结合时间窗口判断是否真正可能并发。依赖 Task 1（路由信息）提供完整路径，Task 2（关键路径）提供时间窗口。
 
@@ -1504,7 +1504,7 @@ def test_contention_stats():
 
 ### Task 4: 节点局部视图（Node-Centric Local Views）
 
-**文件**: `src/scheduler/node_view.py`
+**文件**: `src/static_analysis/node_view.py`
 
 **功能**：为每个节点预计算它的局部调度视图。
 
@@ -1647,7 +1647,7 @@ def test_raises_on_missing_critical_path_timing():
 
 ### Task 5: 流量矩阵（Traffic Matrix）
 
-**文件**: `src/scheduler/traffic_matrix.py`
+**文件**: `src/static_analysis/traffic_matrix.py`
 
 **功能**：统计节点间的流量分布。
 
@@ -1729,7 +1729,7 @@ def test_top_senders_receivers():
 
 ### Task 6: Workload 摘要（Workload Summary）
 
-**文件**: `src/scheduler/workload_summary.py`
+**文件**: `src/static_analysis/workload_summary.py`
 
 **功能**：生成 workload 的全局统计信息。
 
@@ -1862,7 +1862,7 @@ def _compute_avg_dag_width(workload: P2PWorkload) -> float:
 
 ### Task 7: 统一分析接口（WorkloadAnalyzer）
 
-**文件**: `src/scheduler/analyzer.py`
+**文件**: `src/static_analysis/analyzer.py`
 
 **功能**：统一的 workload 分析入口，整合所有分析模块。
 
@@ -2044,15 +2044,15 @@ def test_contention_detection():
 
 | 文件                                     | 类型 | 说明                                         |
 | ---------------------------------------- | ---- | -------------------------------------------- |
-| `src/scheduler/__init__.py`            | 新建 | 模块初始化                                   |
-| `src/scheduler/topology_loader.py`     | 新建 | 拓扑加载器（Task 0）                         |
-| `src/scheduler/routing_hints.py`       | 新建 | 路由信息（Task 1，关键路径分析的前置依赖）   |
-| `src/scheduler/critical_path.py`       | 新建 | 关键路径分析（Task 2，依赖 Task 1 的路由）   |
-| `src/scheduler/contention_analysis.py` | 新建 | 链路竞争分析（Task 3，依赖 Task 1 + Task 2） |
-| `src/scheduler/node_view.py`           | 新建 | 节点局部视图（Task 4）                       |
-| `src/scheduler/traffic_matrix.py`      | 新建 | 流量矩阵（Task 5）                           |
-| `src/scheduler/workload_summary.py`    | 新建 | Workload 摘要（Task 6）                      |
-| `src/scheduler/analyzer.py`            | 新建 | 统一分析入口（Task 7）                       |
+| `src/static_analysis/__init__.py`            | 新建 | 模块初始化                                   |
+| `src/static_analysis/topology_loader.py`     | 新建 | 拓扑加载器（Task 0）                         |
+| `src/static_analysis/routing_hints.py`       | 新建 | 路由信息（Task 1，关键路径分析的前置依赖）   |
+| `src/static_analysis/critical_path.py`       | 新建 | 关键路径分析（Task 2，依赖 Task 1 的路由）   |
+| `src/static_analysis/contention_analysis.py` | 新建 | 链路竞争分析（Task 3，依赖 Task 1 + Task 2） |
+| `src/static_analysis/node_view.py`           | 新建 | 节点局部视图（Task 4）                       |
+| `src/static_analysis/traffic_matrix.py`      | 新建 | 流量矩阵（Task 5）                           |
+| `src/static_analysis/workload_summary.py`    | 新建 | Workload 摘要（Task 6）                      |
+| `src/static_analysis/analyzer.py`            | 新建 | 统一分析入口（Task 7）                       |
 | `tests/test_topology_loader.py`        | 新建 | 拓扑加载器测试                               |
 | `tests/test_routing_hints.py`          | 新建 | 路由信息测试                                 |
 | `tests/test_critical_path.py`          | 新建 | 关键路径测试                                 |

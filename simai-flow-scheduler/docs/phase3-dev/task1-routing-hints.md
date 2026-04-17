@@ -25,12 +25,12 @@ Task 1 的目标是为拓扑中的所有 flow (src, dst) 对预计算 BFS 最短
 
 ```
 simai-flow-scheduler/
-├── src/scheduler/
+├── src/static_analysis/
 │   ├── __init__.py              # 更新：导出 RoutingHints, compute_routing_hints
 │   └── routing_hints.py         # 新增：路由信息完整实现
 ├── tests/
 │   ├── test_routing_hints.py    # 新增：34 个测试
-│   └── test_topology_loader.py  # 修改：import 路径从 scheduler.xxx 改为 src.scheduler.xxx
+│   └── test_topology_loader.py  # 修改：import 路径从 scheduler.xxx 改为 src.static_analysis.xxx
 ```
 
 ### 2.2 数据结构
@@ -210,7 +210,7 @@ for task in workload.tasks:
 
 ### 4.3 Import 路径约定
 
-项目中 `src/` 是一个 Python 包（有 `__init__.py`），测试中必须使用 `from src.scheduler.xxx import ...` 而非 `from scheduler.xxx import ...`，否则 `scheduler` 包内的相对导入（`from ..workload_format.schema`）会因 "attempted relative import beyond top-level package" 而失败。
+项目中 `src/` 是一个 Python 包（有 `__init__.py`），测试中必须使用 `from src.static_analysis.xxx import ...` 而非 `from scheduler.xxx import ...`，否则 `scheduler` 包内的相对导入（`from ..workload_format.schema`）会因 "attempted relative import beyond top-level package" 而失败。
 
 此约定与 Phase 1/2 的测试一致（如 `from src.workload_generator.workload_builder import ...`）。
 
@@ -230,7 +230,7 @@ ImportError: attempted relative import beyond top-level package
 
 **原因**：测试中使用 `from scheduler.routing_hints import ...`（无 `src.` 前缀），导致 Python 将 `scheduler` 视为顶级包，`..` 超出顶级包范围。
 
-**修复**：将测试 import 改为 `from src.scheduler.routing_hints import ...`，确保 `scheduler` 被视为 `src` 的子包。同时修正 Task 0 的 `test_topology_loader.py` 保持一致（虽然 topology_loader 不涉及跨包相对导入，不影响正确性，但风格统一）。
+**修复**：将测试 import 改为 `from src.static_analysis.routing_hints import ...`，确保 `scheduler` 被视为 `src` 的子包。同时修正 Task 0 的 `test_topology_loader.py` 保持一致（虽然 topology_loader 不涉及跨包相对导入，不影响正确性，但风格统一）。
 
 #### 问题 2：link_loads 聚合计数错误
 

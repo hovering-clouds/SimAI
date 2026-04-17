@@ -21,7 +21,7 @@ Task 3 的目标是识别哪些 flows 会竞争同一条物理链路，并结合
 
 ```
 simai-flow-scheduler/
-├── src/scheduler/
+├── src/static_analysis/
 │   ├── __init__.py                  # 更新：导出 LinkContentionGroup, find_contention_groups
 │   └── contention_analysis.py       # 新增：链路竞争分析完整实现
 ├── tests/
