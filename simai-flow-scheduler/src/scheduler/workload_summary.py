@@ -40,9 +40,6 @@ class WorkloadSummary:
     # Communication fraction on critical path
     critical_path_comm_fraction: float
 
-    # Parallelism factor (avg_dag_width, dimensionless)
-    parallelism_factor: float
-
     # Hottest links
     hot_links: list[tuple[tuple[int, int], int, int]] = field(default_factory=list)
     # (link_id, bytes, num_flows)
@@ -102,9 +99,6 @@ def compute_workload_summary(
         reverse=True,
     )[:10]
 
-    # Parallelism factor = average concurrency (dimensionless)
-    parallelism_factor = dag_width
-
     return WorkloadSummary(
         total_tasks=len(workload.tasks),
         total_compute_tasks=len(compute_tasks),
@@ -115,7 +109,6 @@ def compute_workload_summary(
         avg_dag_width=dag_width,
         critical_path_length_us=critical_path.makespan_us,
         critical_path_comm_fraction=cp_comm_fraction,
-        parallelism_factor=parallelism_factor,
         hot_links=hot_links,
     )
 

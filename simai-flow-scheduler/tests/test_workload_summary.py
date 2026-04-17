@@ -232,16 +232,6 @@ class TestComputeWorkloadSummary:
         # Both tasks are on critical path
         assert 0.0 < summary.critical_path_comm_fraction < 1.0
 
-    def test_parallelism_factor(self):
-        """Parallelism factor equals avg_dag_width."""
-        topo = _make_star_topo()
-        c0 = _make_compute(0, 100, node=0)
-        c1 = _make_compute(1, 100, node=1)
-        wl = _make_workload([c0, c1])
-        summary = _analyze(wl, topo)
-
-        assert summary.parallelism_factor == summary.avg_dag_width
-
     def test_hot_links_ordering(self):
         """Hot links are sorted by total bytes (descending)."""
         topo = _make_star_topo()

@@ -1670,9 +1670,6 @@ class TrafficMatrix:
   
     top_receivers: list[tuple[int, int]] = field(default_factory=list)
   
-    # Bidirectional communication pairs
-    bidirectional_pairs: list[tuple[int, int]] = field(default_factory=list)
-  
     def get_traffic(self, src: int, dst: int) -> int:
         return self.traffic.get((src, dst), 0)
   
@@ -1688,36 +1685,31 @@ def compute_traffic_matrix(workload: P2PWorkload) -> TrafficMatrix:
     Compute node-to-node traffic matrix.
   
     For each flow task, accumulate traffic[(src, dst)] += size_bytes.
-    Then compute top senders/receivers and bidirectional pairs.
+    Then compute top senders/receivers.
     """
     tm = TrafficMatrix()
-  
+
     # Accumulate traffic
     for task in workload.tasks:
-        if task.type.value != "flow":
+        if not task.is_flow():
             continue
         if task.src is None or task.dst is None:
             continue
-      
+
         link_id = (task.src, task.dst)
         tm.traffic[link_id] = tm.traffic.get(link_id, 0) + (task.size_bytes or 0)
-  
-    # Compute top senders
+
+    # Compute top senders/receivers
     sender_bytes: dict[int, int] = {}
     receiver_bytes: dict[int, int] = {}
-  
+
     for (src, dst), bytes_count in tm.traffic.items():
         sender_bytes[src] = sender_bytes.get(src, 0) + bytes_count
         receiver_bytes[dst] = receiver_bytes.get(dst, 0) + bytes_count
-  
+
     tm.top_senders = sorted(sender_bytes.items(), key=lambda x: x[1], reverse=True)
     tm.top_receivers = sorted(receiver_bytes.items(), key=lambda x: x[1], reverse=True)
-  
-    # Find bidirectional pairs
-    for (src, dst) in tm.traffic:
-        if (dst, src) in tm.traffic and src < dst:
-            tm.bidirectional_pairs.append((src, dst))
-  
+
     return tm
 ```
 
@@ -1728,12 +1720,9 @@ def compute_traffic_matrix(workload: P2PWorkload) -> TrafficMatrix:
 ```python
 def test_traffic_accumulation():
     """Verify traffic[(src, dst)] accumulation."""
-  
+
 def test_top_senders_receivers():
     """Verify top senders/receivers ordering."""
-  
-def test_bidirectional_pairs():
-    """Verify bidirectional pair detection."""
 ```
 
 ---
@@ -1772,10 +1761,7 @@ class WorkloadSummary:
   
     # Communication fraction on critical path
     critical_path_comm_fraction: float
-  
-    # Parallelism factor = DAG width / critical path length
-    parallelism_factor: float
-  
+
     # Hottest links
     hot_links: list[tuple[int, int, int]] = field(default_factory=list)
     # (link_id, bytes, num_flows)
@@ -1790,35 +1776,45 @@ def compute_workload_summary(
     contention_groups: dict[tuple[int, int], LinkContentionGroup],
 ) -> WorkloadSummary:
     """Compute overall workload statistics."""
-    compute_tasks = [t for t in workload.tasks if t.type.value == "compute"]
-    flow_tasks = [t for t in workload.tasks if t.type.value == "flow"]
-  
+    compute_tasks = [t for t in workload.tasks if t.is_compute()]
+    flow_tasks = [t for t in workload.tasks if t.is_flow()]
+
     total_comm_bytes = sum(t.size_bytes or 0 for t in flow_tasks)
     total_compute_time = sum(t.duration_us or 0 for t in compute_tasks)
-  
-    comm_compute_ratio = (
-        total_comm_bytes / total_compute_time if total_compute_time > 0 else 0
-    )
-  
-    # DAG width = average number of tasks at each level
-    dag_width = _compute_avg_dag_width(workload)
-  
-    # Critical path stats
-    cp_comm_bytes = sum(
-        t.size_bytes or 0
+
+    # Communication time from critical path analysis (time-based, not bytes-based)
+    total_comm_time = sum(
+        critical_path.task_timings[t.task_id].earliest_finish_us
+        - critical_path.task_timings[t.task_id].earliest_start_us
         for t in flow_tasks
-        if t.task_id in critical_path.critical_path_tasks
+        if t.task_id in critical_path.task_timings
     )
-    cp_comm_fraction = cp_comm_bytes / total_comm_bytes if total_comm_bytes > 0 else 0
-  
-    # Hot links
+
+    comm_compute_ratio = (
+        total_comm_time / total_compute_time if total_compute_time > 0 else 0.0
+    )
+
+    # DAG width = average number of tasks at each depth level
+    dag_width = _compute_avg_dag_width(workload)
+
+    # Critical path stats (time-based)
+    cp_comm_time = sum(
+        critical_path.task_timings[t.task_id].earliest_finish_us
+        - critical_path.task_timings[t.task_id].earliest_start_us
+        for t in flow_tasks
+        if t.task_id in critical_path.critical_tasks
+    )
+    cp_total_time = critical_path.makespan_us
+    cp_comm_fraction = cp_comm_time / cp_total_time if cp_total_time > 0 else 0.0
+
+    # Hot links (top 10 by total bytes)
     hot_links = sorted(
         [(gid, g.total_data_bytes, g.num_flows)
          for gid, g in contention_groups.items()],
         key=lambda x: x[1],
         reverse=True,
     )[:10]
-  
+
     return WorkloadSummary(
         total_tasks=len(workload.tasks),
         total_compute_tasks=len(compute_tasks),
@@ -1827,24 +1823,38 @@ def compute_workload_summary(
         total_compute_time_us=total_compute_time,
         comm_compute_ratio=comm_compute_ratio,
         avg_dag_width=dag_width,
-        critical_path_length_us=critical_path.critical_path_length_us,
+        critical_path_length_us=critical_path.makespan_us,
         critical_path_comm_fraction=cp_comm_fraction,
-        parallelism_factor=dag_width / critical_path.critical_path_length_us if critical_path.critical_path_length_us > 0 else 0,
         hot_links=hot_links,
     )
 
 
 def _compute_avg_dag_width(workload: P2PWorkload) -> float:
-    """Compute average DAG width (number of tasks at each level)."""
-    # Simplified: count tasks at each depth level
-    levels: dict[int, int] = {}
+    """Compute average DAG width (number of tasks at each depth level)."""
+    # Depth computed via memoized DFS (not len(task.deps))
+    task_map = {t.task_id: t for t in workload.tasks}
+    depths: dict[int, int] = {}
+
+    def get_depth(task_id: int) -> int:
+        if task_id in depths:
+            return depths[task_id]
+        task = task_map[task_id]
+        if not task.deps:
+            depths[task_id] = 0
+        else:
+            depths[task_id] = max(get_depth(dep) for dep in task.deps) + 1
+        return depths[task_id]
+
     for task in workload.tasks:
-        depth = len(task.deps)  # Simplified depth
+        get_depth(task.task_id)
+
+    levels: dict[int, int] = {}
+    for depth in depths.values():
         levels[depth] = levels.get(depth, 0) + 1
-  
+
     if not levels:
         return 0.0
-  
+
     return sum(levels.values()) / len(levels)
 ```
 

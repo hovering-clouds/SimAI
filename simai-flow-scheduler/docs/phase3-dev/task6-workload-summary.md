@@ -50,9 +50,6 @@ class WorkloadSummary:
     # Communication fraction on critical path
     critical_path_comm_fraction: float
 
-    # Parallelism factor (avg_dag_width, dimensionless)
-    parallelism_factor: float
-
     # Hottest links
     hot_links: list[tuple[tuple[int, int], int, int]]  # (link_id, bytes, num_flows)
 ```
@@ -105,12 +102,6 @@ DAG 宽度 = 平均每个深度层级的任务数。
 
 其中 `cp_comm_time` 是关键路径上所有 flow task 的持续时间之和，`cp_total_time` 是 makespan。
 
-### 3.5 并行度因子
-
-`parallelism_factor = avg_dag_width`（无量纲）
-
-表示平均并发度。计划中的 `dag_width / critical_path_length_us` 量纲不对（tasks / time），修正为直接使用 `avg_dag_width`。
-
 ---
 
 ## 4. 与设计文档的偏差
@@ -134,22 +125,22 @@ DAG 宽度 = 平均每个深度层级的任务数。
 
 ### 4.5 修正 `parallelism_factor` 量纲
 
-计划使用 `dag_width / critical_path_length_us`（tasks/us），量纲不对。修正为直接使用 `avg_dag_width`（无量纲，表示平均并发度）。
+计划使用 `dag_width / critical_path_length_us`（tasks/us），量纲不对。修正为直接使用 `avg_dag_width`（无量纲，表示平均并发度）。后因与 `avg_dag_width` 完全重复，移除 `parallelism_factor` 字段。
 
 ---
 
 ## 5. 测试结果
 
 ```
-tests/test_workload_summary.py: 17 passed
-tests/ (完整回归): 343 passed (326 原有 + 17 workload summary)
+tests/test_workload_summary.py: 16 passed
+tests/ (完整回归): 350 passed
 ```
 
 ### 测试覆盖范围
 
 | 测试类 | 数量 | 覆盖内容 |
 |--------|------|----------|
-| `TestComputeWorkloadSummary` | 17 | 空workload、单compute、单flow、混合、comm_compute_ratio时间维度、DAG宽度（单任务/线性链/并行/菱形）、关键路径长度、关键路径通信占比（无/全部/混合）、并行度因子、热点链路排序/top10/结构 |
+| `TestComputeWorkloadSummary` | 16 | 空workload、单compute、单flow、混合、comm_compute_ratio时间维度、DAG宽度（单任务/线性链/并行/菱形）、关键路径长度、关键路径通信占比（无/全部/混合）、热点链路排序/top10/结构 |
 
 ---
 
@@ -167,4 +158,4 @@ Task 6 的输出 (`WorkloadSummary`) 将被以下模块使用：
 
 *开发时间：2026-04-16*
 *测试状态：17 passed（workload summary）+ 326 passed（原有）= 343 total*
-*关键设计：时间维度的 comm_compute_ratio，记忆化 DFS 计算 DAG 深度，无量纲的 parallelism_factor*
+*关键设计：时间维度的 comm_compute_ratio，记忆化 DFS 计算 DAG 深度*

@@ -83,7 +83,6 @@ class TestTrafficMatrix:
         assert tm.traffic == {}
         assert tm.top_senders == []
         assert tm.top_receivers == []
-        assert tm.bidirectional_pairs == []
 
 
 # ============================================================
@@ -175,44 +174,6 @@ class TestComputeTrafficMatrix:
         tm = compute_traffic_matrix(wl)
 
         assert tm.top_receivers == [(2, 1500), (3, 300)]
-
-    def test_bidirectional_pairs_detected(self):
-        """Bidirectional communication pairs are identified."""
-        f0 = _make_flow(0, src=0, dst=1, size_bytes=1000)
-        f1 = _make_flow(1, src=1, dst=0, size_bytes=500)
-        wl = _make_workload([f0, f1])
-        tm = compute_traffic_matrix(wl)
-
-        assert (0, 1) in tm.bidirectional_pairs
-
-    def test_bidirectional_pairs_canonical_order(self):
-        """Bidirectional pairs use canonical order (smaller node first)."""
-        f0 = _make_flow(0, src=2, dst=1, size_bytes=1000)
-        f1 = _make_flow(1, src=1, dst=2, size_bytes=500)
-        wl = _make_workload([f0, f1])
-        tm = compute_traffic_matrix(wl)
-
-        assert tm.bidirectional_pairs == [(1, 2)]
-
-    def test_bidirectional_pairs_multiple(self):
-        """Multiple bidirectional pairs are detected."""
-        f0 = _make_flow(0, src=0, dst=1, size_bytes=100)
-        f1 = _make_flow(1, src=1, dst=0, size_bytes=100)
-        f2 = _make_flow(2, src=1, dst=2, size_bytes=200)
-        f3 = _make_flow(3, src=2, dst=1, size_bytes=200)
-        wl = _make_workload([f0, f1, f2, f3])
-        tm = compute_traffic_matrix(wl)
-
-        assert set(tm.bidirectional_pairs) == {(0, 1), (1, 2)}
-
-    def test_unidirectional_not_in_bidirectional_pairs(self):
-        """Unidirectional flows are not marked as bidirectional."""
-        f0 = _make_flow(0, src=0, dst=1, size_bytes=1000)
-        f1 = _make_flow(1, src=1, dst=2, size_bytes=500)
-        wl = _make_workload([f0, f1])
-        tm = compute_traffic_matrix(wl)
-
-        assert tm.bidirectional_pairs == []
 
     def test_skips_compute_tasks(self):
         """Compute tasks are ignored."""

@@ -1,8 +1,7 @@
 """
 Traffic matrix - node-to-node traffic volume statistics.
 
-Computes aggregate traffic between node pairs, identifies top senders/receivers,
-and detects bidirectional communication patterns.
+Computes aggregate traffic between node pairs, identifies top senders/receivers.
 
 Useful for:
 - Understanding traffic hotspots
@@ -29,10 +28,6 @@ class TrafficMatrix:
     top_receivers: list[tuple[int, int]] = field(default_factory=list)
     # (node_id, total_received_bytes)
 
-    # Bidirectional communication pairs
-    bidirectional_pairs: list[tuple[int, int]] = field(default_factory=list)
-    # (node_a, node_b) where node_a < node_b
-
     def get_traffic(self, src: int, dst: int) -> int:
         """Get traffic volume from src to dst."""
         return self.traffic.get((src, dst), 0)
@@ -47,7 +42,7 @@ def compute_traffic_matrix(workload: P2PWorkload) -> TrafficMatrix:
     Compute node-to-node traffic matrix.
 
     For each flow task, accumulate traffic[(src, dst)] += size_bytes.
-    Then compute top senders/receivers and bidirectional pairs.
+    Then compute top senders/receivers.
 
     Args:
         workload: P2P workload with tasks
@@ -79,10 +74,5 @@ def compute_traffic_matrix(workload: P2PWorkload) -> TrafficMatrix:
     tm.top_receivers = sorted(
         receiver_bytes.items(), key=lambda x: x[1], reverse=True
     )
-
-    # Find bidirectional pairs
-    for (src, dst) in tm.traffic:
-        if (dst, src) in tm.traffic and src < dst:
-            tm.bidirectional_pairs.append((src, dst))
 
     return tm
