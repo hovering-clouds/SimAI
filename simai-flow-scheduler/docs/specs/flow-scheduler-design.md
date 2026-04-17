@@ -85,22 +85,17 @@ simai-flow-scheduler/
 │   │   ├── schema.py            # JSON Schema 定义
 │   │   ├── validator.py         # 格式验证器
 │   │   └── writer.py            # 文件写入
-│   ├── scheduler/               # Layer 4: 调度分析器
+│   ├── static_analysis/         # Layer 4: 静态分析（特征提取，不做调度决策）
 │   │   ├── __init__.py
-│   │   ├── base.py              # 基类定义
-│   │   ├── static_analysis.py   # 静态冲突分析
-│   │   └── policies/            # 具体调度策略
-│   │       ├── __init__.py
-│   │       ├── priority.py      # 优先级调度
-│   │       ├── bandwidth.py     # 带宽分配
-│   │       └── wfq.py           # 加权公平队列
-│   └── executor/                # Layer 4: 执行器
+│   │   ├── topology_loader.py   # 拓扑解析（astra-sim 格式）
+│   │   └── analyzer.py          # 静态分析
+│   └── executor/                # Layer 4: 执行器（Phase 4）
 │       ├── __init__.py
 │       ├── analytical.py        # 理论计算执行器
 │       └── ns3.py               # ns3 执行器
 ├── tests/
 │   ├── test_collective_expander.py
-│   ├── test_scheduler.py
+│   ├── test_static_analysis.py
 │   └── test_executor.py
 ├── examples/
 │   ├── single_job/              # 单任务示例
@@ -354,77 +349,74 @@ def _expand_ring(self, ranks, data_size, job_id, task_id_start):
 
 **验证策略**：使用相同的输入参数，对比本项目展开结果与 MockNcclGroup.cc 生成的 flow 列表，确保 `src/dst/deps/chunk_id` 完全一致。
 
-### 4.2 调度分析器
+### 4.2 静态分析模块
 
-#### 4.2.1 基类接口
+静态分析模块负责从 workload 和拓扑中提取调度相关的特征信息，**不做调度决策**。它为后续的调度策略和执行器提供数据基础。
 
-```python
-from dataclasses import dataclass
-from typing import Protocol
+#### 4.2.1 整体流程
 
-@dataclass
-class SchedulingDecision:
-    """调度决策结果"""
-    task_id: int
-    priority: int          # 优先级（越大越高）
-    allocated_bw_gbps: float  # 分配带宽 (Gbps)
-    start_time_us: int     # 允许开始时间（相对 iteration 开始）
-
-class Scheduler(ABC):
-    """调度策略基类"""
-
-    @abstractmethod
-    def analyze(
-        self,
-        workload: P2PWorkload,
-        topology: NetworkTopology,
-    ) -> dict[int, SchedulingDecision]:
-        """
-        静态分析 workload 和 topology，输出调度决策
-        """
-        pass
+```
+TopologyLoader → RoutingHints → CriticalPath → ContentionAnalysis
+                                                     ↓
+                                              NodeView + TrafficMatrix
+                                                     ↓
+                                              WorkloadSummary → Analyzer（统一入口）
 ```
 
-#### 4.2.2 冲突分析模块
+每个模块的输出作为下游模块的输入，`Analyzer` 作为统一入口编排整个分析流程。
+
+#### 4.2.2 模块一览
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| `TopologyLoader` | `topology_loader.py` | 解析 astra-sim 拓扑格式，构建拓扑图数据结构 |
+| `RoutingHints` | `routing_hints.py` | BFS 最短路径计算、惰性缓存、链路负载聚合 |
+| `CriticalPath` | `critical_path.py` | CPM 关键路径分析：前向传播（ASAP）+ 后向传播（ALAP）+ 松弛量 |
+| `ContentionAnalysis` | `contention_analysis.py` | 逐链路时间窗口分析：并发度查询、峰值竞争检测 |
+| `NodeView` | `node_view.py` | 节点维度视图：每节点发送/接收/计算任务聚合 |
+| `TrafficMatrix` | `traffic_matrix.py` | 节点间流量矩阵：源-目的对聚合统计 |
+| `WorkloadSummary` | `workload_summary.py` | 全局 workload 特征：流数量/大小分布、通信类型占比、DAG 深度等 |
+| `Analyzer` | `analyzer.py` | 统一入口，编排所有分析模块，输出完整分析报告 |
+
+#### 4.2.3 关键设计决策
+
+**1. ASAP 静态分析（当前实现）**
+
+所有时间分析基于 ASAP（As Soon As Possible）假设：每条流在其所有依赖完成后立即开始。这提供了保守的下界估计。
+
+- **流持续时间估算**：`duration = size / bottleneck_bw + sum(link_latencies)`
+  - `bottleneck_bw`：路径上带宽最小的链路
+  - `sum(link_latencies)`：路径上所有链路的传播延迟之和
+- **仅用于特征提取**，不做调度决策，因此简化模型是合理的
+
+**2. 逐链路时间窗口（ContentionAnalysis）**
+
+对于多跳路径上经过的每条链路，计算流经过该链路的时间窗口：
 
 ```python
-class ConflictAnalyzer:
-    """分析哪些流会竞争同一条链路"""
-
-    def find_conflicts(
-        self,
-        tasks: list[FlowTask],
-        topology: NetworkTopology,
-    ) -> list[ConflictGroup]:
-        """
-        识别冲突组：同一时刻使用同一链路的流集合
-        """
-        pass
-
-    def compute_link_usage(
-        self,
-        tasks: list[FlowTask],
-        topology: NetworkTopology,
-        start_time: int,
-        end_time: int,
-    ) -> dict[int, float]:
-        """
-        计算指定时间窗口内每条链路的带宽使用率
-        link_id -> usage_ratio [0.0, 1.0]
-        """
-        pass
+entry_time = flow_start + cumulative_latency   # 累积传播延迟
+exit_time  = entry_time + size / link_bandwidth  # 在该链路上的传输时间
 ```
 
-#### 4.2.3 预置调度策略
+基于时间窗口，提供查询接口：
 
-| 策略类 | 文件 | 描述 |
-|--------|------|------|
-| `StaticPriorityScheduler` | `policies/priority.py` | 严格优先级调度：TP > PP > DP |
-| `BandwidthAllocationScheduler` | `policies/bandwidth.py` | 按任务 GPU 数量比例分配带宽 |
-| `WFQScheduler` | `policies/wfq.py` | 加权公平队列，权重可配置 |
-| `CoflowAwareScheduler` | `policies/coflow.py` | 识别同一 collective 的所有 flow，统一调度 |
+- `get_concurrency_at_time(link_id, timestamp)` → 查询某链路在指定时刻的并发流数
+- `get_peak_concurrency_window(link_id)` → 查询某链路的峰值并发窗口
+- `analyze_temporal_contention()` → 全局时间竞争分析报告
+
+**3. 路由缓存（RoutingHints）**
+
+BFS 最短路径惰性计算并缓存，避免重复计算。同时聚合全局链路负载统计（每条链路被多少条流经过）。
+
+**4. 未来改进方向**
+
+- **迭代精化（v2）**：先用 ASAP 估算，再用竞争分析结果修正时间，迭代至收敛
+- **ALAP 灵活性**：利用 CPM 的 ALAP/Slack 信息探索灵活调度空间
+- **ECMP 多路径**：支持等价多路径路由，而不仅是最短路径
 
 ### 4.3 执行器
+
+执行器负责根据调度策略对 workload 进行实际的时间推进模拟。调度策略（Phase 4 实现）决定流的优先级和带宽分配，执行器据此推进 DAG 执行。
 
 #### 4.3.1 理论计算执行器
 
@@ -484,6 +476,8 @@ class NS3Executor:
         pass
 ```
 
+> **注**：调度策略（`SchedulingDecision`、策略基类及具体策略实现）属于 Phase 4 开发范围，将在执行器开发之前实现。
+
 ---
 
 ## 5. 开发阶段划分
@@ -523,46 +517,49 @@ class NS3Executor:
 
 ### Phase 3: 调度分析器（预计 2-3 周）
 
-**目标**：实现可插拔的调度策略框架和基础策略
+**目标**：从 workload 和拓扑中提取调度相关特征信息
 
 | 周 | 任务 | 交付物 |
 |----|------|--------|
-| 6 | 实现调度分析器基类和静态冲突分析 | `scheduler/base.py`, `static_analysis.py` |
-| 6 | 实现拓扑加载器：解析网络拓扑 JSON，识别链路 | `topology_loader.py` |
-| 7 | 实现优先级调度策略 | `scheduler/policies/priority.py` |
-| 7 | 实现带宽分配策略 | `scheduler/policies/bandwidth.py` |
-| 8 | 实现 WFQ 调度策略 | `scheduler/policies/wfq.py` |
+| 6 | TopologyLoader：解析 astra-sim 拓扑格式，构建拓扑图 | `static_analysis/topology_loader.py` |
+| 6 | RoutingHints：BFS 最短路径 + 惰性缓存 + 链路负载聚合 | `static_analysis/routing_hints.py` |
+| 7 | CriticalPath：CPM 关键路径（ASAP/ALAP/Slack） | `static_analysis/critical_path.py` |
+| 7 | ContentionAnalysis：逐链路时间窗口分析 + 并发度查询 | `static_analysis/contention_analysis.py` |
+| 7-8 | NodeView：节点维度视图 + TrafficMatrix：流量矩阵 + WorkloadSummary：全局摘要 | `static_analysis/node_view.py`, `traffic_matrix.py`, `workload_summary.py` |
+| 8 | Analyzer：统一入口，编排所有分析模块 | `static_analysis/analyzer.py` |
+
+**验收标准**：
+- 给定 workload + 拓扑，Analyzer 能输出完整的分析报告
+- 各模块接口清晰、可独立使用
+
+### Phase 4: 调度策略与执行器（预计 2-3 周）
+
+**目标**：实现可插拔的调度策略框架、具体策略和执行器
+
+| 周 | 任务 | 交付物 |
+|----|------|--------|
+| 9 | 调度策略基类：定义 `SchedulingDecision` 和策略接口 | `scheduler/base.py` |
+| 9 | 优先级调度：严格优先级 TP > PP > DP | `scheduler/policies/priority.py` |
+| 10 | 带宽分配策略：按任务 GPU 数量比例分配带宽 | `scheduler/policies/bandwidth.py` |
+| 10 | WFQ 调度：加权公平队列，权重可配置 | `scheduler/policies/wfq.py` |
+| 10-11 | 理论计算执行器：DAG 拓扑排序 + 时延公式 + 链路竞争模型 | `executor/analytical.py` |
+| 11 | ns3 执行器：Workload 转换 + 调用现有 ns3 二进制 | `executor/ns3.py` |
 
 **验收标准**：
 - 调度策略可通过配置文件切换
 - 同一 workload 分别应用不同策略，输出不同的调度决策
-- 调度决策可序列化保存
-
-### Phase 4: 执行器（预计 2-3 周）
-
-**目标**：实现理论计算执行器和 ns3 执行器
-
-| 周 | 任务 | 交付物 |
-|----|------|--------|
-| 9 | 实现 DAG 拓扑排序和任务调度引擎 | `executor/analytical.py` 核心逻辑 |
-| 9 | 实现链路带宽竞争模型 | `executor/bandwidth_model.py` |
-| 10 | 实现理论计算执行器完整流程 | `executor/analytical.py` |
-| 10 | 实现 ns3 执行器（workload 转换 + 调用现有二进制） | `executor/ns3.py` |
-| 11 | 集成测试：用同一 workload 分别运行两个执行器，对比结果 | 集成测试报告 |
-
-**验收标准**：
 - 理论计算执行器能在 10 秒内完成 1000 条 flow 的调度模拟
 - ns3 执行器输出与理论计算执行器的结果趋势一致（误差 < 20%）
 
-### Phase 5: 验证与优化（预计 1-2 周）
+### Phase 5: 验证与优化（待开发）
 
 **目标**：端到端验证系统正确性，优化性能
 
 | 周 | 任务 | 交付物 |
 |----|------|--------|
-| 12 | 端到端测试：真实模型参数 → P2P Workload → 调度 → 执行 → 结果分析 | 完整测试报告 |
-| 12 | 性能优化：并行化、缓存、减少内存占用 | 优化后的代码 |
-| 13 | 文档完善：使用说明、API 文档、示例 | `README.md`, `docs/` |
+| - | 端到端测试：真实模型参数 → P2P Workload → 调度 → 执行 → 结果分析 | 完整测试报告 |
+| - | 性能优化：并行化、缓存、减少内存占用 | 优化后的代码 |
+| - | 文档完善：使用说明、API 文档、示例 | `README.md`, `docs/` |
 
 ---
 
@@ -601,6 +598,9 @@ class NS3Executor:
 2. **PP 通信支持**：当前仅支持 TP/DP/EP 展开，PP 的 Pipeline 并行需要扩展
 3. **更多拓扑**：除 Spectrum-X 外，支持 AlibabaHPN、DCN+ 等
 4. **可视化**：开发 Web 界面，展示 DAG、调度决策、时延分解
+5. **迭代精化分析**：先用 ASAP 估算流时间，再用竞争分析结果修正，迭代至收敛
+7. **ECMP 多路径路由**：支持等价多路径路由，替代当前 BFS 最短路径
+8. **动态拓扑感知**：支持链路故障、带宽降级等动态拓扑变化
 
 ---
 
