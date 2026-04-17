@@ -27,6 +27,18 @@ from .node_view import (
     NodeLocalView,
     build_node_views,
 )
+from .traffic_matrix import (
+    TrafficMatrix,
+    compute_traffic_matrix,
+)
+from .workload_summary import (
+    WorkloadSummary,
+    compute_workload_summary,
+)
+from .analyzer import (
+    WorkloadAnalysisResult,
+    WorkloadAnalyzer,
+)
 
 __all__ = [
     "TopologyLoader",
@@ -46,4 +58,10 @@ __all__ = [
     "find_contention_groups",
     "NodeLocalView",
     "build_node_views",
+    "TrafficMatrix",
+    "compute_traffic_matrix",
+    "WorkloadSummary",
+    "compute_workload_summary",
+    "WorkloadAnalysisResult",
+    "WorkloadAnalyzer",
 ]
