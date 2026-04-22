@@ -39,6 +39,12 @@ from .analyzer import (
     WorkloadAnalysisResult,
     WorkloadAnalyzer,
 )
+from .task_serializer import (
+    ExecutionPlan,
+    OrderingStrategy,
+    CppReferenceOrdering,
+    TaskSerializer,
+)
 
 __all__ = [
     "TopologyLoader",
@@ -64,4 +70,8 @@ __all__ = [
     "compute_workload_summary",
     "WorkloadAnalysisResult",
     "WorkloadAnalyzer",
+    "ExecutionPlan",
+    "OrderingStrategy",
+    "CppReferenceOrdering",
+    "TaskSerializer",
 ]
