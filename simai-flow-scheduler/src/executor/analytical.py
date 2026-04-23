@@ -113,9 +113,17 @@ class AnalyticalExecutor:
                 push_event(time=0, kind="flow_ready", task_id=task.task_id)
 
         # ── 事件循环 ──
+        last_time = 0
         while event_queue:
             event = heapq.heappop(event_queue)
             current_time = event.time
+
+            # 时间单调性检查：防止逆向因果（未来事件触发过去时刻的事件）
+            assert current_time >= last_time, (
+                f"Time went backwards: {last_time} → {current_time} "
+                f"(event: {event.kind} task_id={event.task_id})"
+            )
+            last_time = current_time
 
             if event.kind == "compute_ready":
                 self._handle_compute_ready(
@@ -292,19 +300,15 @@ class AnalyticalExecutor:
         # Step 3: 更新每条 flow 的带宽和预计完成时间
         for flow in flows_list:
             flow.current_bw_gbps = new_bw.get(flow.task_id, 0.0)
-            flow.version += 1
 
             if flow.remaining_bytes == 0:
-                # 流已真正完成：安排立即完成事件
-                flow.estimated_end_time = current_time
-                push_event(
-                    time=flow.estimated_end_time,
-                    kind="flow_completion",
-                    task_id=flow.task_id,
-                    version=flow.version,
-                )
+                # 传输已完成，正在传播阶段。
+                # 旧事件已包含正确的完成时间（transmission_done + propagation_delay），
+                # 不递增 version，不推送新事件，让旧事件自然触发。
+                pass
             elif flow.current_bw_gbps > 0:
-                # 正常传输：计算传播延迟 + 传输时间
+                # 正常传输：用新事件替换旧事件
+                flow.version += 1
                 propagation_delay = self._compute_propagation_delay(flow.path)
                 # remaining_bytes * 8 = bits, bw_gbps * 1e3 = bits per us
                 transmission_us = int(
@@ -318,10 +322,8 @@ class AnalyticalExecutor:
                     version=flow.version,
                 )
             else:
-                # 带宽为零：流被暂停，不安排完成事件
-                # 等待下次 active_flows 变化时重新分配带宽
-                # estimated_end_time 保持不变（不会被使用）
-                pass
+                # 带宽为零：流被暂停，递增 version 使旧事件失效，不安排新事件
+                flow.version += 1
 
     def _compute_propagation_delay(self, path: list[int]) -> int:
         """计算路径的总传播延迟（微秒）。"""
