@@ -192,7 +192,7 @@ class AnalyticalExecutor:
         start_times[task_id] = current_time
 
         # 查询路径
-        path = self.routing_hints.get_path(self.topology, task.src, task.dst)
+        path = self.routing_hints.get_path(task.src, task.dst)
 
         # 创建 ActiveFlow
         flow = ActiveFlow(

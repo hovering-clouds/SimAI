@@ -20,11 +20,10 @@ from typing import Callable
 
 from ..workload_format.schema import P2PWorkload, Task, TaskType
 from .routing_hints import RoutingHints
-from .topology_loader import NetworkTopology
 
 # Type alias for critical path analysis strategies
 CriticalPathStrategy = Callable[
-    [P2PWorkload, NetworkTopology, RoutingHints],
+    [P2PWorkload, RoutingHints],
     "CriticalPathInfo",
 ]
 """
@@ -32,8 +31,7 @@ Critical path analysis strategy function signature.
 
 Args:
     workload: P2P workload with tasks and dependencies
-    topology: Network topology graph
-    routing_hints: Precomputed routing information
+    routing_hints: Precomputed routing information (contains bound topology)
 
 Returns:
     CriticalPathInfo with per-task timing and critical task identification
@@ -102,7 +100,6 @@ class CriticalPathInfo:
 
 def analyze_critical_path(
     workload: P2PWorkload,
-    topology: NetworkTopology,
     routing_hints: RoutingHints,
     analysis_strategy: CriticalPathStrategy | None = None,
 ) -> CriticalPathInfo:
@@ -114,20 +111,18 @@ def analyze_critical_path(
 
     Args:
         workload: P2P workload with tasks and dependencies
-        topology: Network topology graph
-        routing_hints: Precomputed routing information
+        routing_hints: Precomputed routing information (contains bound topology)
         analysis_strategy: Custom analysis function. If None, uses CPM.
 
     Returns:
         CriticalPathInfo with per-task timing and critical task identification
     """
     strategy = analysis_strategy or analyze_cpm
-    return strategy(workload, topology, routing_hints)
+    return strategy(workload, routing_hints)
 
 
 def analyze_cpm(
     workload: P2PWorkload,
-    topology: NetworkTopology,
     routing_hints: RoutingHints,
 ) -> CriticalPathInfo:
     """
@@ -164,7 +159,7 @@ def analyze_cpm(
         )
         earliest_finish[task.task_id] = (
             earliest_start[task.task_id]
-            + _estimate_duration(task, topology, routing_hints)
+            + _estimate_duration(task, routing_hints)
         )
 
     # Step 3: Backward pass (ALAP)
@@ -186,7 +181,7 @@ def analyze_cpm(
         )
         latest_start[task.task_id] = (
             latest_finish[task.task_id]
-            - _estimate_duration(task, topology, routing_hints)
+            - _estimate_duration(task, routing_hints)
         )
 
     # Step 4: Build output
@@ -216,7 +211,6 @@ def analyze_cpm(
 
 def _estimate_duration(
     task: Task,
-    topology: NetworkTopology,
     routing_hints: RoutingHints,
 ) -> int:
     """
@@ -227,6 +221,8 @@ def _estimate_duration(
         Total duration = transmission_delay + propagation_delay
         - transmission_delay = size_bits / bottleneck_bandwidth
         - propagation_delay = sum of all link latencies along path
+
+    Uses topology bound in routing_hints for path and link lookups.
     """
     if not task.is_flow():
         return task.duration_us or 0
@@ -235,7 +231,7 @@ def _estimate_duration(
         return 0
 
     # Get full path through topology (from routing hints)
-    path = routing_hints.get_path(topology, task.src, task.dst)
+    path = routing_hints.get_path(task.src, task.dst)
     if len(path) < 2:
         return 0
 
@@ -243,6 +239,7 @@ def _estimate_duration(
     if size_bits == 0:
         return 0
 
+    topology = routing_hints.topology
     bottleneck_bw_gbps = float("inf")
     total_latency_us = 0.0
 

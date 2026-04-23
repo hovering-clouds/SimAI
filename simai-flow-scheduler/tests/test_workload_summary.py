@@ -64,8 +64,8 @@ def _make_star_topo(bw=400.0, lat=0.5):
 
 def _analyze(wl, topo):
     hints = compute_routing_hints(topo, wl)
-    cp = analyze_critical_path(wl, topo, hints)
-    cg = find_contention_groups(wl, topo, hints, cp)
+    cp = analyze_critical_path(wl, hints)
+    cg = find_contention_groups(wl, hints, cp)
     return compute_workload_summary(wl, cp, cg)
 
 
@@ -81,8 +81,8 @@ class TestComputeWorkloadSummary:
         topo = _make_star_topo()
         wl = P2PWorkload(version="1.0", meta=Meta(num_jobs=0, num_nodes=0))
         hints = compute_routing_hints(topo, wl)
-        cp = analyze_critical_path(wl, topo, hints)
-        cg = find_contention_groups(wl, topo, hints, cp)
+        cp = analyze_critical_path(wl, hints)
+        cg = find_contention_groups(wl, hints, cp)
         summary = compute_workload_summary(wl, cp, cg)
 
         assert summary.total_tasks == 0

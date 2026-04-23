@@ -312,7 +312,7 @@ def test_fair_share_allocator_no_contention():
         path=[0, 1], start_time=0, last_update_time=0,
     )
     from src.static_analysis.routing_hints import RoutingHints
-    hints = RoutingHints()
+    hints = RoutingHints(topology=topo)
 
     result = allocator.allocate([flow], topo, hints, current_time=0)
     assert result[0] == 100.0
@@ -332,7 +332,7 @@ def test_fair_share_allocator_contention():
         path=[0, 1], start_time=0, last_update_time=0,
     )
     from src.static_analysis.routing_hints import RoutingHints
-    hints = RoutingHints()
+    hints = RoutingHints(topology=topo)
 
     result = allocator.allocate([flow1, flow2], topo, hints, current_time=0)
     assert result[0] == 50.0

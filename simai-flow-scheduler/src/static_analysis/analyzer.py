@@ -73,11 +73,11 @@ class WorkloadAnalyzer:
         routing_hints = compute_routing_hints(self.topology, workload)
 
         # 2. Critical path (uses routing_hints for accurate multi-hop duration)
-        critical_path = analyze_critical_path(workload, self.topology, routing_hints)
+        critical_path = analyze_critical_path(workload, routing_hints)
 
         # 3. Link contention (uses paths from routing_hints + timing from critical_path)
         contention_groups = find_contention_groups(
-            workload, self.topology, routing_hints, critical_path
+            workload, routing_hints, critical_path
         )
 
         # 4. Node views (uses ASAP times from critical_path)

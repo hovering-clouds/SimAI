@@ -40,6 +40,7 @@ class RoutingHints:
     On-demand routing hints with path caching.
 
     Design:
+    - topology bound at construction time, ensuring cache consistency
     - _cached_paths stores node-level paths [src, hop1, hop2, ..., dst]
     - When needed, convert path → links on demand
     - link_loads aggregates statistics for quick contention analysis
@@ -48,6 +49,9 @@ class RoutingHints:
     Computed eagerly in Phase 3 Task 1 so that Task 2 (critical path)
     can use accurate multi-hop duration estimates.
     """
+
+    # Network topology (bound at construction, used by routing strategy)
+    topology: NetworkTopology = field(repr=False)
 
     # Routing strategy function (default: BFS shortest path)
     routing_strategy: RoutingStrategy = field(default=None, repr=False)
@@ -67,7 +71,7 @@ class RoutingHints:
         if self.routing_strategy is None:
             self.routing_strategy = bfs_shortest_path
 
-    def get_path(self, topology: NetworkTopology, src: int, dst: int) -> list[int]:
+    def get_path(self, src: int, dst: int) -> list[int]:
         """
         Path lookup: compute via routing strategy on first access, cache for reuse.
 
@@ -76,7 +80,7 @@ class RoutingHints:
         """
         key = (src, dst)
         if key not in self._cached_paths:
-            path = self.routing_strategy(topology, src, dst)
+            path = self.routing_strategy(self.topology, src, dst)
             if path is None:
                 raise ValueError(
                     f"No path found from node {src} to node {dst}. "
@@ -85,9 +89,7 @@ class RoutingHints:
             self._cached_paths[key] = path
         return self._cached_paths[key]
 
-    def get_flow_links(
-        self, task: Task, topology: NetworkTopology
-    ) -> list[tuple[int, int]]:
+    def get_flow_links(self, task: Task) -> list[tuple[int, int]]:
         """
         Convert cached path to physical links for a flow task.
 
@@ -100,7 +102,7 @@ class RoutingHints:
         if task.src is None or task.dst is None:
             return []
 
-        path = self.get_path(topology, task.src, task.dst)
+        path = self.get_path(task.src, task.dst)
         return [(path[i], path[i + 1]) for i in range(len(path) - 1)]
 
     def get_most_used_links(self, top_k: int = 20) -> list[tuple[tuple[int, int], int]]:
@@ -134,7 +136,7 @@ def compute_routing_hints(
     if routing_strategy is None:
         routing_strategy = bfs_shortest_path
 
-    hints = RoutingHints(routing_strategy=routing_strategy)
+    hints = RoutingHints(topology=topology, routing_strategy=routing_strategy)
 
     # Process each flow task
     for task in workload.tasks:
@@ -144,7 +146,7 @@ def compute_routing_hints(
             continue
 
         # This triggers BFS and caches the path
-        path = hints.get_path(topology, task.src, task.dst)
+        path = hints.get_path(task.src, task.dst)
 
         # Aggregate link loads from this path
         links = [(path[i], path[i + 1]) for i in range(len(path) - 1)]

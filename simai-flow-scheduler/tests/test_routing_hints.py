@@ -162,17 +162,17 @@ class TestRoutingHintsGetPath:
 
     def test_returns_path(self):
         topo = _make_linear_topo(3)
-        hints = RoutingHints()
-        path = hints.get_path(topo, 0, 2)
+        hints = RoutingHints(topology=topo)
+        path = hints.get_path(0, 2)
         assert path == [0, 1, 2]
 
     def test_caches_result(self):
         """Second call returns cached result (no re-computation)."""
         topo = _make_linear_topo(3)
-        hints = RoutingHints()
+        hints = RoutingHints(topology=topo)
 
-        path1 = hints.get_path(topo, 0, 2)
-        path2 = hints.get_path(topo, 0, 2)
+        path1 = hints.get_path(0, 2)
+        path2 = hints.get_path(0, 2)
         assert path1 is path2  # Same list object (cached)
         assert (0, 2) in hints._cached_paths
 
@@ -180,15 +180,15 @@ class TestRoutingHintsGetPath:
         """No path → raises ValueError."""
         topo = NetworkTopology()
         topo.add_link(Link(src=0, dst=1, bandwidth_gbps=100.0, latency_us=1.0, error_rate=0))
-        hints = RoutingHints()
+        hints = RoutingHints(topology=topo)
         with pytest.raises(ValueError, match="No path found from node 0 to node 5"):
-            hints.get_path(topo, 0, 5)
+            hints.get_path(0, 5)
 
     def test_same_node_path(self):
         """src == dst returns [src]."""
         topo = _make_linear_topo(3)
-        hints = RoutingHints()
-        path = hints.get_path(topo, 1, 1)
+        hints = RoutingHints(topology=topo)
+        path = hints.get_path(1, 1)
         assert path == [1]
 
 
@@ -204,56 +204,56 @@ class TestRoutingHintsGetFlowLinks:
         """Flow on direct link → one physical link tuple."""
         topo = NetworkTopology()
         topo.add_link(Link(src=0, dst=1, bandwidth_gbps=100.0, latency_us=1.0, error_rate=0))
-        hints = RoutingHints()
+        hints = RoutingHints(topology=topo)
         task = Task(task_id=0, job_id=0, type=TaskType.FLOW, src=0, dst=1, size_bytes=1000)
 
-        links = hints.get_flow_links(task, topo)
+        links = hints.get_flow_links(task)
         assert links == [(0, 1)]
 
     def test_two_hop_flow(self):
         """Flow through switch → two physical link tuples."""
         topo = _make_star_topo(center=10, leaves=[0, 1])
-        hints = RoutingHints()
+        hints = RoutingHints(topology=topo)
         task = Task(task_id=0, job_id=0, type=TaskType.FLOW, src=0, dst=1, size_bytes=1000)
 
-        links = hints.get_flow_links(task, topo)
+        links = hints.get_flow_links(task)
         assert links == [(0, 10), (10, 1)]
 
     def test_multi_hop_flow(self):
         """Flow through linear 0→1→2→3."""
         topo = _make_linear_topo(4)
-        hints = RoutingHints()
+        hints = RoutingHints(topology=topo)
         task = Task(task_id=0, job_id=0, type=TaskType.FLOW, src=0, dst=3, size_bytes=1000)
 
-        links = hints.get_flow_links(task, topo)
+        links = hints.get_flow_links(task)
         assert links == [(0, 1), (1, 2), (2, 3)]
 
     def test_no_path_raises_exception(self):
         """Flow with no path raises ValueError."""
         topo = NetworkTopology()
         # No link between 0 and 1
-        hints = RoutingHints()
+        hints = RoutingHints(topology=topo)
         task = Task(task_id=0, job_id=0, type=TaskType.FLOW, src=0, dst=1, size_bytes=1000)
 
         with pytest.raises(ValueError, match="No path found from node 0 to node 1"):
-            hints.get_flow_links(task, topo)
+            hints.get_flow_links(task)
 
     def test_compute_task_returns_empty(self):
         """Compute task (no src/dst) returns empty list."""
         topo = _make_linear_topo(3)
-        hints = RoutingHints()
+        hints = RoutingHints(topology=topo)
         task = Task(task_id=0, job_id=0, type=TaskType.COMPUTE, node=0, duration_us=100)
 
-        links = hints.get_flow_links(task, topo)
+        links = hints.get_flow_links(task)
         assert links == []
 
     def test_flow_with_none_src(self):
         """Flow task with src=None returns empty list."""
         topo = _make_linear_topo(3)
-        hints = RoutingHints()
+        hints = RoutingHints(topology=topo)
         task = Task(task_id=0, job_id=0, type=TaskType.FLOW, dst=1, size_bytes=1000)
 
-        links = hints.get_flow_links(task, topo)
+        links = hints.get_flow_links(task)
         assert links == []
 
 
@@ -267,7 +267,8 @@ class TestGetMostUsedLinks:
 
     def test_most_used_ordering(self):
         """Links used by more flows appear first."""
-        hints = RoutingHints()
+        topo = _make_star_topo(center=10, leaves=[0, 1, 2])
+        hints = RoutingHints(topology=topo)
         hints.link_loads = {(0, 1): 5, (1, 2): 10, (2, 3): 3}
 
         result = hints.get_most_used_links(top_k=3)
@@ -275,7 +276,8 @@ class TestGetMostUsedLinks:
 
     def test_top_k_limits_results(self):
         """top_k parameter limits output length."""
-        hints = RoutingHints()
+        topo = _make_star_topo(center=10, leaves=list(range(11)))
+        hints = RoutingHints(topology=topo)
         hints.link_loads = {(i, i + 1): i + 1 for i in range(10)}
 
         result = hints.get_most_used_links(top_k=3)
@@ -284,12 +286,14 @@ class TestGetMostUsedLinks:
 
     def test_empty_link_loads(self):
         """No loads → empty list."""
-        hints = RoutingHints()
+        topo = _make_star_topo(center=10, leaves=[0, 1])
+        hints = RoutingHints(topology=topo)
         assert hints.get_most_used_links() == []
 
     def test_default_top_k(self):
         """Default top_k=20 returns all if fewer than 20."""
-        hints = RoutingHints()
+        topo = _make_star_topo(center=10, leaves=[0, 1, 2])
+        hints = RoutingHints(topology=topo)
         hints.link_loads = {(0, 1): 1, (1, 2): 2}
 
         result = hints.get_most_used_links()
@@ -429,26 +433,26 @@ class TestIntegrationSpectrumX:
 
     def test_gpu_to_asw_path(self, topo):
         """GPU 0 → ASW 9: direct link (1 hop)."""
-        hints = RoutingHints()
-        path = hints.get_path(topo, 0, 9)
+        hints = RoutingHints(topology=topo)
+        path = hints.get_path(0, 9)
         assert path == [0, 9]
 
     def test_gpu_to_psw_path(self, topo):
         """GPU 0 → PSW 17: through ASW (2 hops)."""
-        hints = RoutingHints()
-        path = hints.get_path(topo, 0, 17)
+        hints = RoutingHints(topology=topo)
+        path = hints.get_path(0, 17)
         assert path == [0, 9, 17]
 
     def test_gpu_to_nvswitch(self, topo):
         """GPU 0 → NV Switch 8: direct link."""
-        hints = RoutingHints()
-        path = hints.get_path(topo, 0, 8)
+        hints = RoutingHints(topology=topo)
+        path = hints.get_path(0, 8)
         assert path == [0, 8]
 
     def test_reverse_path_exists(self, topo):
         """Reverse path from PSW 17 to ASW 9 exists (bidirectional links)."""
-        hints = RoutingHints()
-        path = hints.get_path(topo, 17, 9)
+        hints = RoutingHints(topology=topo)
+        path = hints.get_path(17, 9)
         assert path == [17, 9]  # Direct reverse link exists
 
     def test_compute_routing_hints_with_spectrum(self, topo):
@@ -486,8 +490,8 @@ class TestCustomRoutingStrategy:
         def custom_strategy(topology, src, dst):
             return [src, dst]  # Direct path regardless of topology
 
-        hints = RoutingHints(routing_strategy=custom_strategy)
-        path = hints.get_path(topo, 0, 2)
+        hints = RoutingHints(topology=topo, routing_strategy=custom_strategy)
+        path = hints.get_path(0, 2)
 
         # Should use custom strategy, not BFS (which would return [0, 1, 2])
         assert path == [0, 2]
@@ -506,7 +510,7 @@ class TestCustomRoutingStrategy:
         hints = compute_routing_hints(topo, workload, routing_strategy=direct_routing)
 
         # Path should be direct, not multi-hop
-        assert hints.get_path(topo, 0, 2) == [0, 2]
+        assert hints.get_path(0, 2) == [0, 2]
         # Link loads should reflect direct path
         assert hints.link_loads == {(0, 2): 1}
 
@@ -515,8 +519,8 @@ class TestCustomRoutingStrategy:
         topo = _make_linear_topo(3)
 
         # No custom strategy provided
-        hints = RoutingHints()
-        path = hints.get_path(topo, 0, 2)
+        hints = RoutingHints(topology=topo)
+        path = hints.get_path(0, 2)
 
         # Should use default BFS
         assert path == [0, 1, 2]
@@ -529,10 +533,10 @@ class TestCustomRoutingStrategy:
         def broken_strategy(topology, src, dst):
             return None
 
-        hints = RoutingHints(routing_strategy=broken_strategy)
+        hints = RoutingHints(topology=topo, routing_strategy=broken_strategy)
 
         with pytest.raises(ValueError, match="No path found from node 0 to node 2"):
-            hints.get_path(topo, 0, 2)
+            hints.get_path(0, 2)
 
     def test_custom_strategy_caching(self):
         """Custom strategy results are cached."""
@@ -547,14 +551,14 @@ class TestCustomRoutingStrategy:
                 return [src]
             return [src, dst]
 
-        hints = RoutingHints(routing_strategy=counting_strategy)
+        hints = RoutingHints(topology=topo, routing_strategy=counting_strategy)
 
         # First call
-        path1 = hints.get_path(topo, 0, 2)
+        path1 = hints.get_path(0, 2)
         assert call_count == 1
 
         # Second call should use cache
-        path2 = hints.get_path(topo, 0, 2)
+        path2 = hints.get_path(0, 2)
         assert call_count == 1  # Not incremented
         assert path1 is path2  # Same cached object
 

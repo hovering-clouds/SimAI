@@ -63,7 +63,7 @@ def _make_star_topo(bw=400.0, lat=0.5):
 
 def _analyze(wl, topo):
     hints = compute_routing_hints(topo, wl)
-    cp = analyze_critical_path(wl, topo, hints)
+    cp = analyze_critical_path(wl, hints)
     return build_node_views(wl, cp)
 
 
@@ -185,7 +185,7 @@ class TestBuildNodeViews:
         wl = _make_workload([c0, f0])
 
         hints = compute_routing_hints(topo, wl)
-        cp = analyze_critical_path(wl, topo, hints)
+        cp = analyze_critical_path(wl, hints)
         views = build_node_views(wl, cp)
 
         # Receiver gets data at flow finish time, not start time

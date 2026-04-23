@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from ..workload_format.schema import P2PWorkload
 from .critical_path import CriticalPathInfo
 from .routing_hints import RoutingHints
-from .topology_loader import NetworkTopology
 
 
 @dataclass
@@ -139,7 +138,6 @@ class LinkContentionGroup:
 
 def find_contention_groups(
     workload: P2PWorkload,
-    topology: NetworkTopology,
     routing_hints: RoutingHints,
     critical_path_info: CriticalPathInfo,
 ) -> dict[tuple[int, int], LinkContentionGroup]:
@@ -148,15 +146,18 @@ def find_contention_groups(
 
     For each flow task:
     1. Get global start time from critical path (ASAP)
-    2. Get full path through topology
+    2. Get full path through topology (via routing_hints)
     3. Calculate per-link timing:
        - entry_time = flow_start + cumulative_propagation_latency
        - exit_time  = entry_time + transmission_delay (size / link_bandwidth)
     4. Add to contention group
     5. Post-process to compute peak concurrency via sweep line
 
+    Uses topology bound in routing_hints for path and link lookups.
+
     Complexity: O(F * H) where F = num flows, H = avg hop count
     """
+    topology = routing_hints.topology
     groups: dict[tuple[int, int], LinkContentionGroup] = {}
 
     for task in workload.tasks:
@@ -176,7 +177,7 @@ def find_contention_groups(
         flow_start_time = timing.earliest_start_us if timing else 0
 
         # Full path through topology
-        path = routing_hints.get_path(topology, task.src, task.dst)
+        path = routing_hints.get_path(task.src, task.dst)
         if len(path) < 2:
             continue
 
