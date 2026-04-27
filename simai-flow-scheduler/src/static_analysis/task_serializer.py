@@ -77,22 +77,29 @@ class OrderingStrategy(ABC):
 
 class CppReferenceOrdering(OrderingStrategy):
     """
-    默认排序：严格复现 C++ 参考实现的执行顺序。
+    默认排序：复现 C++ 参考实现的执行顺序。
 
-    根据 cpp-execution-order.md 中的分析：
-    - Forward Pass: layer[0] → layer[N-1]（正序）
-    - Backward Pass: layer[N-1] → layer[0]（倒序）
-    - WG 通信（DP AllReduce）以 Non-Blocking 方式发起，与下一 GA 的 Forward Pass 并行
+    C++ iterate_hybrid_parallel_Transformer_fwd_in_bckwd() 的执行模式
+    （TOTAL_PASS=1，所有 item 一遍）：
+      Forward:  所有 item 的 fwd，从 index 0 到 SIZE-1
+      Backward: 所有 item 的 ig/wg，从 index SIZE-1 到 0
+
+    AICB 文件中 item 按顺序排列为 pre → GA[0] layers → GA[1] layers → post，
+    因此 C++ 的实际执行顺序等价于：
+      Forward:  GA[0] fwd → GA[1] fwd（GA 升序）
+      Backward: GA[1] ig/wg → GA[0] ig/wg（GA 降序）
+
+    仅排序 GA 层内的 compute 任务（iteration >= 0），
+    pre/post 任务的执行顺序由 deps 决定。
 
     排序优先级（从高到低）：
-    1. iteration（GA 序号）：先执行较早的 GA
-    2. phase（阶段）：
-       - FORWARD
-       - BACKWARD_INPUT
-       - BACKWARD_WEIGHT
-       - OPTIMIZER
-    3. layer_id：Forward 正序，Backward 倒序
-    4. item_id：按顺序
+    1. phase: FORWARD → BACKWARD_INPUT → BACKWARD_WEIGHT
+    2. iteration: Forward 阶段 GA 升序，Backward 阶段 GA 降序
+    3. layer_id: Forward 正序，Backward 倒序
+    4. item_id
+
+    注：pre items（iteration=-1）和 post items（iteration=ga）也参与排序，
+    通过 ga_sort 自然地排在正确位置（pre fwd 最先、pre bkwd 最后，反之亦然）。
     """
 
     def order(
@@ -103,16 +110,9 @@ class CppReferenceOrdering(OrderingStrategy):
         """
         按 C++ 参考实现的顺序生成 compute 任务排序。
 
-        排序规则：
-        - 首先按 iteration 排序（GA 序号）
-        - 同一 iteration 内，按 phase 排序：FORWARD → BACKWARD_INPUT → BACKWARD_WEIGHT → OPTIMIZER
-        - 同一 phase 内：
-          - FORWARD：layer_id 正序
-          - BACKWARD_INPUT / BACKWARD_WEIGHT：layer_id 倒序
-          - OPTIMIZER：按 layer_id
-        - 同一 layer 内，按 item_id 排序
+        包含所有 compute 任务（pre/GA/post），排序规则见类 docstring。
         """
-        # 按节点分组 compute 任务
+        # 按节点分组所有 compute 任务（含 pre/GA/post）
         compute_by_node: dict[int, list[Task]] = {}
 
         for task in workload.tasks:
@@ -135,15 +135,20 @@ class CppReferenceOrdering(OrderingStrategy):
 
     def _compute_sort_key(self, task: Task) -> tuple:
         """
-        生成排序键。
+        生成排序键，复现 C++ 参考实现的执行顺序。
+
+        C++ 执行顺序（TOTAL_PASS=1，所有 item 一遍）：
+          Forward:  GA[0] layers → GA[1] layers → ... → post items
+          Backward: post items → ... → GA[1] layers → GA[0] layers → pre items
+
+        映射到 compute 排序：
+          fwd(GA=0) → fwd(GA=1) → ig(GA=1) → wg(GA=1) → ig(GA=0) → wg(GA=0)
 
         排序规则：
-        - iteration：主要排序键
-        - phase：次要排序键
-        - layer_id：第三排序键，Forward 正序，Backward 倒序
-        - item_id：第四排序键
-
-        phase 顺序：FORWARD(0) → BACKWARD_INPUT(1) → BACKWARD_WEIGHT(2) → OPTIMIZER(3)
+        1. phase：FORWARD → BACKWARD_INPUT → BACKWARD_WEIGHT
+        2. iteration：Forward 正序（GA 升序），Backward 倒序（GA 降序）
+        3. layer_id：Forward 正序，Backward 倒序
+        4. item_id：兜底
         """
         phase_order = {
             Phase.FORWARD: 0,
@@ -152,16 +157,16 @@ class CppReferenceOrdering(OrderingStrategy):
             Phase.OPTIMIZER: 3,
         }
 
-        # Backward 阶段需要倒序排列 layer
-        # 使用 -layer_id 实现倒序，正序用 layer_id
-        if task.phase in (Phase.BACKWARD_INPUT, Phase.BACKWARD_WEIGHT):
-            layer_sort = -task.layer_id
-        else:
-            layer_sort = task.layer_id
+        is_backward = task.phase in (Phase.BACKWARD_INPUT, Phase.BACKWARD_WEIGHT)
+
+        # GA ordering: forward ascending, backward descending
+        ga_sort = -task.iteration if is_backward else task.iteration
+        # Layer ordering: forward ascending, backward descending
+        layer_sort = -task.layer_id if is_backward else task.layer_id
 
         return (
-            task.iteration,
             phase_order.get(task.phase, 999),
+            ga_sort,
             layer_sort,
             task.item_id,
         )

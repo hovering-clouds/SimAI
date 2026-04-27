@@ -71,7 +71,7 @@ class WorkloadBuilder:
     # Pre-layer item names (appear before GA loop)
     PRE_LAYER_NAMES = {
         "grad_gather", "grad_param_comm", "grad_param_compute",
-        "embedding_grads", "moe_grad_norm1", "moe_grad_norm2",
+        "layernorm", "embedding_grads", "moe_grad_norm1", "moe_grad_norm2",
     }
 
     # Post-layer item names (appear after GA loop)
@@ -114,8 +114,7 @@ class WorkloadBuilder:
         if num_layer_items > 0:
             assert num_layer_items % aicb_header.ga == 0, \
                 f"Layer items ({num_layer_items}) not divisible by GA ({aicb_header.ga})"
-            assert num_layer_items // aicb_header.ga == aicb_header.vpp, \
-                f"Expected vpp={aicb_header.vpp}, got {num_layer_items // aicb_header.ga}"
+        items_per_ga = num_layer_items // aicb_header.ga if num_layer_items > 0 else 0
 
         # ===== Phase 1: Generate all tasks (no cross-phase deps) =====
         all_flow_tasks: list[FlowTask] = []
@@ -134,9 +133,9 @@ class WorkloadBuilder:
                 iteration = aicb_header.ga
                 layer_id = item_idx - (num_pre_items + num_layer_items)
             else:
-                # Layer items: iteration=GA step, layer_id=layer within GA (0 to vpp-1)
-                iteration = (item_idx - num_pre_items) // aicb_header.vpp
-                layer_id = (item_idx - num_pre_items) % aicb_header.vpp
+                # Layer items: iteration=GA step, layer_id=flat index within GA
+                iteration = (item_idx - num_pre_items) // items_per_ga
+                layer_id = (item_idx - num_pre_items) % items_per_ga
 
             item_id = item_idx
             item_tasks = ItemTasks()
@@ -196,7 +195,7 @@ class WorkloadBuilder:
 
         # ===== Phase 2: Wire dependencies =====
         self._wire_dependencies(
-            item_tasks_list, num_layer_items, num_pre_items, aicb_header)
+            item_tasks_list, num_layer_items, num_pre_items, items_per_ga)
 
         # Build P2PWorkload
         workload = P2PWorkload(
@@ -380,134 +379,156 @@ class WorkloadBuilder:
         item_tasks_list: list[ItemTasks],
         num_layer_items: int,
         num_pre_items: int,
-        header: AicbHeader,
+        items_per_ga: int,
     ):
-        """Wire all dependencies following Forward/IG reverse/WG ordering.
+        """Wire all dependencies using fork-join pattern.
 
-        GA group wiring:
-          Forward chain:  layer[0].fwd → layer[1].fwd → ... → layer[N-1].fwd
-          Bridge:         layer[N-1].fwd → layer[N-1].ig
-          IG reverse:     layer[N-1].ig → layer[N-2].ig → ... → layer[0].ig
-          WG same layer:  layer[i].ig → layer[i].wg (for each i)
-          GA bridge:      layer[0].wg(GA=k) → layer[0].fwd(GA=k+1)
+        GA steps have no data dependency and can execute in parallel.
+        Pre/post items are barriers before/after all GA steps.
 
-        Pre/post items are wired linearly (fwd→ig→wg within each item,
-        then chain across items).
+          Forward:
+            pre_0.fwd → ... → pre_N.fwd ──┬──→ GA[0].fwd chain
+                                           └──→ GA[1].fwd chain  ← parallel
+                                                    ...
+                                           └──→ GA[K].fwd chain
+              GA[0] fwd done ──┬──→ post_0.fwd → ... → post_M.fwd
+              GA[K] fwd done ──┘
+              Bridge: post_M.fwd → post_M.ig
+
+          Backward (reverse):
+            post_M.ig → ... → post_0.ig ──┬──→ GA[0].bkwd chain
+                                            └──→ GA[1].bkwd chain  ← parallel
+                                                     ...
+                                            └──→ GA[K].bkwd chain
+              GA[0] bkwd done ──┬──→ pre_N.ig → ... → pre_0.ig
+              GA[K] bkwd done ──┘
+
+        Each section internally:
+          Forward chain: item[0].fwd → item[1].fwd → ... → item[N].fwd
+          Backward chain: item[N].ig → item[N-1].ig → ... → item[0].ig
+          IG→WG: item[i].ig → item[i].wg (same layer)
         """
-        vpp = header.vpp if num_layer_items > 0 else 1
         ga_groups = self._group_items_by_ga(
-            item_tasks_list, num_pre_items, num_layer_items, vpp)
+            item_tasks_list, num_pre_items, num_layer_items, items_per_ga)
         post_start = num_pre_items + num_layer_items
-
-        # --- Wire pre-items linearly ---
         pre_items = item_tasks_list[:num_pre_items]
-        self._wire_linear_chain(pre_items)
-
-        # --- Wire GA groups ---
-        for ga_idx, ga_group in enumerate(ga_groups):
-            num_layers = len(ga_group)
-
-            # 1. Forward chain (正序 0 → N-1)
-            for i in range(num_layers - 1):
-                self._wire_per_node_phase_transition(
-                    src_result=ga_group[i].fwd_result,
-                    src_computes=ga_group[i].fwd_computes,
-                    dst_computes=ga_group[i + 1].fwd_computes)
-
-            # 2. Fwd→IG bridge (最后一层)
-            last_layer = ga_group[num_layers - 1]
-            self._wire_per_node_phase_transition(
-                src_result=last_layer.fwd_result,
-                src_computes=last_layer.fwd_computes,
-                dst_computes=last_layer.ig_computes)
-
-            # 3. IG reverse chain + WG same layer
-            for i in range(num_layers - 1, -1, -1):
-                # IG→WG same layer
-                self._wire_per_node_phase_transition(
-                    src_result=ga_group[i].ig_result,
-                    src_computes=ga_group[i].ig_computes,
-                    dst_computes=ga_group[i].wg_computes)
-                # IG→previous layer IG (reverse)
-                if i > 0:
-                    self._wire_per_node_phase_transition(
-                        src_result=ga_group[i].ig_result,
-                        src_computes=ga_group[i].ig_computes,
-                        dst_computes=ga_group[i - 1].ig_computes)
-
-            # 4. GA bridge removed - not a true data dependency
-            # Scheduler can use (iteration, layer_id, phase) hints to
-            # reproduce C++ order if needed, but we don't enforce it
-            # as a hard dependency, allowing WG/Fwd overlap optimizations.
-
-        # --- Wire post-items linearly ---
         post_items = item_tasks_list[post_start:]
-        self._wire_linear_chain(post_items)
 
-        # --- Connect sections ---
-        # pre → GA
-        if pre_items and ga_groups:
-            self._wire_per_node_phase_transition(
-                src_result=pre_items[-1].wg_result,
-                src_computes=pre_items[-1].wg_computes,
-                dst_computes=ga_groups[0][0].fwd_computes)
-        elif pre_items and post_items:
-            # No GA groups, connect pre → post directly
-            self._wire_per_node_phase_transition(
-                src_result=pre_items[-1].wg_result,
-                src_computes=pre_items[-1].wg_computes,
-                dst_computes=post_items[0].fwd_computes)
+        # ===== Internal wiring for each section =====
 
-        # GA → post
-        if ga_groups and post_items:
-            self._wire_per_node_phase_transition(
-                src_result=ga_groups[-1][0].wg_result,
-                src_computes=ga_groups[-1][0].wg_computes,
-                dst_computes=post_items[0].fwd_computes)
+        # Pre items: forward chain + backward chain + IG→WG
+        self._wire_forward_chain(pre_items)
+        self._wire_backward_chain(pre_items)
 
-    def _wire_linear_chain(self, items: list[ItemTasks]):
-        """Wire a list of items as a linear chain (for pre/post items).
+        # Each GA group: forward chain + backward chain + IG→WG
+        for ga_group in ga_groups:
+            self._wire_forward_chain(ga_group)
+            self._wire_backward_chain(ga_group)
 
-        Within each item: fwd→ig→wg.
-        Between consecutive items: item[i-1].wg → item[i].fwd.
-        """
-        for i, item in enumerate(items):
-            # Wire internal phases: fwd→ig→wg
+        # Post items: forward chain + bridge + backward chain + IG→WG
+        self._wire_forward_chain(post_items)
+        if post_items:
+            last = post_items[-1]
             self._wire_per_node_phase_transition(
-                src_result=item.fwd_result,
-                src_computes=item.fwd_computes,
-                dst_computes=item.ig_computes)
+                src_result=last.fwd_result,
+                src_computes=last.fwd_computes,
+                dst_computes=last.ig_computes)
+        self._wire_backward_chain(post_items)
+
+        # ===== Barrier connections between sections =====
+
+        if not ga_groups:
+            # No GA groups: connect pre → post directly (both directions)
+            if pre_items and post_items:
+                # Forward: pre → post
+                self._wire_per_node_phase_transition(
+                    src_result=pre_items[-1].fwd_result,
+                    src_computes=pre_items[-1].fwd_computes,
+                    dst_computes=post_items[0].fwd_computes)
+                # Backward: post → pre
+                self._wire_per_node_phase_transition(
+                    src_result=post_items[0].ig_result,
+                    src_computes=post_items[0].ig_computes,
+                    dst_computes=pre_items[-1].ig_computes)
+            return
+
+        # --- Forward barriers ---
+        # Fork: pre → all GAs
+        if pre_items:
+            for ga_group in ga_groups:
+                self._wire_per_node_phase_transition(
+                    src_result=pre_items[-1].fwd_result,
+                    src_computes=pre_items[-1].fwd_computes,
+                    dst_computes=ga_group[0].fwd_computes)
+
+        # Join: all GAs → post
+        if post_items:
+            for ga_group in ga_groups:
+                self._wire_per_node_phase_transition(
+                    src_result=ga_group[-1].fwd_result,
+                    src_computes=ga_group[-1].fwd_computes,
+                    dst_computes=post_items[0].fwd_computes)
+
+        # --- Backward barriers ---
+        # Fork: post → all GAs
+        if post_items:
+            for ga_group in ga_groups:
+                self._wire_per_node_phase_transition(
+                    src_result=post_items[0].ig_result,
+                    src_computes=post_items[0].ig_computes,
+                    dst_computes=ga_group[-1].ig_computes)
+
+        # Join: all GAs → pre
+        if pre_items:
+            for ga_group in ga_groups:
+                self._wire_per_node_phase_transition(
+                    src_result=ga_group[0].ig_result,
+                    src_computes=ga_group[0].ig_computes,
+                    dst_computes=pre_items[-1].ig_computes)
+
+    def _wire_forward_chain(self, items: list[ItemTasks]):
+        """Wire forward chain: item[0].fwd → item[1].fwd → ... → item[N-1].fwd."""
+        for i in range(len(items) - 1):
             self._wire_per_node_phase_transition(
-                src_result=item.ig_result,
-                src_computes=item.ig_computes,
-                dst_computes=item.wg_computes)
-            # Chain to next item
+                src_result=items[i].fwd_result,
+                src_computes=items[i].fwd_computes,
+                dst_computes=items[i + 1].fwd_computes)
+
+    def _wire_backward_chain(self, items: list[ItemTasks]):
+        """Wire backward chain + IG→WG: item[N-1].ig → ... → item[0].ig, each ig→wg."""
+        for i in range(len(items) - 1, -1, -1):
+            # IG→WG same layer
+            self._wire_per_node_phase_transition(
+                src_result=items[i].ig_result,
+                src_computes=items[i].ig_computes,
+                dst_computes=items[i].wg_computes)
+            # IG→previous layer IG (reverse)
             if i > 0:
                 self._wire_per_node_phase_transition(
-                    src_result=items[i - 1].wg_result,
-                    src_computes=items[i - 1].wg_computes,
-                    dst_computes=item.fwd_computes)
+                    src_result=items[i].ig_result,
+                    src_computes=items[i].ig_computes,
+                    dst_computes=items[i - 1].ig_computes)
 
     def _group_items_by_ga(
         self,
         item_tasks_list: list[ItemTasks],
         num_pre_items: int,
         num_layer_items: int,
-        vpp: int,
+        items_per_ga: int,
     ) -> list[list[ItemTasks]]:
         """Group layer items by GA step.
 
         Items are in outer=GA, inner=layers order:
-          [pre...][GA0_L0, GA0_L1, ..., GA0_L(vpp-1), GA1_L0, ...][post...]
+          [pre...][GA0_items, GA1_items, ...][post...]
         """
         if num_layer_items == 0:
             return []
 
-        num_ga_steps = num_layer_items // vpp
+        num_ga_steps = num_layer_items // items_per_ga
         ga_groups = []
         for g in range(num_ga_steps):
-            start = num_pre_items + g * vpp
-            ga_group = item_tasks_list[start:start + vpp]
+            start = num_pre_items + g * items_per_ga
+            ga_group = item_tasks_list[start:start + items_per_ga]
             ga_groups.append(ga_group)
         return ga_groups
 

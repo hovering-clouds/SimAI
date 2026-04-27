@@ -125,24 +125,31 @@ def _compute_avg_dag_width(workload: P2PWorkload) -> float:
     # Build task map
     task_map = {t.task_id: t for t in workload.tasks}
 
-    # Compute depth for each task (memoized DFS)
+    # Compute depth for each task (iterative topological order)
     depths: dict[int, int] = {}
-
-    def get_depth(task_id: int) -> int:
-        if task_id in depths:
-            return depths[task_id]
-
-        task = task_map[task_id]
-        if not task.deps:
-            depths[task_id] = 0
-        else:
-            depths[task_id] = max(get_depth(dep) for dep in task.deps) + 1
-
-        return depths[task_id]
-
-    # Compute depth for all tasks
+    in_degree: dict[int, int] = {}
+    children: dict[int, list[int]] = {}
     for task in workload.tasks:
-        get_depth(task.task_id)
+        tid = task.task_id
+        in_degree[tid] = len(task.deps)
+        for dep in task.deps:
+            children.setdefault(dep, []).append(tid)
+        if not task.deps:
+            depths[tid] = 0
+
+    # BFS from roots
+    queue = [tid for tid, deg in in_degree.items() if deg == 0]
+    while queue:
+        next_queue = []
+        for tid in queue:
+            for child in children.get(tid, []):
+                new_depth = depths[tid] + 1
+                if child not in depths or new_depth > depths[child]:
+                    depths[child] = new_depth
+                in_degree[child] -= 1
+                if in_degree[child] == 0:
+                    next_queue.append(child)
+        queue = next_queue
 
     # Count tasks at each depth level
     levels: dict[int, int] = {}
