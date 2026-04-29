@@ -50,14 +50,15 @@ def _abbrev_phase(phase: Phase) -> str:
     return PHASE_ABBREV.get(phase, str(phase.value))
 
 
-def _task_description(task: Task) -> str:
-    """生成 task 的人类可读描述。"""
+def _task_description(task: Task, tag: str = "") -> str:
+    """生成 task 人类可读描述，tag 追加到 phase/comm 后面。"""
     if task.is_compute():
         phase = _abbrev_phase(task.phase)
-        return f"{phase} L{task.layer_id}"
+        suffix = f" {tag}" if tag else ""
+        return f"{phase}{suffix} L{task.layer_id}"
     else:
         comm = _abbrev_comm(task.comm_type)
-        return f"{comm} {task.src}\u2192{task.dst}"
+        return f"{comm} {task.src}->{task.dst}"
 
 
 # ── 基类 ──
@@ -73,6 +74,9 @@ class ChromeTraceVisualizer(ABC):
     def __init__(self, workload: P2PWorkload):
         self.workload = workload
         self._task_map: dict[int, Task] = {t.task_id: t for t in workload.tasks}
+        # 推断 GA steps 数量（compute 任务的最大 iteration 值）
+        compute_iters = [t.iteration for t in workload.tasks if t.is_compute() and t.iteration >= 0]
+        self._ga = max(compute_iters) if compute_iters else 0
 
     def export(self, result: ExecutionResult, path: str) -> None:
         """导出为 Chrome Trace JSON 文件。"""
@@ -99,6 +103,13 @@ class ChromeTraceVisualizer(ABC):
 
     def _tid_for_comm(self, node_id: int) -> int:
         return node_id * 2 + 1
+
+    def _iteration_tag(self, iteration: int) -> str:
+        if iteration < 0:
+            return "pre"
+        if self._ga > 0 and iteration >= self._ga:
+            return "post"
+        return f"GA{iteration}"
 
     def _build_metadata_events(self, result: ExecutionResult) -> list[dict]:
         """生成行名称和分组名称的 metadata 事件。"""
@@ -148,7 +159,8 @@ class ChromeTraceVisualizer(ABC):
         return events
 
     def _make_compute_event(self, task: Task, timing: TaskTiming) -> dict:
-        name = _task_description(task)
+        tag = self._iteration_tag(task.iteration)
+        name = _task_description(task, tag)
         return {
             "name": name,
             "cat": "compute",
@@ -165,14 +177,17 @@ class ChromeTraceVisualizer(ABC):
                 "duration_us": task.duration_us,
                 "deps": task.deps,
                 "dep_descriptions": [
-                    _task_description(self._task_map[d])
+                    _task_description(
+                        self._task_map[d],
+                        self._iteration_tag(self._task_map[d].iteration) if self._task_map[d].is_compute() else "",
+                    )
                     for d in task.deps if d in self._task_map
                 ],
             },
         }
 
     def _make_flow_event(self, task: Task, timing: TaskTiming) -> dict:
-        name = _task_description(task)
+        name = _task_description(task, "")
         return {
             "name": name,
             "cat": "flow",
@@ -191,7 +206,10 @@ class ChromeTraceVisualizer(ABC):
                 "iteration": task.iteration,
                 "deps": task.deps,
                 "dep_descriptions": [
-                    _task_description(self._task_map[d])
+                    _task_description(
+                        self._task_map[d],
+                        self._iteration_tag(self._task_map[d].iteration) if self._task_map[d].is_compute() else "",
+                    )
                     for d in task.deps if d in self._task_map
                 ],
             },
@@ -305,7 +323,10 @@ class ChromeTraceCompact(ChromeTraceVisualizer):
                             all_deps.add(d)
                             if d in self._task_map:
                                 dep_descriptions.append(
-                                    _task_description(self._task_map[d])
+                                    _task_description(
+                                        self._task_map[d],
+                                        self._iteration_tag(self._task_map[d].iteration) if self._task_map[d].is_compute() else "",
+                                    )
                                 )
 
             events.append({
@@ -333,12 +354,12 @@ class ChromeTraceCompact(ChromeTraceVisualizer):
     def _build_flow_arrows(
         self, result: ExecutionResult, merged: dict[MergeKey, MergedFlow]
     ) -> list[dict]:
-        """生成 compute ↔ 合并 flow 之间的 Flow Event 箭头。"""
-        # 构建 task_id → timing 的索引
+        """生成 compute <-> 合并 flow 之间的 Flow Event 箭头。"""
+        # 构建 task_id -> timing 的索引
         timing_map = result.per_task
 
         # 为每个合并事件分配一个唯一标识
-        # 同时构建 task_id → merged_key 的反向映射
+        # 同时构建 task_id -> merged_key 的反向映射
         task_to_merged: dict[int, MergeKey] = {}
         for key, m in merged.items():
             for tid in m["task_ids"]:
@@ -349,7 +370,7 @@ class ChromeTraceCompact(ChromeTraceVisualizer):
             return f"merged_{key[0]}_{key[1]}_{key[2]}_{key[3]}_{key[4]}_{key[5]}_{key[6]}"
 
         # 收集所有需要画箭头的目标（merged events 和 compute events）
-        # 箭头方向：dep_source 的 end → dependent 的 start
+        # 箭头方向：dep_source 的 end -> dependent 的 start
         events: list[dict] = []
         arrow_counter = 0
 
