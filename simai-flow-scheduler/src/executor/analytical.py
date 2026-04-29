@@ -215,6 +215,17 @@ class AnalyticalExecutor:
         )
         active_flows[task_id] = flow
 
+        # 0 字节 flow：无需传输，直接安排 completion（仅含 propagation delay）
+        if not task.size_bytes:
+            propagation_delay = self._compute_propagation_delay(path)
+            push_event(
+                time=current_time + propagation_delay,
+                kind="flow_completion",
+                task_id=task_id,
+                version=0,
+            )
+            return
+
         # 重新分配带宽（会设置 flow 的 bw 和 estimated_end_time）
         self._reallocate_bandwidth(current_time, active_flows, push_event)
 

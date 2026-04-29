@@ -213,7 +213,7 @@ class WorkloadBuilder:
     def _create_compute_tasks_for_phase(
         self,
         ranks: list[int],
-        duration_us: int,
+        compute_time_ns: int,
         phase: Phase,
         layer_id: int,
         iteration: int,
@@ -223,8 +223,12 @@ class WorkloadBuilder:
     ) -> tuple[dict[int, FlowTask], int]:
         """Create a compute task for each rank.
 
+        Args:
+            compute_time_ns: compute time from AICB file (unit: ns).
+
         Returns (rank→FlowTask dict, updated task_id_counter).
         """
+        duration_us = compute_time_ns // 1000
         tasks: dict[int, FlowTask] = {}
         for rank in ranks:
             task = FlowTask(
