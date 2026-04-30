@@ -155,6 +155,10 @@ class ChromeTraceVisualizer(ABC):
             task = self._task_map.get(timing.task_id)
             if task is None or not task.is_compute():
                 continue
+            # Skip zero-duration compute tasks (pre/post sync points) — they
+            # stack vertically and clutter the track without showing timing.
+            if timing.end_time_us == timing.start_time_us:
+                continue
             events.append(self._make_compute_event(task, timing))
         return events
 
@@ -232,6 +236,10 @@ class ChromeTraceVerbose(ChromeTraceVisualizer):
         for timing in result.per_task.values():
             task = self._task_map.get(timing.task_id)
             if task is None or not task.is_flow():
+                continue
+            # Skip zero-duration flows: they render as stacked arrows with
+            # no visual information, cluttering the track.
+            if timing.end_time_us == timing.start_time_us:
                 continue
             events.append(self._make_flow_event(task, timing))
         return events
