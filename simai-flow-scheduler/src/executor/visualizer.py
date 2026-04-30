@@ -261,9 +261,42 @@ class ChromeTraceCompact(ChromeTraceVisualizer):
         events = []
         events.extend(self._build_compute_events(result))
         merged = self._merge_collective_flows(result)
-        events.extend(self._build_merged_flow_events(result, merged))
+        merged_events = self._build_merged_flow_events(result, merged)
+        #self._resolve_overlaps(merged_events)
+        events.extend(merged_events)
         events.extend(self._build_flow_arrows(result, merged))
         return events
+
+    @staticmethod
+    def _resolve_overlaps(events: list[dict]) -> None:
+        """Resolve overlapping X events on the same (pid, tid) for Chrome Trace.
+
+        Chrome Trace drops overlapping X events on the same track.
+        Strategy:
+        - Same start time: shift shorter event by 1 us (creates proper nesting)
+        - Partial overlap: trim earlier event's end to later event's start
+        """
+        by_track: dict[tuple, list[dict]] = defaultdict(list)
+        for event in events:
+            if event.get("ph") == "X":
+                by_track[(event["pid"], event["tid"])].append(event)
+
+        for track_events in by_track.values():
+            track_events.sort(key=lambda e: (e["ts"], -(e["ts"] + e["dur"])))
+            for i in range(1, len(track_events)):
+                prev = track_events[i - 1]
+                curr = track_events[i]
+                prev_end = prev["ts"] + prev["dur"]
+                if curr["ts"] >= prev_end:
+                    continue
+                curr_end = curr["ts"] + curr["dur"]
+                if curr["ts"] == prev["ts"]:
+                    curr["ts"] = prev["ts"] + 1
+                    curr["dur"] = max(0, curr["dur"] - 1)
+                elif curr_end <= prev_end:
+                    pass  # proper nesting
+                else:
+                    prev["dur"] = curr["ts"] - prev["ts"]
 
     def _merge_collective_flows(self, result: ExecutionResult) -> dict[MergeKey, MergedFlow]:
         """按 (job_id, node_id, iteration, phase, layer_id, comm_type, item_id) 分组 flow。"""
@@ -314,11 +347,14 @@ class ChromeTraceCompact(ChromeTraceVisualizer):
         """为每个合并组生成一个 X 事件。"""
         events = []
         for key, m in merged.items():
+            if m["end_time_us"] == m["start_time_us"]:
+                continue
             comm = COMM_TYPE_ABBREV.get(
                 CommType(m["comm_type"]), m["comm_type"]
             )
             phase = PHASE_ABBREV.get(Phase(m["phase"]), m["phase"])
-            name = f"{comm} {phase} L{m['layer_id']}"
+            tag = self._iteration_tag(m["iteration"])
+            name = f"{comm} {phase} {tag} L{m['layer_id']}"
 
             # 收集该合并事件涉及的所有 deps
             all_deps: set[int] = set()
@@ -363,33 +399,38 @@ class ChromeTraceCompact(ChromeTraceVisualizer):
         self, result: ExecutionResult, merged: dict[MergeKey, MergedFlow]
     ) -> list[dict]:
         """生成 compute <-> 合并 flow 之间的 Flow Event 箭头。"""
-        # 构建 task_id -> timing 的索引
         timing_map = result.per_task
 
-        # 为每个合并事件分配一个唯一标识
-        # 同时构建 task_id -> merged_key 的反向映射
+        # 构建 task_id -> merged_key 的反向映射
         task_to_merged: dict[int, MergeKey] = {}
+        # 记录可见的 merged key（duration > 0）
+        visible_merged: set[MergeKey] = set()
         for key, m in merged.items():
+            if m["end_time_us"] > m["start_time_us"]:
+                visible_merged.add(key)
             for tid in m["task_ids"]:
                 task_to_merged[tid] = key
 
-        # 为每个合并事件分配稳定 id（用 key 的 hash）
-        def merged_event_id(key: MergeKey) -> str:
-            return f"merged_{key[0]}_{key[1]}_{key[2]}_{key[3]}_{key[4]}_{key[5]}_{key[6]}"
+        # 记录可见的 compute task_id（duration > 0）
+        visible_computes: set[int] = set()
+        for timing in result.per_task.values():
+            if timing.end_time_us > timing.start_time_us:
+                task = self._task_map.get(timing.task_id)
+                if task and task.is_compute():
+                    visible_computes.add(timing.task_id)
 
-        # 收集所有需要画箭头的目标（merged events 和 compute events）
-        # 箭头方向：dep_source 的 end -> dependent 的 start
         events: list[dict] = []
         arrow_counter = 0
 
         # 遍历 merged events，为它们的 deps 画箭头
         for key, m in merged.items():
+            if key not in visible_merged:
+                continue
             m_pid = m["job_id"]
             m_tid = self._tid_for_comm(m["node_id"])
             m_start = m["start_time_us"]
-            m_end = m["end_time_us"]
 
-            # 收集该合并组的所有上游 deps（去重，排除组内 deps）
+            # 收集该合并组的所有上游 deps（去重）
             upstream_deps: set[int] = set()
             for tid in m["task_ids"]:
                 task = self._task_map.get(tid)
@@ -403,8 +444,16 @@ class ChromeTraceCompact(ChromeTraceVisualizer):
                 dep_timing = timing_map.get(dep_id)
                 if dep_task is None or dep_timing is None:
                     continue
+                # 跳过零时长的 compute dep（不在 trace 中显示）
+                if dep_task.is_compute() and dep_id not in visible_computes:
+                    continue
+                # 跳过属于零时长 merged event 的 flow dep
+                if dep_task.is_flow():
+                    dep_mkey = task_to_merged.get(dep_id)
+                    if dep_mkey is None or dep_mkey not in visible_merged:
+                        continue
 
-                arrow_id = f"arrow_{arrow_counter}"
+                arrow_id = arrow_counter
                 arrow_counter += 1
 
                 # dep 源事件的位置
@@ -430,19 +479,19 @@ class ChromeTraceCompact(ChromeTraceVisualizer):
 
         # 遍历 compute events，为依赖 merged flow 的 compute 画箭头
         for timing in result.per_task.values():
+            if timing.task_id not in visible_computes:
+                continue
             task = self._task_map.get(timing.task_id)
-            if task is None or not task.is_compute():
+            if task is None:
                 continue
 
             for dep_id in task.deps:
                 dep_key = task_to_merged.get(dep_id)
-                if dep_key is None:
-                    # dep 不是一个 merged flow（可能是 compute），跳过
-                    # Verbose flow 的箭头不在 compact 模式下画
+                if dep_key is None or dep_key not in visible_merged:
                     continue
                 dep_merged = merged[dep_key]
 
-                arrow_id = f"arrow_{arrow_counter}"
+                arrow_id = arrow_counter
                 arrow_counter += 1
 
                 # 发送端（merged event 完成）
