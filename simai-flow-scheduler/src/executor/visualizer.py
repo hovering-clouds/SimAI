@@ -257,6 +257,10 @@ MergedFlow = dict
 class ChromeTraceCompact(ChromeTraceVisualizer):
     """紧凑模式：合并同一集合通信的所有 flow，附带 Flow Event 箭头。"""
 
+    def __init__(self, workload: P2PWorkload, show_arrows: bool = False):
+        super().__init__(workload)
+        self.show_arrows = show_arrows
+
     def _build_events(self, result: ExecutionResult) -> list[dict]:
         events = []
         events.extend(self._build_compute_events(result))
@@ -264,7 +268,8 @@ class ChromeTraceCompact(ChromeTraceVisualizer):
         merged_events = self._build_merged_flow_events(result, merged)
         #self._resolve_overlaps(merged_events)
         events.extend(merged_events)
-        events.extend(self._build_flow_arrows(result, merged))
+        if self.show_arrows:
+            events.extend(self._build_flow_arrows(result, merged))
         return events
 
     @staticmethod
