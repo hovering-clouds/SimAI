@@ -15,6 +15,29 @@ from typing import Optional
 from ..workload_format.schema import Task, TaskType, Phase, CommType
 
 
+# ── CommType prefix mapping ──
+
+_COMM_TYPE_MAP: dict[tuple[str, str], CommType] = {
+    # context="tp" (default)
+    ("ALLREDUCE", "tp"): CommType.TP_ALLREDUCE_RING,
+    ("ALLGATHER", "tp"): CommType.TP_ALLGATHER_RING,
+    ("REDUCESCATTER", "tp"): CommType.TP_REDUCESCATTER_RING,
+    ("ALLTOALL", "tp"): CommType.TP_ALLTOALL,
+    # context="dp"
+    ("ALLREDUCE", "dp"): CommType.DP_ALLREDUCE,
+    ("ALLGATHER", "dp"): CommType.DP_ALLGATHER,
+    ("REDUCESCATTER", "dp"): CommType.DP_REDUCESCATTER,
+    ("ALLTOALL", "dp"): CommType.DP_ALLTOALL,
+    # context="ep"
+    ("ALLTOALL", "ep"): CommType.EP_ALLTOALL,
+}
+
+
+def _make_comm_type(base: str, context: str) -> CommType:
+    """根据 base 类型和并行上下文，返回对应的 CommType。"""
+    return _COMM_TYPE_MAP.get((base, context), CommType.UNKNOWN)
+
+
 @dataclass
 class FlowTask:
     """
@@ -107,6 +130,7 @@ class CollectiveExpander(ABC):
         algo: str = "ring",
         job_id: int = 0,
         task_id_start: int = 0,
+        context: str = "tp",
     ) -> list[FlowTask]:
         """
         Expand AllReduce into P2P flows.
@@ -117,6 +141,7 @@ class CollectiveExpander(ABC):
             algo: Algorithm to use ("ring", "tree", "nvls").
             job_id: Job ID to assign to generated tasks.
             task_id_start: Starting task ID.
+            context: Parallelism context ("tp", "dp", "ep").
 
         Returns:
             List of FlowTask objects representing the P2P flows.
@@ -131,6 +156,7 @@ class CollectiveExpander(ABC):
         algo: str = "ring",
         job_id: int = 0,
         task_id_start: int = 0,
+        context: str = "tp",
     ) -> list[FlowTask]:
         """
         Expand AllGather into P2P flows.
@@ -141,6 +167,7 @@ class CollectiveExpander(ABC):
             algo: Algorithm to use ("ring", "tree").
             job_id: Job ID to assign to generated tasks.
             task_id_start: Starting task ID.
+            context: Parallelism context ("tp", "dp", "ep").
 
         Returns:
             List of FlowTask objects representing the P2P flows.
@@ -155,6 +182,7 @@ class CollectiveExpander(ABC):
         algo: str = "ring",
         job_id: int = 0,
         task_id_start: int = 0,
+        context: str = "tp",
     ) -> list[FlowTask]:
         """
         Expand ReduceScatter into P2P flows.
@@ -165,6 +193,7 @@ class CollectiveExpander(ABC):
             algo: Algorithm to use ("ring", "tree").
             job_id: Job ID to assign to generated tasks.
             task_id_start: Starting task ID.
+            context: Parallelism context ("tp", "dp", "ep").
 
         Returns:
             List of FlowTask objects representing the P2P flows.
@@ -178,6 +207,7 @@ class CollectiveExpander(ABC):
         data_size: int,
         job_id: int = 0,
         task_id_start: int = 0,
+        context: str = "tp",
     ) -> list[FlowTask]:
         """
         Expand AlltoAll into P2P flows.
@@ -187,6 +217,7 @@ class CollectiveExpander(ABC):
             data_size: Total data size in bytes (per-destination).
             job_id: Job ID to assign to generated tasks.
             task_id_start: Starting task ID.
+            context: Parallelism context ("tp", "dp", "ep").
 
         Returns:
             List of FlowTask objects representing the P2P flows.
@@ -209,9 +240,10 @@ class AllReduceExpander(CollectiveExpander):
         algo: str = "ring",
         job_id: int = 0,
         task_id_start: int = 0,
+        context: str = "tp",
     ) -> list[FlowTask]:
         if algo == "ring":
-            return self._expand_ring(ranks, data_size, job_id, task_id_start)
+            return self._expand_ring(ranks, data_size, job_id, task_id_start, context)
         raise ValueError(f"AllReduceExpander: unsupported algo '{algo}'")
 
     def _expand_ring(
@@ -220,6 +252,7 @@ class AllReduceExpander(CollectiveExpander):
         data_size: int,
         job_id: int,
         task_id_start: int,
+        context: str,
     ) -> list[FlowTask]:
         """
         Ring AllReduce implementation.
@@ -247,6 +280,7 @@ class AllReduceExpander(CollectiveExpander):
         tasks: list[FlowTask] = []
         task_id = task_id_start
         ring = _build_ring_topology(ranks)
+        comm = _make_comm_type("ALLREDUCE", context)
 
         # --- Phase 1: Initial chunk (chunk_id = 0) ---
         task_list: dict[int, int] = {}
@@ -259,7 +293,7 @@ class AllReduceExpander(CollectiveExpander):
                 src=rank,
                 dst=rank_info["next"],
                 size_bytes=chunk_size,
-                comm_type=CommType.TP_ALLREDUCE_RING,
+                comm_type=comm,
                 chunk_id=0,
                 num_chunks=chunk_count,
                 deps=[],
@@ -282,7 +316,7 @@ class AllReduceExpander(CollectiveExpander):
                     src=rank,
                     dst=rank_info["next"],
                     size_bytes=chunk_size,
-                    comm_type=CommType.TP_ALLREDUCE_RING,
+                    comm_type=comm,
                     chunk_id=1 + step,
                     num_chunks=chunk_count,
                     deps=[partner_task_id],
@@ -306,7 +340,7 @@ class AllReduceExpander(CollectiveExpander):
                     src=rank,
                     dst=rank_info["next"],
                     size_bytes=chunk_size,
-                    comm_type=CommType.TP_ALLREDUCE_RING,
+                    comm_type=comm,
                     chunk_id=(n - 1) + step,
                     num_chunks=chunk_count,
                     deps=[partner_task_id],
@@ -317,13 +351,36 @@ class AllReduceExpander(CollectiveExpander):
 
         return tasks
 
-    def expand_allgather(self, ranks, data_size, algo="ring", job_id=0, task_id_start=0):
+    def expand_allgather(
+        self,
+        ranks,
+        data_size,
+        algo="ring",
+        job_id=0,
+        task_id_start=0,
+        _context="tp",
+    ):
         raise NotImplementedError("Use AllGatherExpander for AllGather")
 
-    def expand_reducescatter(self, ranks, data_size, algo="ring", job_id=0, task_id_start=0):
+    def expand_reducescatter(
+        self,
+        ranks,
+        data_size,
+        algo="ring",
+        job_id=0,
+        task_id_start=0,
+        _context="tp",
+    ):
         raise NotImplementedError("ReduceScatter not yet implemented")
 
-    def expand_alltoall(self, ranks, data_size, job_id=0, task_id_start=0):
+    def expand_alltoall(
+        self,
+        ranks,
+        data_size,
+        job_id=0,
+        task_id_start=0,
+        _context="tp",
+    ):
         raise NotImplementedError("AlltoAll not yet implemented")
 
 
@@ -342,9 +399,10 @@ class AllGatherExpander(CollectiveExpander):
         algo: str = "ring",
         job_id: int = 0,
         task_id_start: int = 0,
+        context: str = "tp",
     ) -> list[FlowTask]:
         if algo == "ring":
-            return self._expand_ring(ranks, data_size, job_id, task_id_start)
+            return self._expand_ring(ranks, data_size, job_id, task_id_start, context)
         raise ValueError(f"AllGatherExpander: unsupported algo '{algo}'")
 
     def _expand_ring(
@@ -353,6 +411,7 @@ class AllGatherExpander(CollectiveExpander):
         data_size: int,
         job_id: int,
         task_id_start: int,
+        context: str,
     ) -> list[FlowTask]:
         """
         Ring AllGather implementation.
@@ -377,6 +436,7 @@ class AllGatherExpander(CollectiveExpander):
         tasks: list[FlowTask] = []
         task_id = task_id_start
         ring = _build_ring_topology(ranks)
+        comm = _make_comm_type("ALLGATHER", context)
 
         # --- Phase 1: Initial send (chunk_id = 0) ---
         task_list: dict[int, int] = {}
@@ -389,7 +449,7 @@ class AllGatherExpander(CollectiveExpander):
                 src=rank,
                 dst=rank_info["next"],
                 size_bytes=chunk_size,
-                comm_type=CommType.TP_ALLGATHER_RING,
+                comm_type=comm,
                 chunk_id=0,
                 num_chunks=chunk_count,
                 deps=[],
@@ -412,7 +472,7 @@ class AllGatherExpander(CollectiveExpander):
                     src=rank,
                     dst=rank_info["next"],
                     size_bytes=chunk_size,
-                    comm_type=CommType.TP_ALLGATHER_RING,
+                    comm_type=comm,
                     chunk_id=step,
                     num_chunks=chunk_count,
                     deps=[partner_task_id],
@@ -448,9 +508,10 @@ class ReduceScatterExpander(CollectiveExpander):
         algo: str = "ring",
         job_id: int = 0,
         task_id_start: int = 0,
+        context: str = "tp",
     ) -> list[FlowTask]:
         if algo == "ring":
-            return self._expand_ring(ranks, data_size, job_id, task_id_start)
+            return self._expand_ring(ranks, data_size, job_id, task_id_start, context)
         raise ValueError(f"ReduceScatterExpander: unsupported algo '{algo}'")
 
     def _expand_ring(
@@ -459,6 +520,7 @@ class ReduceScatterExpander(CollectiveExpander):
         data_size: int,
         job_id: int,
         task_id_start: int,
+        context: str,
     ) -> list[FlowTask]:
         """
         Ring ReduceScatter implementation.
@@ -483,6 +545,7 @@ class ReduceScatterExpander(CollectiveExpander):
         tasks: list[FlowTask] = []
         task_id = task_id_start
         ring = _build_ring_topology(ranks)
+        comm = _make_comm_type("REDUCESCATTER", context)
 
         # --- Phase 1: Initial chunk (chunk_id = 0) ---
         task_list: dict[int, int] = {}
@@ -495,7 +558,7 @@ class ReduceScatterExpander(CollectiveExpander):
                 src=rank,
                 dst=rank_info["next"],
                 size_bytes=chunk_size,
-                comm_type=CommType.TP_REDUCESCATTER_RING,
+                comm_type=comm,
                 chunk_id=0,
                 num_chunks=chunk_count,
                 deps=[],
@@ -518,7 +581,7 @@ class ReduceScatterExpander(CollectiveExpander):
                     src=rank,
                     dst=rank_info["next"],
                     size_bytes=chunk_size,
-                    comm_type=CommType.TP_REDUCESCATTER_RING,
+                    comm_type=comm,
                     chunk_id=1 + step,
                     num_chunks=chunk_count,
                     deps=[partner_task_id],
@@ -555,6 +618,7 @@ class AlltoAllExpander(CollectiveExpander):
         data_size: int,
         job_id: int = 0,
         task_id_start: int = 0,
+        context: str = "tp",
     ) -> list[FlowTask]:
         """
         Expand AlltoAll into P2P flows.
@@ -569,6 +633,7 @@ class AlltoAllExpander(CollectiveExpander):
             data_size: Total data size in bytes.
             job_id: Job ID.
             task_id_start: Starting task ID.
+            context: Parallelism context ("tp", "dp", "ep").
 
         Returns:
             List of FlowTask objects.
@@ -580,6 +645,7 @@ class AlltoAllExpander(CollectiveExpander):
         chunk_size = data_size // n
         tasks: list[FlowTask] = []
         task_id = task_id_start
+        comm = _make_comm_type("ALLTOALL", context)
 
         for src in ranks:
             for dst in ranks:
@@ -592,7 +658,7 @@ class AlltoAllExpander(CollectiveExpander):
                     src=src,
                     dst=dst,
                     size_bytes=chunk_size,
-                    comm_type=CommType.TP_ALLTOALL,
+                    comm_type=comm,
                     chunk_id=0,
                     num_chunks=1,
                     deps=[],

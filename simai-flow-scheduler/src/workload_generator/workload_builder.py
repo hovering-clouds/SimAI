@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Iterator
 
 from ..workload_format.schema import (
-    P2PWorkload, Task, Job, Meta, Phase, TaskType, CommType
+    P2PWorkload, Task, Job, Meta, Phase, TaskType
 )
 from .aicb_parser import AicbHeader, AicbWorkItem, AicbParser
 from .rank_grouper import RankGrouper
@@ -152,7 +152,8 @@ class WorkloadBuilder:
                     self._expand_comm_all_groups(
                         item.forward_comm, item.forward_comm_size,
                         grouper, Phase.FORWARD, layer_id, iteration, item_id,
-                        job.job_id, task_id_counter, comm_algo)
+                        job.job_id, task_id_counter, comm_algo,
+                        default_context="tp")
                 all_flow_tasks.extend(item_tasks.fwd_result.flows)
                 self._wire_compute_to_flows(
                     item_tasks.fwd_computes, item_tasks.fwd_result)
@@ -169,7 +170,8 @@ class WorkloadBuilder:
                     self._expand_comm_all_groups(
                         item.backward_comm, item.backward_comm_size,
                         grouper, Phase.BACKWARD_INPUT, layer_id, iteration, item_id,
-                        job.job_id, task_id_counter, comm_algo)
+                        job.job_id, task_id_counter, comm_algo,
+                        default_context="tp")
                 all_flow_tasks.extend(item_tasks.ig_result.flows)
                 self._wire_compute_to_flows(
                     item_tasks.ig_computes, item_tasks.ig_result)
@@ -186,7 +188,8 @@ class WorkloadBuilder:
                     self._expand_comm_all_groups(
                         item.dp_comm, item.dp_comm_size,
                         grouper, Phase.BACKWARD_WEIGHT, layer_id, iteration, item_id,
-                        job.job_id, task_id_counter, comm_algo)
+                        job.job_id, task_id_counter, comm_algo,
+                        default_context="dp")
                 all_flow_tasks.extend(item_tasks.wg_result.flows)
                 self._wire_compute_to_flows(
                     item_tasks.wg_computes, item_tasks.wg_result)
@@ -258,21 +261,27 @@ class WorkloadBuilder:
         job_id: int,
         task_id_counter: int,
         algo: str = "ring",
+        default_context: str = "tp",
     ) -> tuple[FlowGroupResult, int]:
         """Expand communication for all parallel subgroups.
+
+        Args:
+            default_context: Parallelism context when comm string has no suffix.
+                For forward_comm and backward_comm: "tp" (default per AICB convention).
+                For dp_comm: "dp" (the field is inherently DP-scoped).
 
         Iterates over all subgroups for the comm context (e.g. all TP groups),
         expands each into P2P flows, and aggregates into a FlowGroupResult
         with incrementally maintained receiver_index.
         """
-        base_type, context = AicbParser.parse_comm_type(comm_type_str)
+        base_type, context = AicbParser.parse_comm_type(comm_type_str, default_context)
         result = FlowGroupResult.empty()
 
         for subgroup in self._iter_subgroups(context, grouper):
             if len(subgroup) >= 2:
                 flows = self._call_expander(
                     base_type, subgroup, comm_size,
-                    job_id, task_id_counter, algo)
+                    job_id, task_id_counter, algo, context)
                 for flow in flows:
                     flow.phase = phase
                     flow.layer_id = layer_id
@@ -315,6 +324,7 @@ class WorkloadBuilder:
         job_id: int,
         task_id_start: int,
         algo: str,
+        context: str,
     ) -> list[FlowTask]:
         """Dispatch to the appropriate collective expander."""
         expander = self.expanders.get(base_type)
@@ -323,22 +333,18 @@ class WorkloadBuilder:
 
         if base_type == "ALLREDUCE":
             return expander.expand_allreduce(
-                ranks, comm_size, algo, job_id, task_id_start)
+                ranks, comm_size, algo, job_id, task_id_start, context)
         elif base_type == "ALLGATHER":
             return expander.expand_allgather(
-                ranks, comm_size, algo, job_id, task_id_start)
+                ranks, comm_size, algo, job_id, task_id_start, context)
         elif base_type == "REDUCESCATTER":
             return expander.expand_reducescatter(
-                ranks, comm_size, algo, job_id, task_id_start)
+                ranks, comm_size, algo, job_id, task_id_start, context)
         elif base_type == "ALLTOALL":
             return expander.expand_alltoall(
-                ranks, comm_size, job_id, task_id_start)
+                ranks, comm_size, job_id, task_id_start, context)
         else:
             raise ValueError(f"Unsupported base type: {base_type}")
-
-    # ------------------------------------------------------------------
-    # Phase 2 helpers: Dependency wiring
-    # ------------------------------------------------------------------
 
     def _wire_compute_to_flows(
         self,

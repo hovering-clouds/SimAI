@@ -99,20 +99,20 @@ class AicbParser:
         return self._parse_items(lines, start=2, count=count)
 
     @staticmethod
-    def parse_comm_type(comm_str: str) -> tuple[str, str]:
+    def parse_comm_type(comm_str: str, default_context: str = "tp") -> tuple[str, str]:
         """Parse a comm type string into (base_type, parallelism_context).
 
         Suffix mapping per astra-sim Workload.cc lines 1329-1369:
-            no suffix  → tp   (forward/backward fields default to TP)
+            no suffix  → default_context  (typically tp for forward/backward fields)
             _DP        → dp
             _EP        → ep
             _DP_EP     → dp_ep
 
         Examples:
             "ALLGATHER_DP_EP" → ("ALLGATHER", "dp_ep")
-            "ALLREDUCE"        → ("ALLREDUCE", "tp")
-            "ALLTOALL"         → ("ALLTOALL", "tp")  # no suffix → TP
-            "ALLTOALL_EP"      → ("ALLTOALL", "ep")  # _EP → EP
+            "ALLREDUCE"        → ("ALLREDUCE", "tp")  # default
+            "ALLTOALL"         → ("ALLTOALL", "tp")   # no suffix → TP
+            "ALLTOALL_EP"      → ("ALLTOALL", "ep")   # _EP → EP
             "NONE"             → ("NONE", "")
         """
         if not comm_str or comm_str == "NONE":
@@ -126,8 +126,8 @@ class AicbParser:
         if comm_str.endswith("_EP"):
             return (comm_str[:-3], "ep")
 
-        # No suffix → TP (including ALLTOALL without suffix → TP per Workload.cc)
-        return (comm_str, "tp")
+        # No suffix → default context (tp for fwd/bwd, dp for dp_comm field)
+        return (comm_str, default_context)
 
     # ------------------------------------------------------------------
     # Internal helpers
