@@ -87,16 +87,14 @@ class CppReferenceOrdering(OrderingStrategy):
     AICB 文件中 item 按顺序排列为 pre → GA[0] layers → GA[1] layers → post，
     因此 C++ 的实际执行顺序等价于：
       Forward:  GA[0] fwd → GA[1] fwd（GA 升序）
-      Backward: GA[1] ig/wg → GA[0] ig/wg（GA 降序）
-
-    仅排序 GA 层内的 compute 任务（iteration >= 0），
-    pre/post 任务的执行顺序由 deps 决定。
+      Backward: GA[1] ig/wg → GA[0] ig/wg（GA 降序，逐层 ig→wg 交替）
 
     排序优先级（从高到低）：
-    1. phase: FORWARD → BACKWARD_INPUT → BACKWARD_WEIGHT
+    1. direction: FORWARD(0) vs BACKWARD(1) — 保证所有 fwd 在 bwd 之前
     2. iteration: Forward 阶段 GA 升序，Backward 阶段 GA 降序
     3. layer_id: Forward 正序，Backward 倒序
-    4. item_id
+    4. sub_phase: ig(0) → wg(1) — backward 逐层 ig→wg 交替
+    5. item_id
 
     注：pre items（iteration=-1）和 post items（iteration=ga）也参与排序，
     通过 ga_sort 自然地排在正确位置（pre fwd 最先、pre bkwd 最后，反之亦然）。
@@ -137,25 +135,25 @@ class CppReferenceOrdering(OrderingStrategy):
         """
         生成排序键，复现 C++ 参考实现的执行顺序。
 
-        C++ 执行顺序（TOTAL_PASS=1，所有 item 一遍）：
-          Forward:  GA[0] layers → GA[1] layers → ... → post items
-          Backward: post items → ... → GA[1] layers → GA[0] layers → pre items
-
-        映射到 compute 排序：
-          fwd(GA=0) → fwd(GA=1) → ig(GA=1) → wg(GA=1) → ig(GA=0) → wg(GA=0)
+        C++ backward 逐层执行 ig→wg（见 docs/specs/cpp-execution-order.md）：
+          [layer N-1] ig → wg
+          [layer N-2] ig → wg
+          ...
 
         排序规则：
-        1. phase：FORWARD → BACKWARD_INPUT → BACKWARD_WEIGHT
+        1. direction：FORWARD(0) → BACKWARD(1)
         2. iteration：Forward 正序（GA 升序），Backward 倒序（GA 降序）
         3. layer_id：Forward 正序，Backward 倒序
-        4. item_id：兜底
+        4. sub_phase：ig(0) → wg(1)，仅对 backward 有意义
+        5. item_id：兜底
         """
-        phase_order = {
-            Phase.FORWARD: 0,
-            Phase.BACKWARD_INPUT: 1,
-            Phase.BACKWARD_WEIGHT: 2,
-            Phase.OPTIMIZER: 3,
-        }
+        # FORWARD vs BACKWARD 分组（不再按 ig/wg 分开）
+        if task.phase == Phase.FORWARD:
+            direction = 0
+        elif task.phase in (Phase.BACKWARD_INPUT, Phase.BACKWARD_WEIGHT):
+            direction = 1
+        else:
+            direction = 2
 
         is_backward = task.phase in (Phase.BACKWARD_INPUT, Phase.BACKWARD_WEIGHT)
 
@@ -164,10 +162,19 @@ class CppReferenceOrdering(OrderingStrategy):
         # Layer ordering: forward ascending, backward descending
         layer_sort = -task.layer_id if is_backward else task.layer_id
 
+        # Within same layer: ig before wg
+        if task.phase == Phase.BACKWARD_INPUT:
+            sub_phase = 0
+        elif task.phase == Phase.BACKWARD_WEIGHT:
+            sub_phase = 1
+        else:
+            sub_phase = 0
+
         return (
-            phase_order.get(task.phase, 999),
+            direction,
             ga_sort,
             layer_sort,
+            sub_phase,
             task.item_id,
         )
 
