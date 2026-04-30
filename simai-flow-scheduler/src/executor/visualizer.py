@@ -266,7 +266,7 @@ class ChromeTraceCompact(ChromeTraceVisualizer):
         events.extend(self._build_compute_events(result))
         merged = self._merge_collective_flows(result)
         merged_events = self._build_merged_flow_events(result, merged)
-        #self._resolve_overlaps(merged_events)
+        self._resolve_overlaps(merged_events)
         events.extend(merged_events)
         if self.show_arrows:
             events.extend(self._build_flow_arrows(result, merged))
@@ -276,7 +276,15 @@ class ChromeTraceCompact(ChromeTraceVisualizer):
     def _resolve_overlaps(events: list[dict]) -> None:
         """Resolve overlapping X events on the same (pid, tid) for Chrome Trace.
 
-        Chrome Trace drops overlapping X events on the same track.
+        Chrome Trace drops overlapping X events on the same track.  Ring AllReduce
+        pipelines naturally produce small (1-2 us) overlaps between adjacent layers
+        on some nodes: a node can simultaneously receive L4's last chunk from one
+        predecessor and L3's first chunk from another predecessor on different
+        physical links.  This is correct simulation behavior, but the merged-span
+        representation makes it look like the same track has overlapping slices.
+        Trim the earlier event's tail by the overlap amount to prevent Chrome Trace
+        from silently dropping events.
+
         Strategy:
         - Same start time: shift shorter event by 1 us (creates proper nesting)
         - Partial overlap: trim earlier event's end to later event's start
@@ -295,32 +303,33 @@ class ChromeTraceCompact(ChromeTraceVisualizer):
                 if curr["ts"] >= prev_end:
                     continue
                 curr_end = curr["ts"] + curr["dur"]
-                if curr["ts"] == prev["ts"]:
-                    curr["ts"] = prev["ts"] + 1
-                    curr["dur"] = max(0, curr["dur"] - 1)
-                elif curr_end <= prev_end:
-                    pass  # proper nesting
+                if curr_end <= prev_end:
+                    pass  # proper nesting or same start — no action needed
                 else:
                     prev["dur"] = curr["ts"] - prev["ts"]
 
     def _merge_collective_flows(self, result: ExecutionResult) -> dict[MergeKey, MergedFlow]:
-        """按 (job_id, node_id, iteration, phase, layer_id, comm_type, item_id) 分组 flow。"""
+        """按 (job_id, node_id, iteration, phase, layer_id, comm_type, item_id) 分组 flow。
+
+        只合并每个节点作为 receiver（dst）的 flow，与依赖链保持一致：
+        依赖链仅等待 receiver flow 完成，merge 也只看 receiver flow，
+        避免发送方向的尾部 flow 与下一个集合通信的接收方向产生重叠。
+        """
         groups: dict[MergeKey, list[tuple[Task, TaskTiming]]] = defaultdict(list)
 
         for timing in result.per_task.values():
             task = self._task_map.get(timing.task_id)
             if task is None or not task.is_flow():
                 continue
-            # 对每个参与的节点（src 和 dst），分别生成合并键
-            for node in {task.src, task.dst}:
-                if node is None:
-                    continue
-                key: MergeKey = (
-                    task.job_id, node, task.iteration,
-                    task.phase.value, task.layer_id,
-                    task.comm_type.value, task.item_id,
-                )
-                groups[key].append((task, timing))
+            # 只合并 receiver（dst）方向的 flow
+            if task.dst is None:
+                continue
+            key: MergeKey = (
+                task.job_id, task.dst, task.iteration,
+                task.phase.value, task.layer_id,
+                task.comm_type.value, task.item_id,
+            )
+            groups[key].append((task, timing))
 
         merged: dict[MergeKey, MergedFlow] = {}
         for key, items in groups.items():
