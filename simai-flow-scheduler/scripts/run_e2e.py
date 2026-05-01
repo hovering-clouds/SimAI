@@ -2,23 +2,25 @@
 End-to-end simulation: AICB workload → P2PWorkload → Static Analysis → ExecutionPlan → AnalyticalExecutor
 
 Usage:
-    python -m run_e2e
+    python scripts/run_e2e.py
 """
 
 import sys
 import os
 
 # Ensure project root is on path
-sys.path.insert(0, os.path.dirname(__file__))
+project_root = os.path.join(os.path.dirname(__file__), "..")
+sys.path.insert(0, project_root)
+os.chdir(project_root)
 
-from src.workload_format.schema import Job, Meta, Network, ParallelismConfig
+from src.workload_format.schema import Job, ParallelismConfig
 from src.workload_generator.aicb_parser import AicbParser
 from src.workload_generator.workload_builder import WorkloadBuilder
 from src.static_analysis.topology_loader import TopologyLoader
 from src.static_analysis.analyzer import WorkloadAnalyzer
 from src.static_analysis.task_serializer import TaskSerializer
+from src.workload_format.writer import WorkloadWriter
 from src.executor.analytical import AnalyticalExecutor
-from src.executor.visualizer import ChromeTraceVerbose, ChromeTraceCompact
 
 
 def main():
@@ -70,6 +72,11 @@ def main():
     print(f"  Total tasks: {len(workload.tasks)}")
     print(f"  Compute tasks: {len(workload.get_compute_tasks())}")
     print(f"  Flow tasks: {len(workload.get_flow_tasks())}")
+
+    # Save P2PWorkload
+    workload_path = os.path.join(output_dir, "workload.json")
+    WorkloadWriter().write(workload, workload_path)
+    print(f"  Workload saved to: {workload_path}")
 
     # ============================================================
     # Step 3: Load topology & run static analysis
@@ -135,23 +142,16 @@ def main():
     if flow_times:
         print(f"  Flow time range: {min(flow_times)} - {max(flow_times)} us")
 
-    # ============================================================
-    # Step 6: Visualize results
-    # ============================================================
-    print()
-    print("=" * 60)
-    print("Step 6: Visualize results")
-    print("=" * 60)
-
-    viz_path = os.path.join(output_dir, "execution_timeline.json")
-    viz = ChromeTraceVerbose(workload)
-    viz.export(result, viz_path)
-    print(f"  Timeline saved to: {viz_path} (open in chrome://tracing)")
+    # Save ExecutionResult
+    result_path = os.path.join(output_dir, "execution_result.json")
+    result.to_json(result_path)
+    print(f"  Result saved to: {result_path}")
 
     print()
     print("=" * 60)
-    print("End-to-end simulation complete!")
+    print("Simulation complete!")
     print(f"  Output directory: {output_dir}/")
+    print(f"  Visualize with:  python scripts/visualize.py {result_path}")
     print("=" * 60)
 
 

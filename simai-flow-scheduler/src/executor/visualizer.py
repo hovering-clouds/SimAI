@@ -219,6 +219,38 @@ class ChromeTraceVisualizer(ABC):
             },
         }
 
+    @staticmethod
+    def _resolve_overlaps(events: list[dict]) -> None:
+        """Resolve overlapping X events on the same (pid, tid) for Chrome Trace.
+
+        Chrome Trace drops overlapping X events on the same track.  Ring AllReduce
+        pipelines naturally produce small (1-2 us) overlaps between adjacent flows
+        on some nodes: a node can simultaneously receive L4's last chunk from one
+        predecessor and L3's first chunk from another predecessor on different
+        physical links.  This is correct simulation behavior, but the same track
+        ends up with partially overlapping slices.
+        Trim the earlier event's tail by the overlap amount to prevent Chrome Trace
+        from silently dropping events.
+        """
+        by_track: dict[tuple, list[dict]] = defaultdict(list)
+        for event in events:
+            if event.get("ph") == "X":
+                by_track[(event["pid"], event["tid"])].append(event)
+
+        for track_events in by_track.values():
+            track_events.sort(key=lambda e: (e["ts"], -(e["ts"] + e["dur"])))
+            for i in range(1, len(track_events)):
+                prev = track_events[i - 1]
+                curr = track_events[i]
+                prev_end = prev["ts"] + prev["dur"]
+                if curr["ts"] >= prev_end:
+                    continue
+                curr_end = curr["ts"] + curr["dur"]
+                if curr_end <= prev_end:
+                    pass  # proper nesting or same start — no action needed
+                else:
+                    prev["dur"] = curr["ts"] - prev["ts"]
+
 
 # ── Verbose 模式 ──
 
@@ -228,7 +260,9 @@ class ChromeTraceVerbose(ChromeTraceVisualizer):
     def _build_events(self, result: ExecutionResult) -> list[dict]:
         events = []
         events.extend(self._build_compute_events(result))
-        events.extend(self._build_flow_events(result))
+        flow_events = self._build_flow_events(result)
+        self._resolve_overlaps(flow_events)
+        events.extend(flow_events)
         return events
 
     def _build_flow_events(self, result: ExecutionResult) -> list[dict]:
@@ -243,6 +277,115 @@ class ChromeTraceVerbose(ChromeTraceVisualizer):
                 continue
             events.append(self._make_flow_event(task, timing))
         return events
+
+
+# ── Flow Detail 模式 ──
+
+class ChromeTraceFlowDetail(ChromeTraceVisualizer):
+    """指定时间窗口内的 P2P flow 详细视图（带 lane 分配）。
+
+    仅展示通信任务，保留原始时间戳以便与 Verbose trace 对齐比较。
+    重叠流通过贪心区间着色分配到不同子轨道，Chrome Trace 并排渲染。
+    适用于在大规模 workload 中放大观察某个集合通信操作的流级细节。
+    """
+
+    def __init__(
+        self,
+        workload: P2PWorkload,
+        time_start_us: int,
+        time_end_us: int,
+    ):
+        super().__init__(workload)
+        self.time_start = time_start_us
+        self.time_end = time_end_us
+
+    def _build_metadata_events(self, result: ExecutionResult) -> list[dict]:
+        _, metadata = self._compute_laned_flows(result)
+        return metadata
+
+    def _build_events(self, result: ExecutionResult) -> list[dict]:
+        flow_events, _ = self._compute_laned_flows(result)
+        return flow_events
+
+    def _compute_laned_flows(
+        self, result: ExecutionResult
+    ) -> tuple[list[dict], list[dict]]:
+        """Compute lane-allocated flow events and metadata for the time window.
+
+        Flows whose [start, end] is completely contained in [time_start, time_end]
+        are included.  Greedy interval partitioning assigns each flow to the first
+        available lane on its (job, src_node) track.
+
+        Returns:
+            (flow_events, metadata_events)
+        """
+        groups: dict[tuple[int, int], list[tuple[Task, TaskTiming]]] = defaultdict(list)
+
+        for timing in result.per_task.values():
+            task = self._task_map.get(timing.task_id)
+            if task is None or not task.is_flow():
+                continue
+            if timing.end_time_us == timing.start_time_us:
+                continue
+            if not (timing.start_time_us >= self.time_start
+                    and timing.end_time_us <= self.time_end):
+                continue
+            src = task.src if task.src is not None else 0
+            groups[(task.job_id, src)].append((task, timing))
+
+        events: list[dict] = []
+        metadata: list[dict] = []
+        seen_pids: set[int] = set()
+        tid_counter = 0
+
+        for (job_id, src_node), items in sorted(groups.items()):
+            items.sort(key=lambda x: x[1].start_time_us)
+
+            # Greedy lane allocation
+            lanes: list[int] = []       # end time of last event per lane
+            lane_tids: list[int] = []   # tid assigned to each lane
+            node_lanes: list[tuple[int, int]] = []  # (tid, lane_idx) for metadata
+
+            for task, timing in items:
+                end = timing.end_time_us
+                assigned = -1
+
+                for i, lane_end in enumerate(lanes):
+                    if timing.start_time_us >= lane_end:
+                        lanes[i] = end
+                        assigned = i
+                        break
+
+                if assigned == -1:
+                    lanes.append(end)
+                    lane_tids.append(tid_counter)
+                    tid_counter += 1
+                    assigned = len(lane_tids) - 1
+                    node_lanes.append((lane_tids[assigned], assigned))
+
+                event = self._make_flow_event(task, timing)
+                event["tid"] = lane_tids[assigned]
+                events.append(event)
+
+            # Metadata
+            if job_id not in seen_pids:
+                seen_pids.add(job_id)
+                metadata.append({
+                    "name": "process_name", "ph": "M",
+                    "pid": job_id, "tid": 0,
+                    "args": {"name": f"Job {job_id}"},
+                })
+
+            multi = len(node_lanes) > 1
+            for tid, idx in node_lanes:
+                suffix = f"/{idx + 1}" if multi else ""
+                metadata.append({
+                    "name": "thread_name", "ph": "M",
+                    "pid": job_id, "tid": tid,
+                    "args": {"name": f"Node {src_node} (Comm{suffix})"},
+                })
+
+        return events, metadata
 
 
 # ── Compact 模式 ──
@@ -271,42 +414,6 @@ class ChromeTraceCompact(ChromeTraceVisualizer):
         if self.show_arrows:
             events.extend(self._build_flow_arrows(result, merged))
         return events
-
-    @staticmethod
-    def _resolve_overlaps(events: list[dict]) -> None:
-        """Resolve overlapping X events on the same (pid, tid) for Chrome Trace.
-
-        Chrome Trace drops overlapping X events on the same track.  Ring AllReduce
-        pipelines naturally produce small (1-2 us) overlaps between adjacent layers
-        on some nodes: a node can simultaneously receive L4's last chunk from one
-        predecessor and L3's first chunk from another predecessor on different
-        physical links.  This is correct simulation behavior, but the merged-span
-        representation makes it look like the same track has overlapping slices.
-        Trim the earlier event's tail by the overlap amount to prevent Chrome Trace
-        from silently dropping events.
-
-        Strategy:
-        - Same start time: shift shorter event by 1 us (creates proper nesting)
-        - Partial overlap: trim earlier event's end to later event's start
-        """
-        by_track: dict[tuple, list[dict]] = defaultdict(list)
-        for event in events:
-            if event.get("ph") == "X":
-                by_track[(event["pid"], event["tid"])].append(event)
-
-        for track_events in by_track.values():
-            track_events.sort(key=lambda e: (e["ts"], -(e["ts"] + e["dur"])))
-            for i in range(1, len(track_events)):
-                prev = track_events[i - 1]
-                curr = track_events[i]
-                prev_end = prev["ts"] + prev["dur"]
-                if curr["ts"] >= prev_end:
-                    continue
-                curr_end = curr["ts"] + curr["dur"]
-                if curr_end <= prev_end:
-                    pass  # proper nesting or same start — no action needed
-                else:
-                    prev["dur"] = curr["ts"] - prev["ts"]
 
     def _merge_collective_flows(self, result: ExecutionResult) -> dict[MergeKey, MergedFlow]:
         """按 (job_id, node_id, iteration, phase, layer_id, comm_type, item_id) 分组 flow。
