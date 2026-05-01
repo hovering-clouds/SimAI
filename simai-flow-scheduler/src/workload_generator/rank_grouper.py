@@ -102,3 +102,12 @@ class RankGrouper:
             ]
             for pp_idx in range(self.pp)
         ]
+
+    def get_pp_rank(self, pp_idx: int, dp_idx: int, ep_idx: int, tp_idx: int) -> int:
+        """Get the single rank at a specific (PP, DP, EP, TP) position."""
+        return self.nodes[
+            pp_idx * (self.dp * self.ep * self.tp) +
+            dp_idx * (self.ep * self.tp) +
+            ep_idx * self.tp +
+            tp_idx
+        ]

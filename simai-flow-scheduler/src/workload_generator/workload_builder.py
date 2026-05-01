@@ -65,6 +65,18 @@ class ItemTasks:
     wg_result: FlowGroupResult = field(default_factory=FlowGroupResult.empty)
 
 
+@dataclass
+class PPFlowResult:
+    """PP flow generation result, indexed for wiring.
+
+    forward_flows[(ga_idx, pp_boundary)][sender_rank] = forward PP flow
+    backward_flows[(ga_idx, pp_boundary)][sender_rank] = backward PP flow
+    """
+    forward_flows: dict[tuple[int, int], dict[int, FlowTask]]
+    backward_flows: dict[tuple[int, int], dict[int, FlowTask]]
+    all_flows: list[FlowTask]
+
+
 class WorkloadBuilder:
     """Convert AICB workload to P2P Workload using two-phase generation."""
 
@@ -199,6 +211,17 @@ class WorkloadBuilder:
         # ===== Phase 2: Wire dependencies =====
         self._wire_dependencies(
             item_tasks_list, num_layer_items, num_pre_items, items_per_ga)
+
+        # ===== Phase 1.5 + 2.5: PP flows (if pp > 1) =====
+        if grouper.pp > 1 and aicb_header.pp_comm_size > 0:
+            ga_groups = self._group_items_by_ga(
+                item_tasks_list, num_pre_items, num_layer_items, items_per_ga)
+            pp_result, task_id_counter = self._generate_pp_flows(
+                grouper, aicb_header, ga_groups, items_per_ga,
+                job.job_id, task_id_counter)
+            all_flow_tasks.extend(pp_result.all_flows)
+            self._wire_pp_dependencies(
+                pp_result, ga_groups, grouper)
 
         # Build P2PWorkload
         workload = P2PWorkload(
@@ -576,3 +599,148 @@ class WorkloadBuilder:
             else:
                 break
         return count
+
+    # ------------------------------------------------------------------
+    # PP flow generation and wiring
+    # ------------------------------------------------------------------
+
+    def _generate_pp_flows(
+        self,
+        grouper: RankGrouper,
+        aicb_header: AicbHeader,
+        ga_groups: list[list[ItemTasks]],
+        items_per_ga: int,
+        job_id: int,
+        task_id_counter: int,
+    ) -> tuple["PPFlowResult", int]:
+        """Generate PP flow tasks for all GA steps and PP stage boundaries.
+
+        For each (ga_step, pp_boundary, dp, ep, tp):
+          - Forward PP flow: stage k → stage k+1 (activation)
+          - Backward PP flow: stage k+1 → stage k (gradient)
+        """
+        from ..workload_format.schema import CommType
+        forward_pp: dict[tuple[int, int], dict[int, FlowTask]] = {}
+        backward_pp: dict[tuple[int, int], dict[int, FlowTask]] = {}
+        all_flows: list[FlowTask] = []
+
+        for ga_idx in range(len(ga_groups)):
+            for pp_boundary in range(grouper.pp - 1):
+                fwd_flows: dict[int, FlowTask] = {}
+                bwd_flows: dict[int, FlowTask] = {}
+
+                for dp_idx in range(grouper.dp):
+                    for ep_idx in range(grouper.ep):
+                        for tp_idx in range(grouper.tp):
+                            src_rank = grouper.get_pp_rank(
+                                pp_boundary, dp_idx, ep_idx, tp_idx)
+                            dst_rank = grouper.get_pp_rank(
+                                pp_boundary + 1, dp_idx, ep_idx, tp_idx)
+
+                            fwd_flow = FlowTask(
+                                task_id=task_id_counter,
+                                job_id=job_id,
+                                type=TaskType.FLOW,
+                                src=src_rank,
+                                dst=dst_rank,
+                                size_bytes=aicb_header.pp_comm_size,
+                                comm_type=CommType.PP_SEND,
+                                phase=Phase.FORWARD,
+                                layer_id=items_per_ga - 1,
+                                iteration=ga_idx,
+                            )
+                            fwd_flows[src_rank] = fwd_flow
+                            all_flows.append(fwd_flow)
+                            task_id_counter += 1
+
+                            bwd_flow = FlowTask(
+                                task_id=task_id_counter,
+                                job_id=job_id,
+                                type=TaskType.FLOW,
+                                src=dst_rank,
+                                dst=src_rank,
+                                size_bytes=aicb_header.pp_comm_size,
+                                comm_type=CommType.PP_SEND,
+                                phase=Phase.BACKWARD_INPUT,
+                                layer_id=0,
+                                iteration=ga_idx,
+                            )
+                            bwd_flows[dst_rank] = bwd_flow
+                            all_flows.append(bwd_flow)
+                            task_id_counter += 1
+
+                forward_pp[(ga_idx, pp_boundary)] = fwd_flows
+                backward_pp[(ga_idx, pp_boundary)] = bwd_flows
+
+        return PPFlowResult(
+            forward_flows=forward_pp,
+            backward_flows=backward_pp,
+            all_flows=all_flows,
+        ), task_id_counter
+
+    def _wire_pp_dependencies(
+        self,
+        pp_result: "PPFlowResult",
+        ga_groups: list[list[ItemTasks]],
+        grouper: RankGrouper,
+    ):
+        """Wire PP flow sender/receiver dependencies.
+
+        Forward PP:
+          sender dep: last layer's fwd output → PP flow (receiver-based)
+          receiver dep: PP flow → first layer's fwd compute
+
+        Backward PP:
+          sender dep: first layer's ig output → PP flow (receiver-based)
+          receiver dep: PP flow → last layer's ig compute
+        """
+        for ga_idx, ga_group in enumerate(ga_groups):
+            last_item = ga_group[-1]
+            first_item = ga_group[0]
+
+            for pp_boundary in range(grouper.pp - 1):
+                fwd_flows = pp_result.forward_flows[(ga_idx, pp_boundary)]
+                bwd_flows = pp_result.backward_flows[(ga_idx, pp_boundary)]
+
+                for dp_idx in range(grouper.dp):
+                    for ep_idx in range(grouper.ep):
+                        for tp_idx in range(grouper.tp):
+                            src_rank = grouper.get_pp_rank(
+                                pp_boundary, dp_idx, ep_idx, tp_idx)
+                            dst_rank = grouper.get_pp_rank(
+                                pp_boundary + 1, dp_idx, ep_idx, tp_idx)
+
+                            # Forward PP: src_rank sends activation after L{vpp-1}.fwd
+                            fwd_pp = fwd_flows[src_rank]
+                            self._wire_to_flow_sender(
+                                fwd_pp, last_item.fwd_computes,
+                                last_item.fwd_result, src_rank)
+                            # dst_rank's L0.fwd waits for the PP flow
+                            first_item.fwd_computes[dst_rank].deps.append(fwd_pp.task_id)
+
+                            # Backward PP: dst_rank sends gradient after L0.ig
+                            bwd_pp = bwd_flows[dst_rank]
+                            self._wire_to_flow_sender(
+                                bwd_pp, first_item.ig_computes,
+                                first_item.ig_result, dst_rank)
+                            # src_rank's L{vpp-1}.ig waits for the PP flow
+                            last_item.ig_computes[src_rank].deps.append(bwd_pp.task_id)
+
+    def _wire_to_flow_sender(
+        self,
+        flow: FlowTask,
+        src_computes: dict[int, FlowTask],
+        src_result: FlowGroupResult,
+        sender_rank: int,
+    ):
+        """Wire source phase output to a PP flow's sender side.
+
+        Receiver-based: if source has comm flows, depend on flows where
+        sender_rank is receiver (dst); otherwise depend on compute directly.
+        """
+        if src_result.flows:
+            received_ids = src_result.receiver_index.get(sender_rank, [])
+            flow.deps.extend(received_ids)
+        else:
+            if sender_rank in src_computes:
+                flow.deps.append(src_computes[sender_rank].task_id)
