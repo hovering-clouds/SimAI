@@ -240,8 +240,9 @@ class TestTaskSerializer:
 
         plan = serializer.serialize(wl)
 
-        # Should be sorted: iteration=0,phase=FORWARD -> iteration=0,phase=BACKWARD_INPUT -> iteration=1,phase=FORWARD
-        assert plan.compute_order[0] == [0, 1, 2]
+        # Should be sorted: all FORWARD first (GA ascending), then all BACKWARD
+        # c0: FORWARD iter=0, c2: FORWARD iter=1, c1: BACKWARD iter=0
+        assert plan.compute_order[0] == [0, 2, 1]
 
     def test_validate_no_errors_on_valid_order(self):
         """Validation passes for valid ordering."""

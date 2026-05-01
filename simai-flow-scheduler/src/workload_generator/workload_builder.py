@@ -435,15 +435,26 @@ class WorkloadBuilder:
             self._wire_forward_chain(ga_group)
             self._wire_backward_chain(ga_group)
 
-        # Post items: forward chain + bridge + backward chain + IG→WG
+        # Post items: forward chain + backward chain + IG→WG
         self._wire_forward_chain(post_items)
-        if post_items:
-            last = post_items[-1]
-            self._wire_per_node_phase_transition(
-                src_result=last.fwd_result,
-                src_computes=last.fwd_computes,
-                dst_computes=last.ig_computes)
         self._wire_backward_chain(post_items)
+
+        # Bridge: last item's fwd → last item's ig (fwd→bwd transition)
+        # The bridge lives on whichever section is last in the workload.
+        if post_items:
+            bridge_item = post_items[-1]
+        elif ga_groups:
+            bridge_item = ga_groups[-1][-1]
+        elif pre_items:
+            bridge_item = pre_items[-1]
+        else:
+            bridge_item = None
+
+        if bridge_item is not None:
+            self._wire_per_node_phase_transition(
+                src_result=bridge_item.fwd_result,
+                src_computes=bridge_item.fwd_computes,
+                dst_computes=bridge_item.ig_computes)
 
         # ===== Barrier connections between sections =====
 

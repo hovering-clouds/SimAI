@@ -528,3 +528,244 @@ class TestEdgeCases:
                 assert fwd_compute.task_id in flow.deps, \
                     f"Flow {flow.task_id} (src={rank}) should depend on " \
                     f"compute {fwd_compute.task_id}"
+
+
+# ===========================================================================
+# TestPipelineParallelism - PP flow generation and wiring
+# ===========================================================================
+
+def build_pp_workload(
+    pp: int = 2, tp: int = 1, dp: int = 1, ep: int = 1,
+    ga: int = 1, vpp: int = 1,
+    pp_comm_size: int = 1024,
+    fwd_comm: str = "NONE", fwd_comm_size: int = 0,
+    bwd_comm: str = "NONE", bwd_comm_size: int = 0,
+):
+    """Build a workload with pp > 1 for PP testing."""
+    num_gpus = pp * tp * dp * ep
+    items = [create_dummy_item(
+        fwd_comm=fwd_comm, fwd_comm_size=fwd_comm_size,
+        bwd_comm=bwd_comm, bwd_comm_size=bwd_comm_size,
+    ) for _ in range(ga * vpp)]
+    header = AicbHeader(
+        tp=tp, ep=ep, pp=pp, vpp=vpp, ga=ga,
+        all_gpus=num_gpus, pp_comm_size=pp_comm_size,
+    )
+    job = Job(
+        job_id=0,
+        assigned_nodes=list(range(num_gpus)),
+        parallelism=ParallelismConfig(tp=tp, dp=dp, pp=pp, ep=ep),
+    )
+    builder = WorkloadBuilder()
+    workload = builder.build_from_aicb(header, items, job)
+    return workload
+
+
+class TestPipelineParallelism:
+    """Test PP flow generation and dependency wiring."""
+
+    def _check_no_cycles(self, workload):
+        adj = {t.task_id: t.deps for t in workload.tasks}
+        visited = set()
+        in_stack = set()
+
+        def has_cycle(node):
+            visited.add(node)
+            in_stack.add(node)
+            for dep in adj.get(node, []):
+                if dep not in visited:
+                    if has_cycle(dep):
+                        return True
+                elif dep in in_stack:
+                    return True
+            in_stack.discard(node)
+            return False
+
+        for task_id in adj:
+            if task_id not in visited:
+                assert not has_cycle(task_id), "DAG contains cycles"
+
+    def test_no_pp_flows_when_pp1(self):
+        """pp=1 should generate no PP flows."""
+        _, _, _, _, workload = build_simple_workload(tp=2, pp=1)
+        pp_flows = [t for t in workload.tasks if t.is_flow() and
+                    hasattr(t, 'comm_type') and str(t.comm_type) == "pp_send"]
+        assert len(pp_flows) == 0
+
+    def test_no_pp_flows_when_pp_comm_size_zero(self):
+        """pp > 1 but pp_comm_size=0 should generate no PP flows."""
+        num_gpus = 2
+        items = [create_dummy_item()]
+        header = AicbHeader(tp=1, ep=1, pp=2, vpp=1, ga=1,
+                            all_gpus=num_gpus, pp_comm_size=0)
+        job = Job(job_id=0, assigned_nodes=[0, 1],
+                  parallelism=ParallelismConfig(tp=1, dp=1, pp=2, ep=1))
+        builder = WorkloadBuilder()
+        workload = builder.build_from_aicb(header, items, job)
+        from src.workload_format.schema import CommType
+        pp_flows = [t for t in workload.tasks
+                    if t.is_flow() and t.comm_type == CommType.PP_SEND]
+        assert len(pp_flows) == 0
+
+    def test_pp_flow_count(self):
+        """PP flow count = ga × (pp-1) × (dp×ep×tp) × 2."""
+        pp, tp, dp, ep, ga, vpp = 2, 2, 1, 1, 1, 1
+        workload = build_pp_workload(pp=pp, tp=tp, dp=dp, ep=ep, ga=ga, vpp=vpp)
+        from src.workload_format.schema import CommType
+        pp_flows = [t for t in workload.tasks
+                    if t.is_flow() and t.comm_type == CommType.PP_SEND]
+        expected = ga * (pp - 1) * (dp * ep * tp) * 2
+        assert len(pp_flows) == expected
+
+    def test_pp_flow_count_multi_stage(self):
+        """pp=3 should have 2 boundaries × 2 directions = 4 PP flows per GA."""
+        pp, tp, dp, ep, ga, vpp = 3, 1, 1, 1, 1, 1
+        workload = build_pp_workload(pp=pp, tp=tp, dp=dp, ep=ep, ga=ga, vpp=vpp)
+        from src.workload_format.schema import CommType
+        pp_flows = [t for t in workload.tasks
+                    if t.is_flow() and t.comm_type == CommType.PP_SEND]
+        expected = ga * (pp - 1) * (dp * ep * tp) * 2
+        assert len(pp_flows) == expected
+
+    def test_pp_flow_count_multi_ga(self):
+        """Each GA step gets its own set of PP flows."""
+        pp, tp, dp, ep, ga, vpp = 2, 1, 1, 1, 3, 2
+        workload = build_pp_workload(pp=pp, tp=tp, dp=dp, ep=ep, ga=ga, vpp=vpp)
+        from src.workload_format.schema import CommType
+        pp_flows = [t for t in workload.tasks
+                    if t.is_flow() and t.comm_type == CommType.PP_SEND]
+        expected = ga * (pp - 1) * (dp * ep * tp) * 2
+        assert len(pp_flows) == expected
+
+    def test_forward_pp_flow_direction(self):
+        """Forward PP flows go from stage k to stage k+1."""
+        # pp=2, tp=1: stage0=rank0, stage1=rank1
+        workload = build_pp_workload(pp=2, tp=1, ga=1, vpp=1)
+        from src.workload_format.schema import CommType, Phase
+        fwd_pp = [t for t in workload.tasks
+                  if t.is_flow() and t.comm_type == CommType.PP_SEND
+                  and t.phase == Phase.FORWARD]
+        assert len(fwd_pp) == 1
+        assert fwd_pp[0].src == 0  # stage 0
+        assert fwd_pp[0].dst == 1  # stage 1
+
+    def test_backward_pp_flow_direction(self):
+        """Backward PP flows go from stage k+1 to stage k."""
+        workload = build_pp_workload(pp=2, tp=1, ga=1, vpp=1)
+        from src.workload_format.schema import CommType, Phase
+        bwd_pp = [t for t in workload.tasks
+                  if t.is_flow() and t.comm_type == CommType.PP_SEND
+                  and t.phase == Phase.BACKWARD_INPUT]
+        assert len(bwd_pp) == 1
+        assert bwd_pp[0].src == 1  # stage 1
+        assert bwd_pp[0].dst == 0  # stage 0
+
+    def test_forward_pp_sender_dep(self):
+        """Forward PP flow depends on stage k's last layer fwd compute."""
+        # pp=2, tp=1, vpp=2: stage0=rank0, stage1=rank1; last layer = layer_id=1
+        workload = build_pp_workload(pp=2, tp=1, ga=1, vpp=2)
+        from src.workload_format.schema import CommType, Phase
+        fwd_pp = next(t for t in workload.tasks
+                      if t.is_flow() and t.comm_type == CommType.PP_SEND
+                      and t.phase == Phase.FORWARD)
+        task_map = {t.task_id: t for t in workload.tasks}
+        # The PP flow's deps should include rank 0's last layer fwd compute
+        dep_tasks = [task_map[d] for d in fwd_pp.deps if d in task_map]
+        assert any(
+            t.is_compute() and t.phase == Phase.FORWARD
+            and t.node == 0 and t.layer_id == 1
+            for t in dep_tasks
+        ), "Forward PP flow should depend on stage 0's last layer fwd compute"
+
+    def test_forward_pp_receiver_dep(self):
+        """Stage k+1's first layer fwd compute depends on forward PP flow."""
+        workload = build_pp_workload(pp=2, tp=1, ga=1, vpp=2)
+        from src.workload_format.schema import CommType, Phase
+        fwd_pp = next(t for t in workload.tasks
+                      if t.is_flow() and t.comm_type == CommType.PP_SEND
+                      and t.phase == Phase.FORWARD)
+        # rank 1 (stage 1), layer_id=0 (first layer), fwd compute
+        first_layer_fwd_rank1 = next(
+            t for t in workload.tasks
+            if t.is_compute() and t.phase == Phase.FORWARD
+            and t.node == 1 and t.layer_id == 0
+        )
+        assert fwd_pp.task_id in first_layer_fwd_rank1.deps, \
+            "Stage 1's first layer fwd compute should depend on forward PP flow"
+
+    def test_backward_pp_sender_dep(self):
+        """Backward PP flow depends on stage k+1's first layer ig compute."""
+        workload = build_pp_workload(pp=2, tp=1, ga=1, vpp=2)
+        from src.workload_format.schema import CommType, Phase
+        bwd_pp = next(t for t in workload.tasks
+                      if t.is_flow() and t.comm_type == CommType.PP_SEND
+                      and t.phase == Phase.BACKWARD_INPUT)
+        task_map = {t.task_id: t for t in workload.tasks}
+        dep_tasks = [task_map[d] for d in bwd_pp.deps if d in task_map]
+        # Sender is rank 1 (stage 1), first layer (layer_id=0) ig compute
+        assert any(
+            t.is_compute() and t.phase == Phase.BACKWARD_INPUT
+            and t.node == 1 and t.layer_id == 0
+            for t in dep_tasks
+        ), "Backward PP flow should depend on stage 1's first layer ig compute"
+
+    def test_backward_pp_receiver_dep(self):
+        """Stage k's last layer ig compute depends on backward PP flow."""
+        workload = build_pp_workload(pp=2, tp=1, ga=1, vpp=2)
+        from src.workload_format.schema import CommType, Phase
+        bwd_pp = next(t for t in workload.tasks
+                      if t.is_flow() and t.comm_type == CommType.PP_SEND
+                      and t.phase == Phase.BACKWARD_INPUT)
+        # rank 0 (stage 0), last layer (layer_id=1), ig compute
+        last_layer_ig_rank0 = next(
+            t for t in workload.tasks
+            if t.is_compute() and t.phase == Phase.BACKWARD_INPUT
+            and t.node == 0 and t.layer_id == 1
+        )
+        assert bwd_pp.task_id in last_layer_ig_rank0.deps, \
+            "Stage 0's last layer ig compute should depend on backward PP flow"
+
+    def test_pp_with_layer_comm_sender_dep(self):
+        """When layer has AllReduce, PP flow depends on receiver flows, not compute."""
+        # pp=2, tp=2: stage0=[0,1], stage1=[2,3]
+        workload = build_pp_workload(
+            pp=2, tp=2, ga=1, vpp=1,
+            fwd_comm="ALLREDUCE", fwd_comm_size=1024,
+        )
+        from src.workload_format.schema import CommType, Phase
+        fwd_pp_flows = [t for t in workload.tasks
+                        if t.is_flow() and t.comm_type == CommType.PP_SEND
+                        and t.phase == Phase.FORWARD]
+        task_map = {t.task_id: t for t in workload.tasks}
+        for pp_flow in fwd_pp_flows:
+            sender = pp_flow.src
+            dep_tasks = [task_map[d] for d in pp_flow.deps if d in task_map]
+            # Deps should be flows (AllReduce receiver flows), not compute
+            assert all(t.is_flow() for t in dep_tasks), \
+                f"PP flow from rank {sender} should depend on AllReduce flows, not compute"
+            # All dep flows should have sender as dst (receiver-based)
+            assert all(t.dst == sender for t in dep_tasks), \
+                f"PP flow from rank {sender} should depend on flows where dst={sender}"
+
+    def test_pp_dag_no_cycles(self):
+        """Full PP workload DAG should have no cycles."""
+        workload = build_pp_workload(pp=2, tp=2, dp=1, ep=1, ga=2, vpp=3)
+        self._check_no_cycles(workload)
+
+    def test_pp_all_deps_exist(self):
+        """All PP flow dependency IDs should reference existing tasks."""
+        workload = build_pp_workload(pp=3, tp=2, ga=2, vpp=2)
+        task_ids = {t.task_id for t in workload.tasks}
+        for task in workload.tasks:
+            for dep in task.deps:
+                assert dep in task_ids, \
+                    f"Task {task.task_id} has non-existent dep {dep}"
+
+    def test_pp_flow_size(self):
+        """PP flows should use pp_comm_size from header."""
+        pp_comm_size = 50331648
+        workload = build_pp_workload(pp=2, tp=1, pp_comm_size=pp_comm_size)
+        from src.workload_format.schema import CommType
+        pp_flows = [t for t in workload.tasks
+                    if t.is_flow() and t.comm_type == CommType.PP_SEND]
+        assert all(t.size_bytes == pp_comm_size for t in pp_flows)

@@ -133,7 +133,7 @@ class TestChromeTraceVerbose:
 
         evt = compute_events[0]
         assert evt["ph"] == "X"
-        assert evt["name"] == "fwd L0"
+        assert evt["name"] == "fwd GA0 L0"
         assert "task_id" in evt["args"]
         assert "deps" in evt["args"]
         assert "dep_descriptions" in evt["args"]
@@ -149,7 +149,7 @@ class TestChromeTraceVerbose:
         assert len(flow_events) == 1
 
         evt = flow_events[0]
-        assert evt["name"] == "tp_ar 0\u21921"
+        assert evt["name"] == "tp_ar 0->1"
         assert evt["args"]["src"] == 0
         assert evt["args"]["dst"] == 1
         assert evt["args"]["size_bytes"] == 12500000
@@ -191,51 +191,43 @@ class TestChromeTraceVerbose:
 class TestChromeTraceCompact:
 
     def test_merges_collective_flows(self):
-        """两条同类型的 flow 应该被合并为一个事件。"""
+        """两条同类型的 flow 应该被合并为一个事件（receiver-based）。"""
         workload = P2PWorkload(
             version="1.0",
-            meta=Meta(num_jobs=1, num_nodes=3),
+            meta=Meta(num_jobs=1, num_nodes=2),
             tasks=[
                 Task(task_id=0, job_id=0, type=TaskType.COMPUTE,
                      node=0, duration_us=100, phase=Phase.FORWARD, layer_id=0),
+                # Two flows with same dst=1: receiver-based merge → one event on Node 1
                 Task(task_id=1, job_id=0, type=TaskType.FLOW,
                      src=0, dst=1, size_bytes=5000,
                      comm_type=CommType.TP_ALLREDUCE_RING,
                      deps=[0], phase=Phase.FORWARD, layer_id=0),
                 Task(task_id=2, job_id=0, type=TaskType.FLOW,
-                     src=0, dst=2, size_bytes=5000,
+                     src=0, dst=1, size_bytes=5000,
                      comm_type=CommType.TP_ALLREDUCE_RING,
                      deps=[0], phase=Phase.FORWARD, layer_id=0),
             ],
         )
-        topo = NetworkTopology()
-        topo.total_nodes = 3
-        topo.gpu_count = 3
-        topo.gpu_nodes = [0, 1, 2]
-        topo.switch_nodes = []
-        topo.node_types = {0: "gpu", 1: "gpu", 2: "gpu"}
-        for src, dst in [(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)]:
-            topo.add_link(Link(src=src, dst=dst, bandwidth_gbps=100.0,
-                               latency_us=0.0, error_rate=0.0))
-
+        topo = _make_2node_topology()
         result = _run_executor(workload, topo)
         viz = ChromeTraceCompact(workload)
         events = viz.to_events(result)
 
-        # flow X 事件：node 0 的 Comm 行应该只有 1 个合并事件（两条 flow 合并）
+        # flow X 事件：node 1 的 Comm 行应该只有 1 个合并事件（两条 flow 合并）
         flow_events = [e for e in events
                        if e.get("cat") == "flow" and e.get("ph") == "X"]
-        node0_flows = [e for e in flow_events if e["tid"] == 1]  # tid=1 = Node 0 Comm
-        assert len(node0_flows) == 1
-        assert node0_flows[0]["args"]["num_flows"] == 2
-        assert node0_flows[0]["args"]["total_bytes"] == 10000
+        node1_flows = [e for e in flow_events if e["tid"] == 3]  # tid=3 = Node 1 Comm
+        assert len(node1_flows) == 1
+        assert node1_flows[0]["args"]["num_flows"] == 2
+        assert node1_flows[0]["args"]["total_bytes"] == 10000
 
     def test_flow_arrows_present(self):
         """Compact 模式应该生成 flow event 箭头。"""
         workload = _simple_workload()
         topo = _make_2node_topology()
         result = _run_executor(workload, topo)
-        viz = ChromeTraceCompact(workload)
+        viz = ChromeTraceCompact(workload, show_arrows=True)
         events = viz.to_events(result)
 
         arrows_s = [e for e in events if e.get("ph") == "s"]
