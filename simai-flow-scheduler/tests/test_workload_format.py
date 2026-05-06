@@ -12,6 +12,7 @@ from src.workload_format.schema import (
     Phase,
     CommType,
     ParallelismConfig,
+    P2P_WORKLOAD_JSON_SCHEMA,
 )
 from src.workload_format.writer import WorkloadWriter, WorkloadReader
 from src.workload_format.validator import WorkloadValidator
@@ -250,3 +251,118 @@ class TestWorkloadIO:
         assert is_valid
         assert len(errors) == 0
         assert loaded is not None
+
+
+class TestNewInferenceEnums:
+    """Tests for new inference enum values added in Phase 5."""
+
+    def test_prefill_phase_creation(self):
+        """Test creating a task with PREFILL phase."""
+        task = Task(
+            task_id=0,
+            job_id=0,
+            type=TaskType.COMPUTE,
+            node=2,
+            duration_us=1500,
+            phase=Phase.PREFILL,
+        )
+        assert task.phase == Phase.PREFILL
+        assert task.phase.value == "prefill"
+
+    def test_decode_phase_creation(self):
+        """Test creating a task with DECODE phase."""
+        task = Task(
+            task_id=0,
+            job_id=0,
+            type=TaskType.COMPUTE,
+            node=2,
+            duration_us=500,
+            phase=Phase.DECODE,
+        )
+        assert task.phase == Phase.DECODE
+        assert task.phase.value == "decode"
+
+    def test_kv_cache_transfer_comm_type(self):
+        """Test creating a flow task with KV_CACHE_TRANSFER comm type."""
+        task = Task(
+            task_id=0,
+            job_id=0,
+            type=TaskType.FLOW,
+            src=2,
+            dst=3,
+            size_bytes=12345678,
+            comm_type=CommType.KV_CACHE_TRANSFER,
+        )
+        assert task.comm_type == CommType.KV_CACHE_TRANSFER
+        assert task.comm_type.value == "kv_cache_transfer"
+
+    def test_new_enum_serialization_round_trip(self, tmp_path):
+        """Test that new enum values survive write → read round-trip."""
+        workload = P2PWorkload(
+            version="1.0",
+            meta=Meta(num_jobs=1, num_nodes=8),
+            tasks=[
+                Task(
+                    task_id=0,
+                    job_id=0,
+                    type=TaskType.COMPUTE,
+                    node=0,
+                    duration_us=1000,
+                    phase=Phase.PREFILL,
+                ),
+                Task(
+                    task_id=1,
+                    job_id=0,
+                    type=TaskType.COMPUTE,
+                    node=4,
+                    duration_us=500,
+                    phase=Phase.DECODE,
+                ),
+                Task(
+                    task_id=2,
+                    job_id=0,
+                    type=TaskType.FLOW,
+                    src=0,
+                    dst=4,
+                    size_bytes=123456,
+                    comm_type=CommType.KV_CACHE_TRANSFER,
+                    deps=[0],
+                ),
+            ],
+        )
+
+        file_path = tmp_path / "inference_workload.json"
+        WorkloadWriter().write(workload, file_path)
+
+        loaded = WorkloadReader().read(file_path)
+        assert len(loaded.tasks) == 3
+        assert loaded.tasks[0].phase == Phase.PREFILL
+        assert loaded.tasks[1].phase == Phase.DECODE
+        assert loaded.tasks[2].comm_type == CommType.KV_CACHE_TRANSFER
+
+    def test_new_enum_validation(self):
+        """Test that JSON schema validates new phase values."""
+        from src.workload_format.validator import WorkloadValidator
+
+        validator = WorkloadValidator()
+
+        # Valid: prefill phase
+        data = {
+            "version": "1.0",
+            "meta": {"num_jobs": 1, "num_nodes": 4},
+            "tasks": [
+                {"task_id": 0, "job_id": 0, "type": "compute", "phase": "prefill", "node": 0, "duration_us": 1000}
+            ],
+        }
+        errors = validator.validate_json(data)
+        assert len(errors) == 0
+
+        # Valid: decode phase
+        data["tasks"][0]["phase"] = "decode"
+        errors = validator.validate_json(data)
+        assert len(errors) == 0
+
+        # Invalid: unknown phase
+        data["tasks"][0]["phase"] = "invalid_phase"
+        errors = validator.validate_json(data)
+        assert len(errors) > 0

@@ -17,11 +17,13 @@ class TaskType(str, Enum):
 
 
 class Phase(str, Enum):
-    """Training phase."""
+    """Training/inference phase."""
     FORWARD = "forward"
     BACKWARD_INPUT = "backward_input"
     BACKWARD_WEIGHT = "backward_weight"
     OPTIMIZER = "optimizer"
+    PREFILL = "prefill"
+    DECODE = "decode"
 
 
 class CommType(str, Enum):
@@ -44,6 +46,8 @@ class CommType(str, Enum):
     # Pipeline Parallel
     PP_SEND = "pp_send"
     PP_RECV = "pp_recv"
+    # Inference
+    KV_CACHE_TRANSFER = "kv_cache_transfer"
     # Unknown/unspecified
     UNKNOWN = "unknown"
 
@@ -342,7 +346,7 @@ P2P_WORKLOAD_JSON_SCHEMA = {
                     "iteration": {"type": "integer"},
                     "phase": {
                         "type": "string",
-                        "enum": ["forward", "backward_input", "backward_weight", "optimizer"]
+                        "enum": ["forward", "backward_input", "backward_weight", "optimizer", "prefill", "decode"]
                     },
                     "layer_id": {"type": "integer"},
                     "node": {"type": "integer"},
