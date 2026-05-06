@@ -246,7 +246,7 @@ prefill_1 ──→ kv_transfer_1 ──→ decode_1[0] → decode_1[1] → ... 
 
 ## 开发阶段
 
-### Phase A: Vidur 调研 + Trace 格式确定
+### Task A: Vidur 调研 + Trace 格式确定
 **调研任务：**
 - 深入阅读 Vidur 的 batch 调度流程，确认可获取的 per-batch 信息
 - 确定插桩点和可捕获的数据字段
@@ -255,19 +255,19 @@ prefill_1 ──→ kv_transfer_1 ──→ decode_1[0] → decode_1[1] → ... 
 
 **说明：** 这一阶段需要先做，因为 trace 格式决定了后续 InferenceTraceExpander 的设计
 
-### Phase B: Schema 扩展
+### Task B: Schema 扩展
 **修改文件：**
 - `src/workload_format/schema.py` — Phase +PREFILL/DECODE, CommType +KV_CACHE_TRANSFER
 - `src/workload_format/validator.py` — 更新 JSON schema（phase 枚举增加新值）
 - `src/workload_format/writer.py` — 序列化新枚举值
 
-### Phase C: InferenceProfileStore
+### Task C: InferenceProfileStore
 **新增文件：**
 - `src/workload_generator/inference_profile.py` — CSV profiling 数据加载和查表
 
 **说明：** 独立的数据组件，不依赖 executor 或现有 pipeline
 
-### Phase D: InferenceTraceExpander
+### Task D: InferenceTraceExpander
 **新增文件：**
 - `src/workload_generator/inference_trace_expander.py`
 
@@ -278,24 +278,24 @@ prefill_1 ──→ kv_transfer_1 ──→ decode_1[0] → decode_1[1] → ... 
 - `expand_kv_cache_transfer()` — P→D P2P flow 任务
 - 根据 `depends_on` 连接 batch 间的依赖
 
-### Phase E: Vidur 插桩 + Trace 抓取
+### Task E: Vidur 插桩 + Trace 抓取
 **修改文件（Vidur 侧）：**
-- 根据 Phase A 确定的格式和插桩点，在 Vidur 中插入 trace 捕获逻辑
+- 根据 Task A 确定的格式和插桩点，在 Vidur 中插入 trace 捕获逻辑
 - 输出符合规范的 trace 文件
 
-### Phase F: 端到端集成脚本
+### Task F: 端到端集成脚本
 **新增文件：**
 - `scripts/run_mixed_e2e.py` — 端到端混合模拟脚本（编排训练+推理合并逻辑）
 
 ## 验证方式
 
 每个阶段独立测试：
-- **Phase A:** 输出 trace 格式规范文档，并用 Vidur 跑小场景验证可获取的信息
-- **Phase B:** 验证新 Phase/CommType 枚举值的序列化和反序列化
-- **Phase C:** 单元测试 ProfileStore 的查表和插值
-- **Phase D:** 构造测试 trace JSON，验证展开后的 DAG 结构和依赖关系
-- **Phase E:** 用 Vidur 跑一个小推理场景，检查 trace 输出的正确性
-- **Phase F:** 端到端运行混合 workload，对比纯训练 vs 混合场景的训练 iteration 时间（应有增大）和推理 batch 延迟（反映网络拥塞影响）
+- **Task A:** 输出 trace 格式规范文档，并用 Vidur 跑小场景验证可获取的信息
+- **Task B:** 验证新 Phase/CommType 枚举值的序列化和反序列化
+- **Task C:** 单元测试 ProfileStore 的查表和插值
+- **Task D:** 构造测试 trace JSON，验证展开后的 DAG 结构和依赖关系
+- **Task E:** 用 Vidur 跑一个小推理场景，检查 trace 输出的正确性
+- **Task F:** 端到端运行混合 workload，对比纯训练 vs 混合场景的训练 iteration 时间（应有增大）和推理 batch 延迟（反映网络拥塞影响）
 
 ## 调研参考
 
