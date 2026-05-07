@@ -28,6 +28,11 @@ class RequestArrivalEvent(BaseEvent):
         # Add request to scheduler
         scheduler.add_request(self._request)
         metrics_store.on_request_arrival(self.time, self._request)
+
+        # Record request for simai-flow-scheduler trace
+        if hasattr(metrics_store, 'trace_recorder'):
+            metrics_store.trace_recorder.record_request(self._request)
+
         # 触发一个全局调度事件
         # Trigger a global scheduling event
         print(f"> Debug: time={self.time} Event {self._id} of type {self._event_type} Generates 1 GlobalScheduleEvent")

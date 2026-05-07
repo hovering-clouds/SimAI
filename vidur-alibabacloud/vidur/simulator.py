@@ -10,6 +10,7 @@ from vidur.logger import init_logger
 from vidur.metrics import MetricsStore
 from vidur.request_generator import RequestGeneratorRegistry
 from vidur.scheduler import BaseGlobalScheduler, GlobalSchedulerRegistry
+from vidur.trace_recorder import TraceRecorder
 
 logger = init_logger(__name__)
 
@@ -42,6 +43,12 @@ class Simulator:
             self._config.request_generator_config,
         )
         self._metric_store = MetricsStore(self._config)
+
+        # TraceRecorder for simai-flow-scheduler inference trace output
+        replica_config = self._config.cluster_config.replica_config
+        trace_output_dir = self._config.metrics_config.output_dir
+        self._trace_recorder = TraceRecorder(replica_config, trace_output_dir)
+        self._metric_store.trace_recorder = self._trace_recorder
         self._request_generator = RequestGeneratorRegistry.get(
             self._config.request_generator_config.get_type(),
             self._config.request_generator_config,
@@ -112,6 +119,11 @@ class Simulator:
 
         self._metric_store.plot()
         logger.info("Metrics written")
+
+        # Save inference trace for simai-flow-scheduler
+        if hasattr(self._metric_store, 'trace_recorder'):
+            self._metric_store.trace_recorder.save()
+            logger.info("Inference trace written")
 
         if self._config.metrics_config.write_json_trace:
             self._write_event_trace()

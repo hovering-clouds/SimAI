@@ -134,11 +134,14 @@ class BatchEndEvent(BaseEvent):
                         decode_replica_id={request.decode_replica_id} len(events)={len(events)}")
         
                 
-                if request._num_processed_tokens >= request._num_prefill_tokens:            
+                if request._num_processed_tokens >= request._num_prefill_tokens:
                     # print(f"> self.decode_arrived_at={self.decode_arrived_at} self.request_type={self.request_type} self.prefill_completed_at={self.prefill_completed_at} self._is_prefill_complete={self._is_prefill_complete}")
                     assert request.decode_arrived_at < float("inf")  and request.request_type == RequestType.DECODE and request.prefill_completed_at > 0 and request._is_prefill_complete == True, "> debug"
 
-                        
+        # --- Trace recording for simai-flow-scheduler ---
+        if hasattr(metrics_store, 'trace_recorder'):
+            metrics_store.trace_recorder.record_batch(
+                self._batch, replica_scheduler.replica)
         return events
 
 
