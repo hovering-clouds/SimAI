@@ -68,6 +68,10 @@ class InferenceTraceExpander:
         tp: Tensor parallel size.
         ep: Expert parallel size (default 1).
         pp: Pipeline parallel size (default 1, only pp=1 supported).
+        assigned_nodes: All available node IDs for inference replicas.
+            Each replica occupies tp*ep*pp consecutive nodes from this list.
+            If None, falls back to the default mapping where replica r occupies
+            [r*ws, ..., (r+1)*ws - 1].
     """
 
     def __init__(
@@ -76,6 +80,7 @@ class InferenceTraceExpander:
         tp: int,
         ep: int = 1,
         pp: int = 1,
+        assigned_nodes: Optional[list[int]] = None,
     ):
         if pp != 1:
             raise NotImplementedError("pp > 1 not yet supported for inference expansion")
@@ -83,6 +88,7 @@ class InferenceTraceExpander:
         self._tp = tp
         self._ep = ep
         self._pp = pp
+        self._assigned_nodes = assigned_nodes
         self._ar = AllReduceExpander()
         self._a2a = AlltoAllExpander()
 
@@ -205,10 +211,12 @@ class InferenceTraceExpander:
         return self._tp * self._ep * self._pp
 
     def _replica_ranks(self, replica_id: int) -> list[int]:
-        """Physical ranks for a replica: [replica_id*ws, ..., (replica_id+1)*ws - 1]."""
+        """Physical nodes for a replica: tp*ep*pp consecutive nodes from assigned_nodes."""
         ws = self._world_size()
-        base = replica_id * ws
-        return list(range(base, base + ws))
+        offset = replica_id * ws
+        if self._assigned_nodes is not None:
+            return list(self._assigned_nodes[offset:offset + ws])
+        return list(range(offset, offset + ws))
 
     def _grouper(self, replica_id: int) -> RankGrouper:
         return RankGrouper(
