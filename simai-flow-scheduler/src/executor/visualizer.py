@@ -99,10 +99,10 @@ class ChromeTraceVisualizer(ABC):
     # ── 公共辅助方法 ──
 
     def _tid_for_compute(self, node_id: int) -> int:
-        return node_id * 2
+        return node_id * 2 + 1
 
     def _tid_for_comm(self, node_id: int) -> int:
-        return node_id * 2 + 1
+        return node_id * 2 + 2
 
     def _iteration_tag(self, iteration: int) -> str:
         if iteration < 0:
