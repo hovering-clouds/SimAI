@@ -141,19 +141,27 @@ class CppReferenceOrdering(OrderingStrategy):
           ...
 
         排序规则：
-        1. direction：FORWARD(0) → BACKWARD(1)
+        1. direction：FORWARD(0) → BACKWARD(1) → INFERENCE(2)
         2. iteration：Forward 正序（GA 升序），Backward 倒序（GA 降序）
         3. layer_id：Forward 正序，Backward 倒序
         4. sub_phase：ig(0) → wg(1)，仅对 backward 有意义
         5. item_id：兜底
+
+        推理任务（PREFILL/DECODE）：按 task_id 排序，保留 expander 创建顺序
+        （即 batch 内按层顺序，batch 间按 depends_on 顺序），避免跨 batch
+        的层交错与 depends_on 依赖产生环。
         """
-        # FORWARD vs BACKWARD 分组（不再按 ig/wg 分开）
+        # FORWARD vs BACKWARD vs INFERENCE 分组
         if task.phase == Phase.FORWARD:
             direction = 0
         elif task.phase in (Phase.BACKWARD_INPUT, Phase.BACKWARD_WEIGHT):
             direction = 1
         else:
             direction = 2
+
+        # 推理任务：task_id 保留 expander 创建顺序（batch 顺序）
+        if task.phase in (Phase.PREFILL, Phase.DECODE):
+            return (direction, task.task_id)
 
         is_backward = task.phase in (Phase.BACKWARD_INPUT, Phase.BACKWARD_WEIGHT)
 

@@ -1,0 +1,70 @@
+{
+  "version": "1.0",
+  "model": "deepseek-671B",
+  "model_config": {
+    "hidden_size": 7168,
+    "num_layers": 61,
+    "mlp_hidden_dim": 18432,
+    "num_experts": 256,
+    "moe_topk": 8
+  },
+  "parallelism": { "tp": 1, "pp": 1, "ep": 1 },
+  "pd_config": {
+    "pd_node_ratio": 0.5,
+    "pd_p2p_comm_bandwidth_gbps": 200
+  },
+  "requests": {
+    "0": { "num_prefill_tokens": 512, "num_decode_tokens": 4 },
+    "1": { "num_prefill_tokens": 256, "num_decode_tokens": 3 }
+  },
+  "batches": [
+    {
+      "batch_id": "p0",
+      "type": "prefill",
+      "replica_id": 0,
+      "request_ids": [0, 1],
+      "num_tokens": [512, 256],
+      "kv_cache_bytes": {
+        "0": 137625600,
+        "1": 68812800
+      },
+      "depends_on": []
+    },
+    {
+      "batch_id": "d0",
+      "type": "decode",
+      "replica_id": 1,
+      "request_ids": [0, 1],
+      "num_tokens": [1, 1],
+      "kv_cache_bytes": null,
+      "depends_on": ["p0"]
+    },
+    {
+      "batch_id": "d1",
+      "type": "decode",
+      "replica_id": 1,
+      "request_ids": [0, 1],
+      "num_tokens": [1, 1],
+      "kv_cache_bytes": null,
+      "depends_on": ["d0"]
+    },
+    {
+      "batch_id": "d2",
+      "type": "decode",
+      "replica_id": 1,
+      "request_ids": [0, 1],
+      "num_tokens": [1, 1],
+      "kv_cache_bytes": null,
+      "depends_on": ["d1"]
+    },
+    {
+      "batch_id": "d3",
+      "type": "decode",
+      "replica_id": 1,
+      "request_ids": [0],
+      "num_tokens": [1],
+      "kv_cache_bytes": null,
+      "depends_on": ["d2"]
+    }
+  ]
+}
