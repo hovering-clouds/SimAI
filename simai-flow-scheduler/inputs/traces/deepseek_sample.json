@@ -36,6 +36,7 @@
       "replica_id": 1,
       "request_ids": [0, 1],
       "num_tokens": [1, 1],
+      "kv_cache_seq_lens": [513, 257],
       "kv_cache_bytes": null,
       "depends_on": ["p0"]
     },
@@ -45,6 +46,7 @@
       "replica_id": 1,
       "request_ids": [0, 1],
       "num_tokens": [1, 1],
+      "kv_cache_seq_lens": [514, 258],
       "kv_cache_bytes": null,
       "depends_on": ["d0"]
     },
@@ -54,6 +56,7 @@
       "replica_id": 1,
       "request_ids": [0, 1],
       "num_tokens": [1, 1],
+      "kv_cache_seq_lens": [515, 259],
       "kv_cache_bytes": null,
       "depends_on": ["d1"]
     },
@@ -63,6 +66,7 @@
       "replica_id": 1,
       "request_ids": [0],
       "num_tokens": [1],
+      "kv_cache_seq_lens": [516],
       "kv_cache_bytes": null,
       "depends_on": ["d2"]
     }

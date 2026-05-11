@@ -98,8 +98,6 @@ class InferenceTraceExpander:
         self,
         trace: dict,
         job_id: int = 0,
-        prefill_profile_key: Optional[str] = None,
-        decode_profile_key: Optional[str] = None,
     ) -> tuple[P2PWorkload, dict]:
         """
         Expand trace into P2PWorkload + batch_task_map.
@@ -107,8 +105,6 @@ class InferenceTraceExpander:
         Args:
             trace: Parsed trace dict (from JSON).
             job_id: Job ID to assign to all generated tasks.
-            prefill_profile_key: Key in profile_store for prefill profiling data.
-            decode_profile_key: Key in profile_store for decode profiling data.
 
         Returns:
             (P2PWorkload, batch_task_map) where batch_task_map maps
@@ -161,13 +157,19 @@ class InferenceTraceExpander:
                     for rank, tids in batch_exits.get(dep_id, {}).items():
                         prev_exits.setdefault(rank, []).extend(tids)
 
+            # ── Select profile by (phase, bs, seq) ─────────────────────────
+            bs = len(batch["request_ids"])
+            if btype == "prefill":
+                seq = sum(batch["num_tokens"])
+            else:
+                kv_lens = batch.get("kv_cache_seq_lens")
+                seq = max(kv_lens) if kv_lens else 1
+            profiles = self._store.get_profile_for_batch(btype, bs, seq)
+
             # ── Expand batch ──────────────────────────────────────────────
-            profile_key = (
-                prefill_profile_key if btype == "prefill" else decode_profile_key
-            )
             batch_tasks, exits, task_id = self._expand_batch(
                 batch=batch,
-                profile_key=profile_key,
+                profiles=profiles,
                 job_id=job_id,
                 task_id_start=task_id,
                 prev_exits=prev_exits,
@@ -229,7 +231,7 @@ class InferenceTraceExpander:
     def _expand_batch(
         self,
         batch: dict,
-        profile_key: Optional[str],
+        profiles: list,
         job_id: int,
         task_id_start: int,
         prev_exits: dict[int, list[int]],
@@ -245,7 +247,6 @@ class InferenceTraceExpander:
         grouper = self._grouper(replica_id)
         ranks = self._replica_ranks(replica_id)
 
-        profiles = self._store.get_profile(profile_key) if profile_key else []
         layers = self._group_profiles_by_layer(profiles)
 
         all_tasks: list[FlowTask] = []

@@ -22,7 +22,7 @@ TP = 2
 EP = 1
 NUM_LAYERS = 2
 
-PREFILL_PROFILE_KEY = "prefill_bs2_seq128"
+PREFILL_PROFILE_KEY = "prefill_bs2_seq192"
 DECODE_PROFILE_KEY = "decode_bs2_seq1"
 
 # TSV content: 2 layers, attention + mlp each
@@ -68,6 +68,7 @@ TRACE = {
             "replica_id": 1,
             "request_ids": [0, 1],
             "num_tokens": [1, 1],
+            "kv_cache_seq_lens": [129, 65],
             "kv_cache_bytes": None,
             "depends_on": ["p0"],
         },
@@ -77,6 +78,7 @@ TRACE = {
             "replica_id": 1,
             "request_ids": [0, 1],
             "num_tokens": [1, 1],
+            "kv_cache_seq_lens": [130, 66],
             "kv_cache_bytes": None,
             "depends_on": ["d0"],
         },
@@ -86,6 +88,7 @@ TRACE = {
             "replica_id": 1,
             "request_ids": [0],
             "num_tokens": [1],
+            "kv_cache_seq_lens": [131],
             "kv_cache_bytes": None,
             "depends_on": ["d1"],
         },
@@ -113,12 +116,7 @@ def expander(store):
 
 @pytest.fixture
 def result(expander):
-    return expander.expand(
-        TRACE,
-        job_id=0,
-        prefill_profile_key=PREFILL_PROFILE_KEY,
-        decode_profile_key=DECODE_PROFILE_KEY,
-    )
+    return expander.expand(TRACE, job_id=0)
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -335,7 +333,7 @@ class TestMoEExpansion:
         f.write_text(moe_tsv)
 
         store = InferenceProfileStore()
-        store.load(str(f), "prefill_moe")
+        store.load(str(f), "prefill_bs1_seq64")
 
         # tp=2, ep=2 → world_size=4 per replica
         expander = InferenceTraceExpander(store, tp=2, ep=2)
@@ -358,7 +356,7 @@ class TestMoEExpansion:
             ],
         }
 
-        workload, btm = expander.expand(trace, prefill_profile_key="prefill_moe")
+        workload, btm = expander.expand(trace)
         task_map = {t.task_id: t for t in workload.tasks}
 
         flow_tasks = [

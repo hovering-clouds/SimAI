@@ -38,12 +38,10 @@ from src.executor.analytical import AnalyticalExecutor
 TRAINING_AICB   = "inputs/aicb-workload/gpt175b-a100.txt"
 TOPO_FILE       = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100"
 INFERENCE_TRACE = "inputs/traces/deepseek_sample.json"
-PREFILL_CSV     = "inputs/vidur-csv/vidur-DeepSeek-671B-world_size1-tp1-pp1-ep1-bs1-seq512-prefill.csv"
-DECODE_CSV      = "inputs/vidur-csv/vidur-DeepSeek-671B-world_size1-tp1-pp1-ep1-bs1-seq1-decode.csv"
 OUTPUT_DIR      = "outputs/mixed_e2e"
 
-PREFILL_KEY = "prefill_bs1_seq512"
-DECODE_KEY  = "decode_bs1_seq1"
+# Profile directory: all matching CSV files will be auto-loaded
+PROFILE_DIR = "inputs/vidur-csv"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -89,11 +87,6 @@ print(f"  Tasks: {len(training_wl.tasks)}  "
 
 _sep("Step 2: Expand inference trace")
 
-store = InferenceProfileStore()
-store.load(PREFILL_CSV, PREFILL_KEY)
-store.load(DECODE_CSV,  DECODE_KEY)
-print(f"  Loaded profiles: {store.list_profiles()}")
-
 with open(INFERENCE_TRACE) as f:
     trace = json.load(f)
 
@@ -106,13 +99,13 @@ num_requests = len(trace["requests"])
 print(f"  Model: {trace['model']}  tp={infer_tp} ep={infer_ep} pp={infer_pp}")
 print(f"  Requests: {num_requests}  Batches: {num_batches}")
 
+# Load profiles matching the trace's parallelism config
+store = InferenceProfileStore(tp=infer_tp, ep=infer_ep, pp=infer_pp)
+loaded = store.load_directory(PROFILE_DIR)
+print(f"  Loaded {loaded} profiles: {store.list_profiles()}")
+
 expander = InferenceTraceExpander(store, tp=infer_tp, ep=infer_ep, pp=infer_pp)
-inference_wl, batch_task_map = expander.expand(
-    trace,
-    job_id=1,
-    prefill_profile_key=PREFILL_KEY,
-    decode_profile_key=DECODE_KEY,
-)
+inference_wl, batch_task_map = expander.expand(trace, job_id=1)
 print(f"  Tasks: {len(inference_wl.tasks)}  "
       f"(compute={len(inference_wl.get_compute_tasks())}, "
       f"flow={len(inference_wl.get_flow_tasks())})")

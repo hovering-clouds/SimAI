@@ -125,3 +125,71 @@ class TestInferenceProfileStore:
 
         store.load(tsv_path, "prefill_bs4_seq4096")
         assert store.list_profiles() == ["prefill_bs4_seq4096"]
+
+    def test_load_directory_new_format(self, tmp_path, tsv_content):
+        """Test load_directory with new filename format."""
+        # Create files with new format: {phase}_bs{bs}_seq{seq}_tp{tp}_ep{ep}_pp{pp}.csv
+        (tmp_path / "prefill_bs4_seq4096_tp2_ep1_pp1.csv").write_text(tsv_content)
+        (tmp_path / "decode_bs4_seq1_tp2_ep1_pp1.csv").write_text(tsv_content)
+        (tmp_path / "prefill_bs8_seq2048_tp4_ep1_pp1.csv").write_text(tsv_content)
+
+        store = InferenceProfileStore(tp=2, ep=1, pp=1)
+        loaded = store.load_directory(str(tmp_path))
+
+        assert loaded == 2  # Only tp=2 files loaded
+        assert "prefill_bs4_seq4096" in store.list_profiles()
+        assert "decode_bs4_seq1" in store.list_profiles()
+        assert "prefill_bs8_seq2048" not in store.list_profiles()
+
+    def test_load_directory_vidur_format(self, tmp_path, tsv_content):
+        """Test load_directory with Vidur filename format."""
+        # Create files with Vidur format: vidur-{model}-world_size{ws}-tp{tp}-pp{pp}-ep{ep}-bs{bs}-seq{seq}-{phase}.csv
+        (tmp_path / "vidur-DeepSeek-671B-world_size1-tp1-pp1-ep1-bs1-seq512-prefill.csv").write_text(tsv_content)
+        (tmp_path / "vidur-DeepSeek-671B-world_size1-tp1-pp1-ep1-bs1-seq1-decode.csv").write_text(tsv_content)
+        (tmp_path / "vidur-DeepSeek-671B-world_size2-tp2-pp1-ep1-bs4-seq1024-prefill.csv").write_text(tsv_content)
+
+        store = InferenceProfileStore(tp=1, ep=1, pp=1)
+        loaded = store.load_directory(str(tmp_path))
+
+        assert loaded == 2  # Only tp=1 files loaded
+        assert "prefill_bs1_seq512" in store.list_profiles()
+        assert "decode_bs1_seq1" in store.list_profiles()
+        assert "prefill_bs4_seq1024" not in store.list_profiles()
+
+    def test_load_directory_mixed_formats(self, tmp_path, tsv_content):
+        """Test load_directory with mixed filename formats."""
+        (tmp_path / "prefill_bs4_seq4096_tp1_ep1_pp1.csv").write_text(tsv_content)
+        (tmp_path / "vidur-Model-world_size1-tp1-pp1-ep1-bs8-seq2048-decode.csv").write_text(tsv_content)
+        (tmp_path / "invalid_filename.csv").write_text(tsv_content)
+
+        store = InferenceProfileStore(tp=1, ep=1, pp=1)
+        loaded = store.load_directory(str(tmp_path))
+
+        assert loaded == 2  # Only valid files loaded
+        assert "prefill_bs4_seq4096" in store.list_profiles()
+        assert "decode_bs8_seq2048" in store.list_profiles()
+
+    def test_load_directory_no_filter(self, tmp_path, tsv_content):
+        """Test load_directory without parallelism filters."""
+        (tmp_path / "prefill_bs4_seq4096_tp2_ep1_pp1.csv").write_text(tsv_content)
+        (tmp_path / "decode_bs4_seq1_tp4_ep2_pp1.csv").write_text(tsv_content)
+
+        store = InferenceProfileStore()  # No filters
+        loaded = store.load_directory(str(tmp_path))
+
+        assert loaded == 2  # All files loaded
+        assert len(store.list_profiles()) == 2
+
+    def test_load_directory_empty(self, tmp_path):
+        """Test load_directory with no matching files."""
+        store = InferenceProfileStore(tp=1, ep=1, pp=1)
+        loaded = store.load_directory(str(tmp_path))
+
+        assert loaded == 0
+        assert store.list_profiles() == []
+
+    def test_load_directory_not_a_directory(self, tmp_path):
+        """Test load_directory with invalid path."""
+        store = InferenceProfileStore()
+        with pytest.raises(ValueError, match="Not a directory"):
+            store.load_directory(str(tmp_path / "nonexistent"))
