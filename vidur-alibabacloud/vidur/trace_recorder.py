@@ -128,6 +128,13 @@ class TraceRecorder:
             "depends_on": depends_on,
         }
 
+        # For decode batches: record per-request KV cache sequence lengths
+        if batch_type == "decode":
+            batch_entry["kv_cache_seq_lens"] = [
+                req.num_processed_prefill_tokens + req.num_processed_decode_tokens
+                for req in batch.requests
+            ]
+
         self._batches.append(batch_entry)
 
         # Update tracking state
