@@ -7,9 +7,11 @@ Usage:
     uv run python scripts/run_mixed_e2e.py
 
 GPU assignment (default):
-  Training job : GPUs 0-15  (tp=8, dp=2, from gpt175b-a100.txt)
-  Inference job: GPUs 0-1   (tp=1, ep=1, P-node=GPU 0, D-node=GPU 1)
-  Both jobs share the same network — contention is modeled by the executor.
+  Training job : GPUs 0-15  (tp=8, dp=2, servers 0-1)
+  Inference job: GPUs 16-31 (tp=2, ep=4, pp=1, 2 replicas, servers 2-3)
+    P-replica (replica 0): GPUs 16-23 (server 2)
+    D-replica (replica 1): GPUs 24-31 (server 3)
+  Both jobs share spine switches — traffic collision on PSwitches.
 """
 
 import sys
@@ -36,12 +38,15 @@ from src.executor.analytical import AnalyticalExecutor
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 TRAINING_AICB   = "inputs/aicb-workload/gpt175b-a100.txt"
-TOPO_FILE       = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100"
-INFERENCE_TRACE = "inputs/traces/deepseek_sample.json"
+TOPO_FILE       = "inputs/topologies/AlibabaHPN_32g_8gps_DualToR_DualPlane_200Gbps_A100"
+INFERENCE_TRACE = "inputs/traces/inference_trace.json"
 OUTPUT_DIR      = "outputs/mixed_e2e"
 
 # Profile directory: all matching CSV files will be auto-loaded
-PROFILE_DIR = "inputs/vidur-csv"
+PROFILE_DIR = "inputs/vidur-csv/deepseek-tp2-pp1-ep4"
+
+# Inference GPU node assignment: separate from training (GPUs 0-15)
+INFER_NODES = list(range(16, 32))
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -104,7 +109,10 @@ store = InferenceProfileStore(tp=infer_tp, ep=infer_ep, pp=infer_pp)
 loaded = store.load_directory(PROFILE_DIR)
 print(f"  Loaded {loaded} profiles: {store.list_profiles()}")
 
-expander = InferenceTraceExpander(store, tp=infer_tp, ep=infer_ep, pp=infer_pp)
+expander = InferenceTraceExpander(
+    store, tp=infer_tp, ep=infer_ep, pp=infer_pp,
+    assigned_nodes=INFER_NODES,
+)
 inference_wl, batch_task_map = expander.expand(trace, job_id=1)
 print(f"  Tasks: {len(inference_wl.tasks)}  "
       f"(compute={len(inference_wl.get_compute_tasks())}, "
