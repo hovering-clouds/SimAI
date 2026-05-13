@@ -118,6 +118,10 @@ class InferenceTraceExpander:
         # (the tasks that the next batch's first tasks should depend on)
         batch_exits: dict[str, dict[int, list[int]]] = {}
 
+        # (prefill_batch_id, d_replica_id) → {rank: [task_ids]}
+        # Ensures KV transfer is only created once per prefill→replica pair.
+        kv_transfer_done: dict[tuple[str, int], dict[int, list[int]]] = {}
+
         batch_lookup = {b["batch_id"]: b for b in trace["batches"]}
 
         for batch in trace["batches"]:
@@ -132,27 +136,34 @@ class InferenceTraceExpander:
                 dep_batch = batch_lookup[dep_id]
 
                 if dep_batch["type"] == "prefill" and btype == "decode":
-                    # Insert KV cache transfer between prefill and this decode
-                    kv_tasks, kv_exits, task_id = self._expand_kv_transfer(
-                        request_ids=batch["request_ids"],
-                        kv_cache_bytes=dep_batch.get("kv_cache_bytes") or {},
-                        p_replica_id=dep_batch["replica_id"],
-                        d_replica_id=replica_id,
-                        job_id=job_id,
-                        task_id_start=task_id,
-                        prev_exits=batch_exits.get(dep_id, {}),
-                    )
-                    all_flow_tasks.extend(kv_tasks)
+                    kv_key = (dep_id, replica_id)
+                    if kv_key in kv_transfer_done:
+                        # Already transferred — reuse exits
+                        for rank, tids in kv_transfer_done[kv_key].items():
+                            prev_exits.setdefault(rank, []).extend(tids)
+                    else:
+                        # First time — create KV transfer
+                        kv_tasks, kv_exits, task_id = self._expand_kv_transfer(
+                            request_ids=batch["request_ids"],
+                            kv_cache_bytes=dep_batch.get("kv_cache_bytes") or {},
+                            p_replica_id=dep_batch["replica_id"],
+                            d_replica_id=replica_id,
+                            job_id=job_id,
+                            task_id_start=task_id,
+                            prev_exits=batch_exits.get(dep_id, {}),
+                        )
+                        all_flow_tasks.extend(kv_tasks)
+                        kv_transfer_done[kv_key] = kv_exits
 
-                    kv_key = f"kv_{dep_id}_to_{bid}"
-                    batch_task_map[kv_key] = {
-                        "task_ids": [t.task_id for t in kv_tasks],
-                        "type": "kv_transfer",
-                        "from_batch": dep_id,
-                        "to_batch": bid,
-                    }
-                    for rank, tids in kv_exits.items():
-                        prev_exits.setdefault(rank, []).extend(tids)
+                        btm_key = f"kv_{dep_id}_to_{bid}"
+                        batch_task_map[btm_key] = {
+                            "task_ids": [t.task_id for t in kv_tasks],
+                            "type": "kv_transfer",
+                            "from_batch": dep_id,
+                            "to_batch": bid,
+                        }
+                        for rank, tids in kv_exits.items():
+                            prev_exits.setdefault(rank, []).extend(tids)
                 else:
                     for rank, tids in batch_exits.get(dep_id, {}).items():
                         prev_exits.setdefault(rank, []).extend(tids)
@@ -338,21 +349,22 @@ class InferenceTraceExpander:
         prev_exits: dict[int, list[int]],
     ) -> tuple[list[FlowTask], dict[int, list[int]], int]:
         """
-        Expand KV cache transfer flows from P-node TP ranks to D-node TP ranks.
+        Expand KV cache transfer flows from P-node ranks to D-node ranks.
 
-        One flow per (request, TP rank pair). Each flow carries
-        kv_cache_bytes[req_id] / tp bytes. All flows depend on the prefill
-        batch's exit tasks.
+        One flow per (request, rank pair). Each flow carries an equal share
+        of kv_cache_bytes[req_id] / world_size. All flows depend on the
+        prefill batch's exit tasks.
 
         Returns (tasks, exits, next_task_id) where exits maps
         d_rank → [task_ids] for the KV transfer flows received at D-node.
         """
-        p_grouper = self._grouper(p_replica_id)
-        d_grouper = self._grouper(d_replica_id)
-
         tasks: list[FlowTask] = []
         task_id = task_id_start
         exits: dict[int, list[int]] = {}  # d_rank → [task_ids]
+
+        ws = self._world_size()
+        p_ranks = self._replica_ranks(p_replica_id)
+        d_ranks = self._replica_ranks(d_replica_id)
 
         for req_id in request_ids:
             req_key = str(req_id)
@@ -360,13 +372,9 @@ class InferenceTraceExpander:
             if total_kv == 0:
                 continue
 
-            per_rank_bytes = max(total_kv // self._tp, 1)
+            per_rank_bytes = max(total_kv // ws, 1)
 
-            # One flow per TP rank pair (same ep_idx=0, tp_idx varies)
-            for tp_idx in range(self._tp):
-                p_rank = p_grouper.get_pp_rank(0, 0, 0, tp_idx)
-                d_rank = d_grouper.get_pp_rank(0, 0, 0, tp_idx)
-
+            for p_rank, d_rank in zip(p_ranks, d_ranks):
                 ft = FlowTask(
                     task_id=task_id,
                     job_id=job_id,

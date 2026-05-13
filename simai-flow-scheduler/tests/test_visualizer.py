@@ -164,9 +164,9 @@ class TestChromeTraceVerbose:
         x_events = [e for e in events if e.get("ph") == "X"]
         for evt in x_events:
             if evt["cat"] == "compute":
-                assert evt["tid"] % 2 == 0  # 偶数
+                assert evt["tid"] % 2 == 1  # node*2+1 → 奇数
             else:
-                assert evt["tid"] % 2 == 1  # 奇数
+                assert evt["tid"] % 2 == 0  # node*2+2 → 偶数
 
     def test_export_to_file(self):
         workload = _simple_workload()
@@ -217,7 +217,7 @@ class TestChromeTraceCompact:
         # flow X 事件：node 1 的 Comm 行应该只有 1 个合并事件（两条 flow 合并）
         flow_events = [e for e in events
                        if e.get("cat") == "flow" and e.get("ph") == "X"]
-        node1_flows = [e for e in flow_events if e["tid"] == 3]  # tid=3 = Node 1 Comm
+        node1_flows = [e for e in flow_events if e["tid"] == 4]  # tid = 1*2+2 = Node 1 Comm
         assert len(node1_flows) == 1
         assert node1_flows[0]["args"]["num_flows"] == 2
         assert node1_flows[0]["args"]["total_bytes"] == 10000
