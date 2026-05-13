@@ -7,13 +7,7 @@ from vidur.config import (
     MetricsConfig,
     ReplicaConfig,
 )
-import os
-import sys
-import subprocess
-from pathlib import Path
-import csv
 from typing import Dict, Optional
-# import Dictionary
 
 class ExecutionTime(BaseEntity):
     def __init__(
@@ -41,6 +35,7 @@ class ExecutionTime(BaseEntity):
         predictor_config: BaseExecutionTimePredictorConfig,
         replica_config: ReplicaConfig,
         replica_scheduler_config: BaseReplicaSchedulerConfig,
+        aicb_profile_store=None,
     ) -> None:
         self._id = ExecutionTime.generate_id()
 
@@ -83,6 +78,7 @@ class ExecutionTime(BaseEntity):
         # 缓存 AICB 数据，避免重复加载
         # Optional[Dict[str, float]] 表示这个变量可以是 None 或者是一个键为字符串、值为浮点数的字典。
         self._aicb_data: Optional[Dict[str, float]] = None
+        self._aicb_profile_store = aicb_profile_store
         
     # mlp和attention中的两次allreduce在这里实现
     # Implementation of two allreduces in mlp and attention layers
@@ -189,177 +185,26 @@ class ExecutionTime(BaseEntity):
         # print(f"> debug layer_id={layer_id} moe_time={moe_time} us moe_comp_time={moe_comp_time} us moe_comm_time={moe_comm_time}")
         return moe_time
     
-    def _get_aicb_params(self):
-        if self._replica_config.model_name == 'deepseek-671B':
-            model_name = "DeepSeek-671B"
-            model_json_file = "./scripts/inference_configs/deepseek_default.json"
-        elif self._replica_config.model_name == 'qwen3-moe-235B':
-            model_name = "Qwen3-Moe-235B"
-            model_json_file = "./scripts/inference_configs/qwen3_moe_default.json"
-        elif self._replica_config.model_name == 'qwen3-next-80B':
-            model_name = "Qwen3-Next-80B"
-            model_json_file = "./scripts/inference_configs/qwen3_next_default.json"
-            
-        tp = self._replica_config.tensor_parallel_size
-        pp = self._replica_config.num_pipeline_stages
-        ws = self._replica_config.world_size
-        ep = self._replica_config.expert_model_parallel_size
-        bs = self._replica_config.batch_size
-        seq = self._replica_config.seq_len
-        phase = self._replica_config.phase
-
-        return model_name, model_json_file, tp, pp, ws, ep, bs, seq, phase
-    
-    def _get_aicb_csv_path(self) -> str:
-        """根据当前配置生成 AICB CSV 的预期路径"""
-        """Generate expected AICB CSV path based on current configuration"""
-        model_name, _, tp, pp, ws, ep, bs, seq, phase = self._get_aicb_params()
-        print(f'get aicb csv path: {model_name} world_size{ws}-tp{tp}-pp{pp}-ep{ep}-bs{bs}-seq{seq}-{phase}')
-
-        filename = (
-            f"vidur-{model_name}-world_size{ws}-tp{tp}-pp{pp}-ep{ep}"
-            f"-bs{bs}-seq{seq}-{phase}.csv"
-        )
-        return os.path.join("results", "workload", filename)
-    
-    def _generate_aicb_csv(self):
-        # TODO > 加生成的代码
-        # TODO > Add generation code
-        return
-        model_name,model_json_file, tp, pp, ws, ep, bs, seq, phase = self._get_aicb_params()
-        cwd="../../../aicb/"
-        
-        # TODO sys.executable 这样会使用vidur虚拟环境的python，确保与aicb的协同
-        # TODO sys.executable This will use vidur virtual environment's python to ensure coordination with aicb
-        cmd = [
-            sys.executable, 
-            "-m", "workload_generator.Vidur_workload_generator",
-            str(model_name),
-            str(model_json_file),
-            "--seq_length", str(seq),
-            "--micro_batch", str(bs),
-            "--world_size", str(ws),
-            "--tensor_model_parallel_size", str(tp),
-            "--expert_model_parallel_size", str(ep),
-            "--aiob_enable",
-            "--phase", str(phase),
-        ]
-        # pp: cmd += ["--pipeline_model_parallel", str(pp)]
-
-        cwd_path = Path(cwd)
-        print(f'[DEBUG] run aicb cmd: {cmd}')
-        result = subprocess.run(cmd, shell=True, capture_output=True, cwd=cwd_path, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"Command {cmd} failed with return code {result.returncode}")
-
     def _load_aicb_data(self) -> Dict[int, Dict[str, Dict[str, float]]]:
-        """加载 CSV，返回 {layer_id: {layer_name: {comp_time: value, comm_size: value}}}"""
-        """Load CSV, returning {layer_id: {layer_name: {comp_time: value, comm_size: value}}}"""
+        """Load profile data from AicbProfileStore with nearest-match fallback."""
         if self._aicb_data is not None:
             return self._aicb_data
 
-        csv_path = self._get_aicb_csv_path()
-        full_csv_path = os.path.join("../../../aicb/results/workload/", csv_path)
+        if self._aicb_profile_store is not None:
+            phase = getattr(self._replica_config, 'phase', 'prefill')
+            bs = getattr(self._replica_config, 'batch_size', 1)
+            seq = getattr(self._replica_config, 'seq_len', 1024)
+            try:
+                data = self._aicb_profile_store.get_profile(phase, bs, seq)
+                self._aicb_data = data
+                return data
+            except KeyError as e:
+                print(f"[ExecutionTime] Warning: {e}")
+                self._aicb_data = {}
+                return {}
 
-        if not os.path.exists(full_csv_path):
-            
-            # TODO > 加生成的代码
-            # TODO > Add generated code
-            self._generate_aicb_csv()
-            if not os.path.exists(full_csv_path):
-                print(f'[DEBUG] still not exists {full_csv_path}')
-                full_csv_path = '../aicb/results/workload/vidur-DeepSeek-671B-world_size32-tp1-pp1-ep32-bs4-seq4096-decode.csv'
-
-
-        # 解析 CSV：按 layer_id 和 layer_name 分组存储所有数据
-        # Parsing CSV: Group and store all data by layer_id and layer_name
-        data: Dict[int, Dict[str, Dict[str, float]]] = {}
-        
-        try:
-            with open(full_csv_path, newline='') as f:
-                # 检查文件内容
-                # Check File Content
-                
-                # content = f.read(1000)  # Read the first 1000 characters
-                # print(f"> debug Read the first 1000 characters: {repr(content)}")
-                # f.seek(0)  # Reset the file pointer
-                
-                # 使用制表符作为分隔符，因为这是TSV文件
-                # Use tabs as delimiters because this is a TSV file.
-                reader = csv.DictReader(f, delimiter='\t')
-                print(f"> debug CSV列名: {reader.fieldnames}")
-                
-                # 检查是否正确解析了列名
-                # Check if column names were parsed correctly
-                if reader.fieldnames and len(reader.fieldnames) == 1:
-                    # 如果列名没有正确分割，尝试手动分割
-                    # If column names weren't split correctly, try manual splitting
-                    actual_fieldnames = reader.fieldnames[0].split('\t')
-                    if 'layer_id' in actual_fieldnames and 'layer_name' in actual_fieldnames:
-                        print("> debug Detected tab-separated column names, reprocessing")
-                        f.seek(0)
-                        lines = f.readlines()
-                        # 手动解析
-                        # Manual parsing
-                        headers = lines[0].strip().split('\t')
-                        print(f"> debug Parsed column names manually:: {headers}")
-                        
-                        for line_num, line in enumerate(lines[1:], 1):
-                            values = line.strip().split('\t')
-                            if len(values) == len(headers):
-                                row = dict(zip(headers, values))
-                                # print(f"> debug Row {row_num} data: {row}")
-                                
-                                layer_id = int(row['layer_id'])
-                                layer_name = row['layer_name']
-                                comp_time = float(row['comp_time'])
-                                comm_size = float(row['comm_size'])
-                                
-                                if layer_id not in data:
-                                    data[layer_id] = {}
-                                data[layer_id][layer_name] = {
-                                    'comp_time': comp_time,
-                                    'comm_size': comm_size
-                                }
-                        print("> debug Manual parsing completed")
-                    else:
-                        print("> debug Failed to parse column names correctly")
-                        return {}
-                else:
-                    # 正常的CSV解析流程
-                    # Normal CSV parsing process
-                    for row_num, row in enumerate(reader, 1):
-                        # print(f"> debug Row {row_num} data: {row}")
-                        
-                        # 检查必要的键是否存在
-                        # Check if required keys exist
-                        if 'layer_id' not in row or 'layer_name' not in row or 'comp_time' not in row or 'comm_size' not in row:
-                            print(f"Warning: Row {row_num} missing required columns, skipping")
-                            continue
-                            
-                        layer_id = int(row['layer_id'])
-                        layer_name = row['layer_name']
-                        
-                        # 单位：微秒（根据示例）
-                        # Unit: microseconds (based on example)
-                        comp_time = float(row['comp_time'])  
-                        comm_size = float(row['comm_size'])
-                        
-                        if layer_id not in data:
-                            data[layer_id] = {}
-                        data[layer_id][layer_name] = {
-                            'comp_time': comp_time,
-                            'comm_size': comm_size
-                        }
-        except Exception as e:
-            print(f"Error reading CSV file: {e}")
-            import traceback
-            traceback.print_exc()
-            return {}
-
-        self._aicb_data = data
-        # print(f"> debug Successfully loaded data: {data}")
-        return data
+        self._aicb_data = {}
+        return {}
     
     
     def _get_block_execution_time(self) -> float:

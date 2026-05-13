@@ -117,13 +117,13 @@ class Simulator:
     def _write_output(self) -> None:
         logger.info("Writing output")
 
-        self._metric_store.plot()
-        logger.info("Metrics written")
-
-        # Save inference trace for simai-flow-scheduler
+        # Save inference trace first (before plotting, which may fail)
         if hasattr(self._metric_store, 'trace_recorder'):
             self._metric_store.trace_recorder.save()
             logger.info("Inference trace written")
+
+        self._metric_store.plot()
+        logger.info("Metrics written")
 
         if self._config.metrics_config.write_json_trace:
             self._write_event_trace()

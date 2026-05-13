@@ -644,9 +644,8 @@ class MetricsStore:
             RequestMetricsTimeDistributions.PD_P2P_COMM_BYTES_PER_TOKEN
         ].put(request.id,request.pd_p2p_bytes_per_token)
         
-        self._request_metrics_time_distributions[
-            RequestMetricsTimeDistributions.PD_P2P_COMM_DTYPE
-        ].put(request.id,request.pd_p2p_comm_dtype)
+        # pd_p2p_comm_dtype is a string (e.g. 'float16'), not suitable for numeric DataSeries
+        # Skip it to avoid TypeError in plot_cdf/mean()
         
 
     def _update_per_token_execution_times(

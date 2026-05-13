@@ -43,6 +43,17 @@ class BaseExecutionTimePredictor(ABC):
         self.replica_scheduler_config = replica_scheduler_config
         self.simulation_config = simulation_config
 
+        # AicbProfileStore: load once, share across all ExecutionTime instances
+        self._aicb_profile_store = None
+        if self._config.backend == "aicb":
+            from vidur.entities.aicb_profile_store import AicbProfileStore
+            self._aicb_profile_store = AicbProfileStore(
+                dir_path=self._config.aicb_profile_dir,
+                tp=replica_config.tensor_parallel_size,
+                ep=replica_config.expert_model_parallel_size,
+                pp=replica_config.num_pipeline_stages,
+            )
+
     def get_execution_time(self, batch: Batch, pipeline_stage: int) -> ExecutionTime:
         if pipeline_stage == self._replica_config.num_pipeline_stages - 1:
             pipeline_parallel_communication_time = 0
@@ -157,8 +168,8 @@ class BaseExecutionTimePredictor(ABC):
                 self._get_ray_comm_time(batch),
                 self._config,
                 replica_config,
-                self.replica_scheduler_config
-                # self._model_config
+                self.replica_scheduler_config,
+                aicb_profile_store=self._aicb_profile_store,
             )
         else:
             return ExecutionTime(

@@ -623,6 +623,10 @@ class BaseExecutionTimePredictorConfig(BasePolyConfig):
          "Options: 'simai_simulation' (simulation-based SimAI), "
          "'simai_analytical' (analytical SimAI), 'vidur', or 'none' to disable."},
     )
+    aicb_profile_dir: str = field(
+        default="data/inference_profiling/",
+        metadata={"help": "Directory containing AICB per-layer CSV profiles."},
+    )
     simai_dir: str = field(
         # default=".",
         # default="../SimAI",

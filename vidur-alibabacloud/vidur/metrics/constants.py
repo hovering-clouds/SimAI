@@ -74,7 +74,7 @@ class RequestMetricsTimeDistributions(enum.Enum):
     PD_P2P_COMM_TIME = ("pd_p2p_comm_time")
     PD_P2P_COMM_BANDWIDTH = ("pd_p2p_comm_bandwidth")
     PD_P2P_COMM_BYTES_PER_TOKEN = ("pd_p2p_bytes_per_token")
-    PD_P2P_COMM_DTYPE = ("pd_p2p_comm_dtype")
+    # PD_P2P_COMM_DTYPE is a string, not numeric — excluded from DataSeries to avoid TypeError
     
 
 
