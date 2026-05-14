@@ -1,10 +1,12 @@
 # Puppeteer Phase 2: Reproduction Plan
 
 > **For agentic workers:** This phase depends on
-> [Phase 1](454-Puppeteer-phase1-framework-refactor.md). Do not start Phase 2
-> until the executor supports `SchedulingPolicy` and default behavior is proven
-> unchanged. Phase 2 should add Puppeteer-like analysis passes and scheduling
-> policy implementations without rewriting the core event loop.
+> [Phase 1](puppeteer-phase1-plan.md) and
+> [Phase 1 Extend](puppeteer-phase1-extend-plan.md). Do not start Phase 2 until
+> the executor supports `SchedulingPolicy`, default behavior is proven unchanged,
+> and task admission is fully policy-owned. Phase 2 should add Puppeteer-like
+> analysis passes and scheduling policy implementations without rewriting the
+> core event loop.
 
 ## 1. Goal
 
@@ -39,12 +41,12 @@ Important interpretation for this project:
 - The executor should query a precomputed per-flow route table.
 - Runtime policy controls admission and rate, not switch routing tables.
 
-See [454-Puppeteer-strategy-notes.md](454-Puppeteer-strategy-notes.md) for a
+See [puppeteer-strategy-notes.md](puppeteer-strategy-notes.md) for a
 strategy-level summary.
 
-## 3. Dependencies on Phase 1
+## 3. Dependencies on Phase 1 and Phase 1 Extend
 
-Phase 2 assumes these Phase 1 interfaces exist:
+Phase 2 assumes these Phase 1 / Phase 1 Extend interfaces exist:
 
 - `SchedulingPolicy`
 - `DefaultSchedulingPolicy`
@@ -53,6 +55,9 @@ Phase 2 assumes these Phase 1 interfaces exist:
   - flow path lookup
   - bandwidth allocation
   - task emitted/completed notifications
+- `AnalyticalExecutor.execute(workload)` does not require `ExecutionPlan`
+- default compute ordering is implemented inside `DefaultSchedulingPolicy`
+- executor has no hard-coded per-node compute cursor logic
 
 Expected policy hooks:
 
