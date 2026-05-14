@@ -60,35 +60,6 @@ def k_shortest_paths(
     return candidates[:k]
 
 
-def _estimate_flow_duration_us(
-    task,
-    path: list[int],
-    topology: NetworkTopology,
-) -> int:
-    """Estimate flow transmission duration at line rate over a given path."""
-    if len(path) < 2:
-        return 0
-    size_bits = (task.size_bytes or 0) * 8
-    if size_bits == 0:
-        return 0
-
-    bottleneck_bw = float("inf")
-    total_latency = 0.0
-
-    for i in range(len(path) - 1):
-        link = topology.get_link(path[i], path[i + 1])
-        if link is None:
-            return 0
-        bottleneck_bw = min(bottleneck_bw, link.bandwidth_gbps)
-        total_latency += link.latency_us
-
-    if bottleneck_bw <= 0 or bottleneck_bw == float("inf"):
-        return 0
-
-    tx_time_us = size_bits / (bottleneck_bw * 1e9) * 1e6
-    return int(tx_time_us + total_latency)
-
-
 def compute_greedy_routes(
     workload: P2PWorkload,
     topology: NetworkTopology,
