@@ -48,6 +48,24 @@ from .passes.task_serializer import (
     CppReferenceSerializer,
     TaskSerializer,
 )
+from .passes.puppeteer_tte import (
+    TTEInfo,
+    FlowTiming,
+)
+from .passes.puppeteer_routing import (
+    RouteTable,
+)
+from .passes.puppeteer_coordination import (
+    ResourceDependencyTable,
+)
+from .strategies import (
+    DefaultAnalyzer,
+    DefaultAnalysisResult,
+    ExampleAnalyzer,
+    ExampleAnalysisResult,
+    PuppeteerAnalyzer,
+    PuppeteerAnalysisResult,
+)
 
 __all__ = [
     "TopologyLoader",
@@ -78,4 +96,10 @@ __all__ = [
     "ExecutionPlan",
     "CppReferenceSerializer",
     "TaskSerializer",
+    "TTEInfo",
+    "FlowTiming",
+    "RouteTable",
+    "ResourceDependencyTable",
+    "PuppeteerAnalyzer",
+    "PuppeteerAnalysisResult",
 ]
