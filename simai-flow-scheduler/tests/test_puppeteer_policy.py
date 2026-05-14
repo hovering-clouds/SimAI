@@ -118,30 +118,6 @@ class TestPuppeteerSchedulingPolicy:
         emitted = policy.emit_ready_tasks(0, [wl.tasks[0], wl.tasks[1]])
         assert set(emitted) == {0, 1}
 
-    def test_coordination_completed_flow_released(self):
-        """If a group member is already completed, remaining member can proceed."""
-        route_table = RouteTable(paths={0: [0, 1], 1: [0, 1]})
-        tte_info = {
-            0: TTEInfo(task_id=0, tte_us=0.0, priority_score=0.0, priority_class="critical"),
-            1: TTEInfo(task_id=1, tte_us=0.0, priority_score=0.0, priority_class="critical"),
-        }
-        resource_dep = ResourceDependencyTable(
-            peers={0: {1}, 1: {0}},
-            groups={"g0": {0, 1}},
-        )
-        plan = ExecutionPlan()
-
-        policy = PuppeteerSchedulingPolicy(route_table, tte_info, resource_dep, plan)
-        topo = _make_2node_topology()
-        wl = P2PWorkload(version="1.0", meta=Meta(num_jobs=1, num_nodes=2),
-                         tasks=[_make_flow(0, 0, 1, 1000), _make_flow(1, 0, 1, 1000)])
-        policy.initialize(wl, topo)
-
-        # Flow 0 is completed, flow 1 is ready
-        policy.on_task_completed(100, wl.tasks[0])
-        emitted = policy.emit_ready_tasks(100, [wl.tasks[1]])
-        assert emitted == [1]
-
     def test_get_flow_path(self):
         """get_flow_path returns the precomputed path."""
         route_table = RouteTable(paths={0: [0, 1]})

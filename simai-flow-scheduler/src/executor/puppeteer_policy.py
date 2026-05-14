@@ -66,7 +66,6 @@ class PuppeteerSchedulingPolicy(SchedulingPolicy):
         )
 
         # Coordination state (initialized in initialize())
-        self._group_completion: dict[str, set[int]] = {}
         self._task_to_group: dict[int, str] = {}
         self._topology: Optional[NetworkTopology] = None
 
@@ -78,10 +77,7 @@ class PuppeteerSchedulingPolicy(SchedulingPolicy):
         self._topology = topology
         self.compute_cursor = defaultdict(int)
 
-        # Build coordination lookup tables
-        self._group_completion = {
-            gid: set() for gid in self.resource_dependency.groups
-        }
+        # Build coordination lookup table
         self._task_to_group = {}
         for gid, members in self.resource_dependency.groups.items():
             for tid in members:
@@ -122,12 +118,8 @@ class PuppeteerSchedulingPolicy(SchedulingPolicy):
 
         gid = self._task_to_group[tid]
         members = self.resource_dependency.groups.get(gid, set())
-        completed = self._group_completion.get(gid, set())
 
-        return all(
-            m in ready_ids or m in completed
-            for m in members
-        )
+        return all(m in ready_ids for m in members)
 
     def get_flow_path(self, task: Task) -> list[int]:
         try:
@@ -154,9 +146,3 @@ class PuppeteerSchedulingPolicy(SchedulingPolicy):
     def on_task_completed(self, current_time: int, task: Task) -> None:
         if task.is_compute():
             self.compute_cursor[task.node] += 1
-        elif task.is_flow():
-            # Track completion for coordination groups
-            tid = task.task_id
-            if tid in self._task_to_group:
-                gid = self._task_to_group[tid]
-                self._group_completion[gid].add(tid)
