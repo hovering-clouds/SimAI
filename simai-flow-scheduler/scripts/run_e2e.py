@@ -92,10 +92,8 @@ def main():
     print(f"  Links: {len(topology.links)}")
     print(f"  GPU type: {topology.gpu_type}")
 
-    analyzer = DefaultAnalyzer(topology)
-    analysis = analyzer.analyze(workload)
-    print(f"  Critical path length: {analysis.critical_path.makespan_us} us")
-    print(f"  Critical path tasks: {len(analysis.critical_path.critical_tasks)}")
+    analysis = DefaultAnalyzer(topology).analyze(workload)
+    print(f"  Nodes with compute tasks: {len(analysis.execution_plan.compute_order)}")
 
     # ============================================================
     # Step 4: Run analytical executor

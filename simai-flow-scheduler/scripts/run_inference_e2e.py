@@ -85,7 +85,7 @@ topology = TopologyLoader().load(TOPO_FILE)
 print(f"  Nodes: {topology.total_nodes}  Links: {len(topology.links)}")
 
 analysis = DefaultAnalyzer(topology).analyze(inference_wl)
-print(f"  Critical path: {analysis.critical_path.makespan_us} us")
+print(f"  Nodes with compute tasks: {len(analysis.execution_plan.compute_order)}")
 
 
 # ── Step 3: Execute ───────────────────────────────────────────────────────────
