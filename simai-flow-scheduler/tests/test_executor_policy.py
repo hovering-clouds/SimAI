@@ -6,7 +6,6 @@ from src.executor.bandwidth import BandwidthAllocator, FairShareAllocator
 from src.executor.policy import DefaultSchedulingPolicy, SchedulingPolicy
 from src.executor.runtime import ActiveFlow
 from src.static_analysis.passes.routing_hints import RoutingHints, compute_routing_hints
-from src.static_analysis.task_serializer import ExecutionPlan
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
@@ -53,7 +52,7 @@ def test_default_emits_all_ready():
     topo = _make_2node_topology()
     hints = compute_routing_hints(topo, workload)
     policy = DefaultSchedulingPolicy(hints)
-    policy.initialize(workload, topo, ExecutionPlan(compute_order={}))
+    policy.initialize(workload, topo)
 
     ready = [t for t in workload.tasks if t.is_flow()]
     emitted = policy.emit_ready_tasks(0, ready)
@@ -77,7 +76,7 @@ def test_default_path_matches_routing_hints():
     topo = _make_2node_topology()
     hints = compute_routing_hints(topo, workload)
     policy = DefaultSchedulingPolicy(hints)
-    policy.initialize(workload, topo, ExecutionPlan(compute_order={}))
+    policy.initialize(workload, topo)
 
     task = workload.tasks[0]
     assert policy.get_flow_path(task) == hints.get_path(0, 1)
@@ -103,7 +102,6 @@ def test_default_bandwidth_equals_fair_share():
     policy.initialize(
         P2PWorkload(version="1.0", meta=Meta(num_jobs=1, num_nodes=2), tasks=[]),
         topo,
-        ExecutionPlan(compute_order={}),
     )
 
     result = policy.allocate_bandwidth(0, [flow1, flow2])
@@ -122,7 +120,7 @@ class HoldFirstFlowPolicy(SchedulingPolicy):
         self._topology = None
         self._emit_call_count = 0
 
-    def initialize(self, workload, topology, execution_plan):
+    def initialize(self, workload, topology):
         self._topology = topology
 
     def emit_ready_tasks(self, current_time, ready_tasks):
@@ -167,7 +165,7 @@ def test_custom_policy_can_hold_flow():
 
     policy = HoldFirstFlowPolicy(hints)
     executor = AnalyticalExecutor(topo, policy)
-    result = executor.execute(workload, ExecutionPlan(compute_order={0: [0]}))
+    result = executor.execute(workload)
 
     # compute_0 应该正常完成
     assert result.per_task[0].start_time_us == 0
@@ -188,7 +186,7 @@ class PrecomputedPathPolicy(SchedulingPolicy):
         self.path_map = path_map
         self._topology = None
 
-    def initialize(self, workload, topology, execution_plan):
+    def initialize(self, workload, topology):
         self._topology = topology
 
     def emit_ready_tasks(self, current_time, ready_tasks):
@@ -224,7 +222,7 @@ def test_custom_policy_precomputed_path():
 
     policy = PrecomputedPathPolicy({(0, 1): [0, 1]})
     executor = AnalyticalExecutor(topo, policy)
-    result = executor.execute(workload, ExecutionPlan(compute_order={}))
+    result = executor.execute(workload)
 
     assert result.per_task[0].start_time_us == 0
     # transmission = 125000000 * 8 / (100 * 1e3) = 10000 us, propagation = 1 us
@@ -256,7 +254,7 @@ def test_identical_timing_with_new_api():
 
     policy = DefaultSchedulingPolicy(hints)
     executor = AnalyticalExecutor(topo, policy)
-    result = executor.execute(workload, ExecutionPlan(compute_order={0: [0], 1: [2]}))
+    result = executor.execute(workload)
 
     assert result.per_task[0].start_time_us == 0
     assert result.per_task[0].end_time_us == 100
@@ -278,7 +276,7 @@ class TrackingPolicy(SchedulingPolicy):
         self.emitted: list[int] = []
         self.completed: list[int] = []
 
-    def initialize(self, workload, topology, execution_plan):
+    def initialize(self, workload, topology):
         self._topology = topology
 
     def emit_ready_tasks(self, current_time, ready_tasks):
@@ -316,7 +314,7 @@ def test_tracking_policy_callbacks():
 
     policy = TrackingPolicy(hints)
     executor = AnalyticalExecutor(topo, policy)
-    executor.execute(workload, ExecutionPlan(compute_order={0: [0]}))
+    executor.execute(workload)
 
     # on_task_emitted: compute_0 at t=0, flow_1 after compute_done at t=100
     assert policy.emitted == [0, 1]
@@ -333,7 +331,7 @@ class NeverAdmitPolicy(SchedulingPolicy):
     def __init__(self):
         self._topology = None
 
-    def initialize(self, workload, topology, execution_plan):
+    def initialize(self, workload, topology):
         self._topology = topology
 
     def emit_ready_tasks(self, current_time, ready_tasks):
@@ -366,4 +364,4 @@ def test_deadlock_detection():
     executor = AnalyticalExecutor(topo, NeverAdmitPolicy())
 
     with pytest.raises(RuntimeError, match="Deadlock detected"):
-        executor.execute(workload, ExecutionPlan(compute_order={0: [0]}))
+        executor.execute(workload)

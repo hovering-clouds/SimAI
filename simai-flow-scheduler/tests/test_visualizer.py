@@ -14,7 +14,6 @@ from src.executor.visualizer import (
     ChromeTraceVisualizer,
 )
 from src.static_analysis.passes.routing_hints import compute_routing_hints
-from src.static_analysis.task_serializer import ExecutionPlan
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
@@ -39,17 +38,11 @@ def _make_2node_topology(bw_gbps=100.0, latency_us=1.0):
     return topo
 
 
-def _run_executor(workload, topo, compute_order=None):
-    if compute_order is None:
-        compute_order = {}
-        for t in workload.tasks:
-            if t.is_compute() and t.node is not None:
-                compute_order.setdefault(t.node, []).append(t.task_id)
+def _run_executor(workload, topo):
     hints = compute_routing_hints(topo, workload)
-    plan = ExecutionPlan(compute_order=compute_order)
     policy = DefaultSchedulingPolicy(hints)
     executor = AnalyticalExecutor(topo, policy)
-    return executor.execute(workload, plan)
+    return executor.execute(workload)
 
 
 def _simple_workload():
@@ -279,7 +272,7 @@ class TestChromeTraceCompact:
             ],
         )
         topo = _make_2node_topology()
-        result = _run_executor(workload, topo, compute_order={0: [0], 1: [1]})
+        result = _run_executor(workload, topo)
 
         for VizClass in [ChromeTraceVerbose, ChromeTraceCompact]:
             viz = VizClass(workload)

@@ -1,14 +1,14 @@
 """
 Tests for workload analyzer module.
 
-Tests WorkloadAnalyzer class and WorkloadAnalysisResult dataclass.
+Tests DefaultAnalyzer class and DefaultAnalysisResult dataclass.
 Verifies that all analysis modules are called in the correct order and
 that the unified analysis interface works end-to-end.
 """
 
 import pytest
 
-from src.static_analysis.analyzer import WorkloadAnalysisResult, WorkloadAnalyzer
+from src.static_analysis.strategies.default_strategy import DefaultAnalysisResult, DefaultAnalyzer
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
@@ -61,22 +61,22 @@ def _make_star_topo(bw=400.0, lat=0.5):
 
 
 # ============================================================
-# Tests for WorkloadAnalyzer
+# Tests for DefaultAnalyzer
 # ============================================================
 
 
-class TestWorkloadAnalyzer:
-    """Tests for the WorkloadAnalyzer class."""
+class TestDefaultAnalyzer:
+    """Tests for the DefaultAnalyzer class."""
 
     def test_empty_workload(self):
         """Analyzer handles empty workload."""
         topo = _make_star_topo()
-        analyzer = WorkloadAnalyzer(topo)
+        analyzer = DefaultAnalyzer(topo)
         wl = P2PWorkload(version="1.0", meta=Meta(num_jobs=0, num_nodes=0))
 
         result = analyzer.analyze(wl)
 
-        assert isinstance(result, WorkloadAnalysisResult)
+        assert isinstance(result, DefaultAnalysisResult)
         assert result.routing_hints is not None
         assert result.critical_path is not None
         assert result.contention_groups == {}
@@ -87,7 +87,7 @@ class TestWorkloadAnalyzer:
     def test_single_compute_task(self):
         """Analyzer handles single compute task."""
         topo = _make_star_topo()
-        analyzer = WorkloadAnalyzer(topo)
+        analyzer = DefaultAnalyzer(topo)
         c0 = _make_compute(0, 1000, node=0)
         wl = _make_workload([c0])
 
@@ -101,7 +101,7 @@ class TestWorkloadAnalyzer:
     def test_single_flow_task(self):
         """Analyzer handles single flow task."""
         topo = _make_star_topo()
-        analyzer = WorkloadAnalyzer(topo)
+        analyzer = DefaultAnalyzer(topo)
         f0 = _make_flow(0, src=0, dst=1, size_bytes=1024 * 1024)
         wl = _make_workload([f0])
 
@@ -115,7 +115,7 @@ class TestWorkloadAnalyzer:
     def test_mixed_workload(self):
         """Analyzer handles mixed compute and flow tasks."""
         topo = _make_star_topo()
-        analyzer = WorkloadAnalyzer(topo)
+        analyzer = DefaultAnalyzer(topo)
         c0 = _make_compute(0, 1000, node=0)
         f0 = _make_flow(1, src=0, dst=1, size_bytes=1024, deps=[0])
         c1 = _make_compute(2, 500, node=1, deps=[1])
@@ -132,9 +132,9 @@ class TestWorkloadAnalyzer:
         assert result.summary.total_tasks == 3
 
     def test_result_has_all_fields(self):
-        """WorkloadAnalysisResult contains all expected fields."""
+        """DefaultAnalysisResult contains all expected fields."""
         topo = _make_star_topo()
-        analyzer = WorkloadAnalyzer(topo)
+        analyzer = DefaultAnalyzer(topo)
         c0 = _make_compute(0, 100, node=0)
         wl = _make_workload([c0])
 
@@ -151,7 +151,7 @@ class TestWorkloadAnalyzer:
     def test_routing_hints_used_by_critical_path(self):
         """Critical path uses routing hints for multi-hop duration."""
         topo = _make_star_topo()
-        analyzer = WorkloadAnalyzer(topo)
+        analyzer = DefaultAnalyzer(topo)
         f0 = _make_flow(0, src=0, dst=1, size_bytes=1024)
         wl = _make_workload([f0])
 
@@ -164,7 +164,7 @@ class TestWorkloadAnalyzer:
     def test_contention_groups_use_routing_and_timing(self):
         """Contention groups use both routing hints and critical path timing."""
         topo = _make_star_topo()
-        analyzer = WorkloadAnalyzer(topo)
+        analyzer = DefaultAnalyzer(topo)
         f0 = _make_flow(0, src=0, dst=1, size_bytes=1024)
         f1 = _make_flow(1, src=0, dst=1, size_bytes=2048)
         wl = _make_workload([f0, f1])
@@ -181,7 +181,7 @@ class TestWorkloadAnalyzer:
     def test_node_views_use_critical_path_timing(self):
         """Node views use ASAP times from critical path."""
         topo = _make_star_topo()
-        analyzer = WorkloadAnalyzer(topo)
+        analyzer = DefaultAnalyzer(topo)
         c0 = _make_compute(0, 500, node=0)
         f0 = _make_flow(1, src=0, dst=1, size_bytes=1024, deps=[0])
         wl = _make_workload([c0, f0])
@@ -196,7 +196,7 @@ class TestWorkloadAnalyzer:
     def test_traffic_matrix_independent(self):
         """Traffic matrix works independently of other modules."""
         topo = _make_star_topo()
-        analyzer = WorkloadAnalyzer(topo)
+        analyzer = DefaultAnalyzer(topo)
         f0 = _make_flow(0, src=0, dst=1, size_bytes=1000)
         f1 = _make_flow(1, src=1, dst=2, size_bytes=2000)
         wl = _make_workload([f0, f1])
@@ -211,7 +211,7 @@ class TestWorkloadAnalyzer:
     def test_summary_aggregates_results(self):
         """Summary aggregates results from critical path and contention groups."""
         topo = _make_star_topo()
-        analyzer = WorkloadAnalyzer(topo)
+        analyzer = DefaultAnalyzer(topo)
         c0 = _make_compute(0, 1000, node=0)
         f0 = _make_flow(1, src=0, dst=1, size_bytes=1024, deps=[0])
         wl = _make_workload([c0, f0])
@@ -228,7 +228,7 @@ class TestWorkloadAnalyzer:
     def test_multiple_analyses_independent(self):
         """Multiple analyses on same analyzer are independent."""
         topo = _make_star_topo()
-        analyzer = WorkloadAnalyzer(topo)
+        analyzer = DefaultAnalyzer(topo)
 
         wl1 = _make_workload([_make_compute(0, 100, node=0)])
         wl2 = _make_workload([_make_compute(0, 200, node=0)])
@@ -243,7 +243,7 @@ class TestWorkloadAnalyzer:
     def test_complex_workload_end_to_end(self):
         """End-to-end test with complex workload."""
         topo = _make_star_topo()
-        analyzer = WorkloadAnalyzer(topo)
+        analyzer = DefaultAnalyzer(topo)
 
         # Create a diamond DAG with flows
         c0 = _make_compute(0, 100, node=0)

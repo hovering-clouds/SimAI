@@ -9,7 +9,6 @@ from src.executor.policy import DefaultSchedulingPolicy
 from src.executor.result import ExecutionResult, TaskTiming
 from src.executor.runtime import ActiveFlow
 from src.static_analysis.passes.routing_hints import compute_routing_hints
-from src.static_analysis.task_serializer import ExecutionPlan
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
@@ -62,15 +61,13 @@ def _make_4node_ring_topology(bw_gbps: float = 100.0, latency_us: float = 1.0) -
 def _run_executor(
     workload: P2PWorkload,
     topology: NetworkTopology,
-    compute_order: dict[int, list[int]],
     allocator=None,
 ) -> ExecutionResult:
     """便捷方法：构建 policy 并运行 executor。"""
     routing_hints = compute_routing_hints(topology, workload)
-    plan = ExecutionPlan(compute_order=compute_order)
     policy = DefaultSchedulingPolicy(routing_hints, allocator=allocator)
     executor = AnalyticalExecutor(topology, policy)
-    return executor.execute(workload, plan)
+    return executor.execute(workload)
 
 
 # ── Test: 单 compute 任务 ──
@@ -87,7 +84,7 @@ def test_single_compute():
         ],
     )
     topo = _make_2node_topology()
-    result = _run_executor(workload, topo, compute_order={0: [0]})
+    result = _run_executor(workload, topo)
 
     assert result.per_task[0].start_time_us == 0
     assert result.per_task[0].end_time_us == 500
@@ -112,7 +109,7 @@ def test_compute_then_flow():
         ],
     )
     topo = _make_2node_topology(bw_gbps=100.0, latency_us=1.0)
-    result = _run_executor(workload, topo, compute_order={0: [0]})
+    result = _run_executor(workload, topo)
 
     # compute: 0→100
     assert result.per_task[0].start_time_us == 0
@@ -146,7 +143,7 @@ def test_exclusive_bandwidth():
                  comm_type=CommType.TP_ALLREDUCE_RING, phase=Phase.FORWARD),
         ],
     )
-    result = _run_executor(workload, topo, compute_order={})
+    result = _run_executor(workload, topo)
 
     # 两条流独占带宽，传输时间 = 1 Gbit / 100 Gbps = 10 us
     # 传播延迟 = 0.5 us（单跳）
@@ -178,7 +175,7 @@ def test_contention_fair_share():
                  comm_type=CommType.TP_ALLREDUCE_RING, phase=Phase.FORWARD),
         ],
     )
-    result = _run_executor(workload, topo, compute_order={})
+    result = _run_executor(workload, topo)
 
     # 独占时 transmission = 10000 us，竞争时 bw=50 Gbps，transmission = 20000 us
     for tid in [0, 1]:
@@ -206,7 +203,7 @@ def test_sequential_computes():
         ],
     )
     topo = _make_2node_topology()
-    result = _run_executor(workload, topo, compute_order={0: [0, 1, 2]})
+    result = _run_executor(workload, topo)
 
     assert result.per_task[0].start_time_us == 0
     assert result.per_task[0].end_time_us == 100
@@ -237,7 +234,7 @@ def test_compute_flow_compute_chain():
         ],
     )
     topo = _make_2node_topology(bw_gbps=100.0, latency_us=1.0)
-    result = _run_executor(workload, topo, compute_order={0: [0], 1: [2]})
+    result = _run_executor(workload, topo)
 
     # compute_0: 0 → 100
     assert result.per_task[0].start_time_us == 0
@@ -269,7 +266,7 @@ def test_parallel_computes_different_nodes():
         ],
     )
     topo = _make_2node_topology()
-    result = _run_executor(workload, topo, compute_order={0: [0], 1: [1]})
+    result = _run_executor(workload, topo)
 
     # 两个 compute 同时从 time=0 开始
     assert result.per_task[0].start_time_us == 0
@@ -295,7 +292,7 @@ def test_execution_result_stats():
         ],
     )
     topo = _make_2node_topology()
-    result = _run_executor(workload, topo, compute_order={0: [0], 1: [1]})
+    result = _run_executor(workload, topo)
 
     assert result.total_time_us == 300
     assert result.makespan_us == 300  # max_end(300) - min_start(0)
@@ -364,7 +361,7 @@ def test_bandwidth_reallocation_on_completion():
                  comm_type=CommType.TP_ALLREDUCE_RING, phase=Phase.FORWARD),
         ],
     )
-    result = _run_executor(workload, topo, compute_order={})
+    result = _run_executor(workload, topo)
 
     # flow_0: start=0, bw=50 Gbps
     #   transmission = 62500000 * 8 / (50 * 1e3) = 10000 us

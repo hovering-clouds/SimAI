@@ -17,7 +17,7 @@ from src.workload_format.schema import Job, ParallelismConfig
 from src.workload_generator.aicb_parser import AicbParser
 from src.workload_generator.workload_builder import WorkloadBuilder
 from src.static_analysis.passes.topology_loader import TopologyLoader
-from src.static_analysis.analyzer import WorkloadAnalyzer
+from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
 from src.static_analysis.task_serializer import TaskSerializer
 from src.workload_format.writer import WorkloadWriter
 from src.executor.analytical import AnalyticalExecutor
@@ -93,7 +93,7 @@ def main():
     print(f"  Links: {len(topology.links)}")
     print(f"  GPU type: {topology.gpu_type}")
 
-    analyzer = WorkloadAnalyzer(topology)
+    analyzer = DefaultAnalyzer(topology)
     analysis = analyzer.analyze(workload)
     print(f"  Critical path length: {analysis.critical_path.makespan_us} us")
     print(f"  Critical path tasks: {len(analysis.critical_path.critical_tasks)}")
@@ -127,7 +127,7 @@ def main():
 
     policy = DefaultSchedulingPolicy(routing_hints=analysis.routing_hints)
     executor = AnalyticalExecutor(topology=topology, policy=policy)
-    result = executor.execute(workload, plan)
+    result = executor.execute(workload)
 
     print(f"  Total time: {result.total_time_us} us ({result.total_time_us / 1000:.2f} ms)")
     print(f"  Makespan: {result.makespan_us} us ({result.makespan_us / 1000:.2f} ms)")

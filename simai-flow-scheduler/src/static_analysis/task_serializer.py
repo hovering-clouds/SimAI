@@ -10,9 +10,9 @@ from dataclasses import dataclass, field
 import json
 from typing import Optional
 
-from src.static_analysis.analyzer import WorkloadAnalysisResult
+from .strategies.default_strategy import DefaultAnalysisResult
 
-from src.workload_format.schema import P2PWorkload, Task, TaskType, Phase
+from ..workload_format.schema import P2PWorkload, Task, TaskType, Phase
 
 
 @dataclass
@@ -60,7 +60,7 @@ class OrderingStrategy(ABC):
     def order(
         self,
         workload: P2PWorkload,
-        analysis: Optional[WorkloadAnalysisResult] = None,
+        analysis: Optional[DefaultAnalysisResult] = None,
     ) -> dict[int, list[int]]:
         """
         为每个节点生成 compute task 的执行顺序。
@@ -103,7 +103,7 @@ class CppReferenceOrdering(OrderingStrategy):
     def order(
         self,
         workload: P2PWorkload,
-        analysis: Optional[WorkloadAnalysisResult] = None,
+        analysis: Optional[DefaultAnalysisResult] = None,
     ) -> dict[int, list[int]]:
         """
         按 C++ 参考实现的顺序生成 compute 任务排序。
@@ -204,7 +204,7 @@ class TaskSerializer:
     def serialize(
         self,
         workload: P2PWorkload,
-        analysis: Optional[WorkloadAnalysisResult] = None,
+        analysis: Optional[DefaultAnalysisResult] = None,
     ) -> ExecutionPlan:
         """
         为 workload 生成 ExecutionPlan。

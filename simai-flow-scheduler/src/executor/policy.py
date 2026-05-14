@@ -1,11 +1,13 @@
 """Scheduling policy interface and default implementation."""
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from typing import Optional
 
 from .bandwidth import BandwidthAllocator, FairShareAllocator
 from .runtime import ActiveFlow
 from ..static_analysis.passes.routing_hints import RoutingHints
 from ..static_analysis.passes.topology_loader import NetworkTopology
+from ..static_analysis.task_serializer import CppReferenceOrdering
 from ..workload_format.schema import P2PWorkload, Task
 
 
@@ -20,9 +22,8 @@ class SchedulingPolicy(ABC):
         self,
         workload: P2PWorkload,
         topology: NetworkTopology,
-        execution_plan,  # ExecutionPlan
     ) -> None:
-        """初始化策略，存储 workload / topology / plan 引用供后续决策使用。"""
+        """初始化策略，存储 workload / topology 引用供后续决策使用。"""
         ...
 
     @abstractmethod
@@ -60,7 +61,11 @@ class SchedulingPolicy(ABC):
 
 
 class DefaultSchedulingPolicy(SchedulingPolicy):
-    """保持当前行为的默认策略：全准入、最短路径路由、均分带宽。"""
+    """保持当前行为的默认策略：全准入、最短路径路由、均分带宽。
+
+    内部维护 compute ordering（C++ 参考顺序），通过 emit_ready_tasks
+    确保每个节点上的 compute 任务串行执行。
+    """
 
     def __init__(
         self,
@@ -70,21 +75,43 @@ class DefaultSchedulingPolicy(SchedulingPolicy):
         self.routing_hints = routing_hints
         self.allocator = allocator or FairShareAllocator()
         self._topology: Optional[NetworkTopology] = None
+        self.compute_order: dict[int, list[int]] = {}
+        self.compute_position: dict[int, int] = {}
+        self.compute_cursor: dict[int, int] = defaultdict(int)
 
     def initialize(
         self,
         workload: P2PWorkload,
         topology: NetworkTopology,
-        execution_plan,
     ) -> None:
         self._topology = topology
+        ordering = CppReferenceOrdering()
+        self.compute_order = ordering.order(workload)
+        self.compute_position = {
+            task_id: idx
+            for node, ids in self.compute_order.items()
+            for idx, task_id in enumerate(ids)
+        }
+        self.compute_cursor = defaultdict(int)
 
     def emit_ready_tasks(
         self,
         current_time: int,
         ready_tasks: list[Task],
     ) -> list[int]:
-        return [t.task_id for t in ready_tasks]
+        emitted = []
+        for task in sorted(ready_tasks, key=lambda t: t.task_id):
+            if task.is_flow():
+                emitted.append(task.task_id)
+            elif task.is_compute() and self._is_next_compute(task):
+                emitted.append(task.task_id)
+        return emitted
+
+    def _is_next_compute(self, task: Task) -> bool:
+        node_id = task.node
+        cursor = self.compute_cursor.get(node_id, 0)
+        order = self.compute_order.get(node_id, [])
+        return cursor < len(order) and order[cursor] == task.task_id
 
     def get_flow_path(self, task: Task) -> list[int]:
         return self.routing_hints.get_path(task.src, task.dst)
@@ -102,4 +129,5 @@ class DefaultSchedulingPolicy(SchedulingPolicy):
         pass
 
     def on_task_completed(self, current_time: int, task: Task) -> None:
-        pass
+        if task.is_compute():
+            self.compute_cursor[task.node] += 1

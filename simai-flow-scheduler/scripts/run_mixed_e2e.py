@@ -29,7 +29,7 @@ from src.workload_generator.inference_profile import InferenceProfileStore
 from src.workload_generator.inference_trace_expander import InferenceTraceExpander
 from src.workload_generator.job_merger import JobMerger
 from src.static_analysis.passes.topology_loader import TopologyLoader
-from src.static_analysis.analyzer import WorkloadAnalyzer
+from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
 from src.static_analysis.task_serializer import TaskSerializer
 from src.workload_format.writer import WorkloadWriter
 from src.executor.analytical import AnalyticalExecutor
@@ -145,7 +145,7 @@ _sep("Step 4: Load topology & static analysis")
 topology = TopologyLoader().load(TOPO_FILE)
 print(f"  Nodes: {topology.total_nodes}  Links: {len(topology.links)}")
 
-analysis = WorkloadAnalyzer(topology).analyze(merged_wl)
+analysis = DefaultAnalyzer(topology).analyze(merged_wl)
 print(f"  Critical path: {analysis.critical_path.makespan_us} us")
 
 
@@ -166,7 +166,7 @@ _sep("Step 6: Run analytical executor")
 
 policy = DefaultSchedulingPolicy(routing_hints=analysis.routing_hints)
 executor = AnalyticalExecutor(topology=topology, policy=policy)
-result = executor.execute(merged_wl, plan)
+result = executor.execute(merged_wl)
 
 print(f"  Makespan: {result.makespan_us} us  ({result.makespan_us/1e6:.3f} s)")
 print(f"  Tasks completed: {len(result.per_task)}")

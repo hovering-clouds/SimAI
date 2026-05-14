@@ -37,11 +37,7 @@ from .passes.workload_summary import (
     WorkloadSummary,
     compute_workload_summary,
 )
-from .analyzer import (
-    WorkloadAnalysisResult,
-    WorkloadAnalyzer,
-)
-from .strategies import DefaultAnalysisStrategy
+from .strategies import DefaultAnalyzer, DefaultAnalysisResult
 from .task_serializer import (
     ExecutionPlan,
     OrderingStrategy,
@@ -71,9 +67,8 @@ __all__ = [
     "compute_traffic_matrix",
     "WorkloadSummary",
     "compute_workload_summary",
-    "WorkloadAnalysisResult",
-    "WorkloadAnalyzer",
-    "DefaultAnalysisStrategy",
+    "DefaultAnalyzer",
+    "DefaultAnalysisResult",
     "ExecutionPlan",
     "OrderingStrategy",
     "CppReferenceOrdering",

@@ -1,6 +1,7 @@
 """Analysis strategies — composable workflows of analysis passes."""
-from .default_strategy import DefaultAnalysisStrategy
+from .default_strategy import DefaultAnalyzer, DefaultAnalysisResult
 
 __all__ = [
-    "DefaultAnalysisStrategy",
+    "DefaultAnalyzer",
+    "DefaultAnalysisResult",
 ]

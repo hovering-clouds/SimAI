@@ -26,7 +26,7 @@ from src.executor.visualizer import (
 # ── Configuration ──────────────────────────────────────────────
 
 # Output directory from run_e2e.py (must contain workload.json and execution_result.json)
-OUTPUT_DIR = "outputs/e2e_gpt175b_dp2"
+OUTPUT_DIR = "outputs/inference_e2e"
 
 # Visualization mode: "verbose" | "compact" | "detail"
 MODE = "verbose"
