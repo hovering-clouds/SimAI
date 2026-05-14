@@ -38,10 +38,9 @@ from .passes.workload_summary import (
     compute_workload_summary,
 )
 from .strategies import DefaultAnalyzer, DefaultAnalysisResult
-from .task_serializer import (
+from .passes.task_serializer import (
     ExecutionPlan,
-    OrderingStrategy,
-    CppReferenceOrdering,
+    CppReferenceSerializer,
     TaskSerializer,
 )
 
@@ -70,7 +69,6 @@ __all__ = [
     "DefaultAnalyzer",
     "DefaultAnalysisResult",
     "ExecutionPlan",
-    "OrderingStrategy",
-    "CppReferenceOrdering",
+    "CppReferenceSerializer",
     "TaskSerializer",
 ]

@@ -18,7 +18,7 @@ from src.workload_generator.aicb_parser import AicbParser
 from src.workload_generator.workload_builder import WorkloadBuilder
 from src.static_analysis.passes.topology_loader import TopologyLoader
 from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
-from src.static_analysis.task_serializer import TaskSerializer
+from src.static_analysis.passes.task_serializer import CppReferenceSerializer
 from src.workload_format.writer import WorkloadWriter
 from src.executor.analytical import AnalyticalExecutor
 from src.executor.policy import DefaultSchedulingPolicy
@@ -106,8 +106,8 @@ def main():
     print("Step 4: Serialize compute tasks (ExecutionPlan)")
     print("=" * 60)
 
-    serializer = TaskSerializer()
-    plan = serializer.serialize(workload, analysis)
+    serializer = CppReferenceSerializer()
+    plan = serializer.serialize(workload)
     print(f"  Nodes with compute tasks: {len(plan.compute_order)}")
     for node_id, task_ids in sorted(plan.compute_order.items()):
         print(f"  Node {node_id}: {len(task_ids)} compute tasks")
@@ -125,7 +125,7 @@ def main():
     print("Step 5: Run analytical executor")
     print("=" * 60)
 
-    policy = DefaultSchedulingPolicy(routing_hints=analysis.routing_hints)
+    policy = DefaultSchedulingPolicy(analysis=analysis)
     executor = AnalyticalExecutor(topology=topology, policy=policy)
     result = executor.execute(workload)
 

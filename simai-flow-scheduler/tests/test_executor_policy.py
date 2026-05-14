@@ -5,6 +5,7 @@ from src.executor.analytical import AnalyticalExecutor
 from src.executor.bandwidth import BandwidthAllocator, FairShareAllocator
 from src.executor.policy import DefaultSchedulingPolicy, SchedulingPolicy
 from src.executor.runtime import ActiveFlow
+from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
 from src.static_analysis.passes.routing_hints import RoutingHints, compute_routing_hints
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
@@ -50,8 +51,8 @@ def test_default_emits_all_ready():
         ],
     )
     topo = _make_2node_topology()
-    hints = compute_routing_hints(topo, workload)
-    policy = DefaultSchedulingPolicy(hints)
+    analysis = DefaultAnalyzer(topo).analyze(workload)
+    policy = DefaultSchedulingPolicy(analysis)
     policy.initialize(workload, topo)
 
     ready = [t for t in workload.tasks if t.is_flow()]
@@ -74,8 +75,9 @@ def test_default_path_matches_routing_hints():
         ],
     )
     topo = _make_2node_topology()
-    hints = compute_routing_hints(topo, workload)
-    policy = DefaultSchedulingPolicy(hints)
+    analysis = DefaultAnalyzer(topo).analyze(workload)
+    hints = analysis.routing_hints
+    policy = DefaultSchedulingPolicy(analysis)
     policy.initialize(workload, topo)
 
     task = workload.tasks[0]
@@ -89,8 +91,9 @@ def test_default_path_matches_routing_hints():
 def test_default_bandwidth_equals_fair_share():
     """默认策略 allocate_bandwidth 返回与 FairShareAllocator 相同的结果。"""
     topo = _make_2node_topology(bw_gbps=100.0)
-    hints = RoutingHints(topology=topo)
-    policy = DefaultSchedulingPolicy(hints)
+    empty_wl = P2PWorkload(version="1.0", meta=Meta(num_jobs=1, num_nodes=2), tasks=[])
+    analysis = DefaultAnalyzer(topo).analyze(empty_wl)
+    policy = DefaultSchedulingPolicy(analysis)
 
     flow1 = ActiveFlow(task_id=0, src=0, dst=1, size_bytes=1000, remaining_bytes=1000,
                        path=[0, 1], start_time=0, last_update_time=0)
@@ -250,9 +253,9 @@ def test_identical_timing_with_new_api():
         ],
     )
     topo = _make_2node_topology(bw_gbps=100.0, latency_us=1.0)
-    hints = compute_routing_hints(topo, workload)
+    analysis = DefaultAnalyzer(topo).analyze(workload)
 
-    policy = DefaultSchedulingPolicy(hints)
+    policy = DefaultSchedulingPolicy(analysis)
     executor = AnalyticalExecutor(topo, policy)
     result = executor.execute(workload)
 

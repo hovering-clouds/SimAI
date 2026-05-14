@@ -8,7 +8,7 @@ from src.executor.bandwidth import FairShareAllocator
 from src.executor.policy import DefaultSchedulingPolicy
 from src.executor.result import ExecutionResult, TaskTiming
 from src.executor.runtime import ActiveFlow
-from src.static_analysis.passes.routing_hints import compute_routing_hints
+from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
@@ -64,8 +64,8 @@ def _run_executor(
     allocator=None,
 ) -> ExecutionResult:
     """便捷方法：构建 policy 并运行 executor。"""
-    routing_hints = compute_routing_hints(topology, workload)
-    policy = DefaultSchedulingPolicy(routing_hints, allocator=allocator)
+    analysis = DefaultAnalyzer(topology).analyze(workload)
+    policy = DefaultSchedulingPolicy(analysis, allocator=allocator)
     executor = AnalyticalExecutor(topology, policy)
     return executor.execute(workload)
 

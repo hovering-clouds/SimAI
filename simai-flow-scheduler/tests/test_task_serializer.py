@@ -1,18 +1,17 @@
 """
 Tests for task serializer module.
 
-Tests ExecutionPlan, OrderingStrategy, CppReferenceOrdering,
-and TaskSerializer class for compute task ordering.
+Tests ExecutionPlan, CppReferenceOrdering,
+and TaskSerializer base class for compute task ordering.
 """
 
 import pytest
 import tempfile
 import os
 
-from src.static_analysis.task_serializer import (
+from src.static_analysis.passes.task_serializer import (
     ExecutionPlan,
-    OrderingStrategy,
-    CppReferenceOrdering,
+    CppReferenceSerializer,
     TaskSerializer,
 )
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
@@ -102,100 +101,100 @@ class TestCppReferenceOrdering:
 
     def test_empty_workload(self):
         """Ordering handles empty workload."""
-        strategy = CppReferenceOrdering()
+        strategy = CppReferenceSerializer()
         wl = P2PWorkload(version="1.0", meta=Meta(num_jobs=0, num_nodes=0))
 
-        result = strategy.order(wl)
+        plan = strategy.serialize(wl)
 
-        assert result == {}
+        assert plan.compute_order == {}
 
     def test_single_compute_task(self):
         """Ordering handles single compute task."""
-        strategy = CppReferenceOrdering()
+        strategy = CppReferenceSerializer()
         c0 = _make_compute(0, 1000, node=0, iteration=0, phase=Phase.FORWARD, layer_id=0, item_id=0)
         wl = _make_workload([c0])
 
-        result = strategy.order(wl)
+        plan = strategy.serialize(wl)
 
-        assert result[0] == [0]
+        assert plan.compute_order[0] == [0]
 
     def test_order_by_iteration(self):
         """Ordering sorts by iteration (GA) first."""
-        strategy = CppReferenceOrdering()
+        strategy = CppReferenceSerializer()
         # Two compute tasks on same node, different iterations
         c0 = _make_compute(0, 100, node=0, iteration=1, phase=Phase.FORWARD, layer_id=0, item_id=0)
         c1 = _make_compute(1, 100, node=0, iteration=0, phase=Phase.FORWARD, layer_id=0, item_id=0)
         wl = _make_workload([c0, c1])
 
-        result = strategy.order(wl)
+        plan = strategy.serialize(wl)
 
         # iteration=0 should come before iteration=1
-        assert result[0] == [1, 0]
+        assert plan.compute_order[0] == [1, 0]
 
     def test_order_by_phase(self):
         """Ordering sorts by phase within same iteration."""
-        strategy = CppReferenceOrdering()
+        strategy = CppReferenceSerializer()
         c0 = _make_compute(0, 100, node=0, iteration=0, phase=Phase.BACKWARD_WEIGHT, layer_id=0, item_id=0)
         c1 = _make_compute(1, 100, node=0, iteration=0, phase=Phase.FORWARD, layer_id=0, item_id=0)
         c2 = _make_compute(2, 100, node=0, iteration=0, phase=Phase.BACKWARD_INPUT, layer_id=0, item_id=0)
         wl = _make_workload([c0, c1, c2])
 
-        result = strategy.order(wl)
+        plan = strategy.serialize(wl)
 
         # Phase order: FORWARD(0) -> BACKWARD_INPUT(1) -> BACKWARD_WEIGHT(2)
-        assert result[0] == [1, 2, 0]
+        assert plan.compute_order[0] == [1, 2, 0]
 
     def test_order_by_layer_id(self):
         """Ordering sorts by layer_id within same phase."""
-        strategy = CppReferenceOrdering()
+        strategy = CppReferenceSerializer()
         c0 = _make_compute(0, 100, node=0, iteration=0, phase=Phase.FORWARD, layer_id=2, item_id=0)
         c1 = _make_compute(1, 100, node=0, iteration=0, phase=Phase.FORWARD, layer_id=0, item_id=0)
         c2 = _make_compute(2, 100, node=0, iteration=0, phase=Phase.FORWARD, layer_id=1, item_id=0)
         wl = _make_workload([c0, c1, c2])
 
-        result = strategy.order(wl)
+        plan = strategy.serialize(wl)
 
         # layer_id order: 0 -> 1 -> 2
-        assert result[0] == [1, 2, 0]
+        assert plan.compute_order[0] == [1, 2, 0]
 
     def test_order_by_item_id(self):
         """Ordering sorts by item_id within same layer."""
-        strategy = CppReferenceOrdering()
+        strategy = CppReferenceSerializer()
         c0 = _make_compute(0, 100, node=0, iteration=0, phase=Phase.FORWARD, layer_id=0, item_id=2)
         c1 = _make_compute(1, 100, node=0, iteration=0, phase=Phase.FORWARD, layer_id=0, item_id=0)
         c2 = _make_compute(2, 100, node=0, iteration=0, phase=Phase.FORWARD, layer_id=0, item_id=1)
         wl = _make_workload([c0, c1, c2])
 
-        result = strategy.order(wl)
+        plan = strategy.serialize(wl)
 
         # item_id order: 0 -> 1 -> 2
-        assert result[0] == [1, 2, 0]
+        assert plan.compute_order[0] == [1, 2, 0]
 
     def test_multiple_nodes(self):
         """Ordering handles multiple nodes independently."""
-        strategy = CppReferenceOrdering()
+        strategy = CppReferenceSerializer()
         c0 = _make_compute(0, 100, node=0, iteration=0, phase=Phase.FORWARD, layer_id=0, item_id=0)
         c1 = _make_compute(1, 100, node=1, iteration=0, phase=Phase.FORWARD, layer_id=0, item_id=0)
         c2 = _make_compute(2, 100, node=0, iteration=0, phase=Phase.FORWARD, layer_id=1, item_id=0)
         wl = _make_workload([c0, c1, c2])
 
-        result = strategy.order(wl)
+        plan = strategy.serialize(wl)
 
-        assert result[0] == [0, 2]
-        assert result[1] == [1]
+        assert plan.compute_order[0] == [0, 2]
+        assert plan.compute_order[1] == [1]
 
     def test_skips_flow_tasks(self):
         """Ordering ignores flow tasks."""
-        strategy = CppReferenceOrdering()
+        strategy = CppReferenceSerializer()
         c0 = _make_compute(0, 100, node=0, iteration=0, phase=Phase.FORWARD, layer_id=0, item_id=0)
         f0 = _make_flow(1, 0, 1, 1000, deps=[0])
         wl = _make_workload([c0, f0])
 
-        result = strategy.order(wl)
+        plan = strategy.serialize(wl)
 
         # Only compute task should be in the result
-        assert result[0] == [0]
-        assert 1 not in result  # flow task should not appear
+        assert plan.compute_order[0] == [0]
+        assert 1 not in plan.compute_order  # flow task should not appear
 
 
 # ============================================================
@@ -209,7 +208,7 @@ class TestTaskSerializer:
     def test_empty_workload(self):
         """Serializer handles empty workload."""
         topo = _make_star_topo()
-        serializer = TaskSerializer()
+        serializer = CppReferenceSerializer()
         wl = P2PWorkload(version="1.0", meta=Meta(num_jobs=0, num_nodes=0))
 
         plan = serializer.serialize(wl)
@@ -220,7 +219,7 @@ class TestTaskSerializer:
     def test_single_compute_task(self):
         """Serializer handles single compute task."""
         topo = _make_star_topo()
-        serializer = TaskSerializer()
+        serializer = CppReferenceSerializer()
         c0 = _make_compute(0, 1000, node=0, iteration=0, phase=Phase.FORWARD, layer_id=0, item_id=0)
         wl = _make_workload([c0])
 
@@ -231,7 +230,7 @@ class TestTaskSerializer:
     def test_multiple_tasks_sorted(self):
         """Serializer sorts multiple compute tasks correctly."""
         topo = _make_star_topo()
-        serializer = TaskSerializer()
+        serializer = CppReferenceSerializer()
         # Tasks out of order
         c2 = _make_compute(2, 100, node=0, iteration=1, phase=Phase.FORWARD, layer_id=0, item_id=0)
         c0 = _make_compute(0, 100, node=0, iteration=0, phase=Phase.FORWARD, layer_id=0, item_id=0)
@@ -247,7 +246,7 @@ class TestTaskSerializer:
     def test_validate_no_errors_on_valid_order(self):
         """Validation passes for valid ordering."""
         topo = _make_star_topo()
-        serializer = TaskSerializer()
+        serializer = CppReferenceSerializer()
         c0 = _make_compute(0, 100, node=0, iteration=0, phase=Phase.FORWARD, layer_id=0, item_id=0)
         c1 = _make_compute(1, 100, node=0, iteration=0, phase=Phase.FORWARD, layer_id=1, item_id=0)
         wl = _make_workload([c0, c1])
@@ -259,7 +258,7 @@ class TestTaskSerializer:
     def test_validate_detects_cycle_from_deps(self):
         """Validation detects when ordering would create a cycle."""
         topo = _make_star_topo()
-        serializer = TaskSerializer()
+        serializer = CppReferenceSerializer()
         # Task 0 depends on task 1 - this creates a reverse dependency
         c0 = _make_compute(0, 100, node=0, deps=[1])
         c1 = _make_compute(1, 100, node=0)
@@ -275,7 +274,7 @@ class TestTaskSerializer:
     def test_validate_detects_implicit_cycle(self):
         """Validation detects implicit cycle from ordering."""
         topo = _make_star_topo()
-        serializer = TaskSerializer()
+        serializer = CppReferenceSerializer()
         # Original DAG: 0 -> 1 (no deps), 2 -> 3 (no deps)
         c0 = _make_compute(0, 100, node=0)
         c1 = _make_compute(1, 100, node=0, deps=[0])  # 1 depends on 0
@@ -302,7 +301,7 @@ class TestTaskSerializer:
           cycle is 0->1->2->0
         """
         topo = _make_star_topo()
-        serializer = TaskSerializer()
+        serializer = CppReferenceSerializer()
         # task 0 depends on task 2 (2 -> 0 in execution order)
         c0 = _make_compute(0, 100, node=0, deps=[2])
         c1 = _make_compute(1, 100, node=0)
@@ -322,7 +321,7 @@ class TestTaskSerializer:
     def test_to_json_and_from_json(self):
         """Serializer can write and read JSON."""
         topo = _make_star_topo()
-        serializer = TaskSerializer()
+        serializer = CppReferenceSerializer()
         c0 = _make_compute(0, 100, node=0)
         c1 = _make_compute(1, 100, node=1)
         wl = _make_workload([c0, c1])
@@ -348,7 +347,7 @@ class TestTaskSerializer:
     def test_multiple_nodes_independent(self):
         """Serializer handles multiple nodes independently."""
         topo = _make_star_topo()
-        serializer = TaskSerializer()
+        serializer = CppReferenceSerializer()
         # Different nodes have different orderings
         c0 = _make_compute(0, 100, node=0, iteration=1, phase=Phase.FORWARD)
         c1 = _make_compute(1, 100, node=0, iteration=0, phase=Phase.FORWARD)
@@ -365,19 +364,19 @@ class TestTaskSerializer:
 
     def test_optimizer_phase_last(self):
         """Optimizer phase comes last in ordering."""
-        strategy = CppReferenceOrdering()
+        strategy = CppReferenceSerializer()
         c0 = _make_compute(0, 100, node=0, iteration=0, phase=Phase.OPTIMIZER)
         c1 = _make_compute(1, 100, node=0, iteration=0, phase=Phase.FORWARD)
         wl = _make_workload([c0, c1])
 
-        result = strategy.order(wl)
+        plan = strategy.serialize(wl)
 
         # FORWARD(0) should come before OPTIMIZER(3)
-        assert result[0] == [1, 0]
+        assert plan.compute_order[0] == [1, 0]
 
     def test_backward_layers_reversed(self):
         """Backward phases have reversed layer order."""
-        strategy = CppReferenceOrdering()
+        strategy = CppReferenceSerializer()
         # Forward: layer 0 -> 1 -> 2
         # Backward: layer 2 -> 1 -> 0
         f0 = _make_compute(0, 100, node=0, iteration=0, phase=Phase.FORWARD, layer_id=0)
@@ -388,16 +387,16 @@ class TestTaskSerializer:
         ig0 = _make_compute(5, 100, node=0, iteration=0, phase=Phase.BACKWARD_INPUT, layer_id=0)
         wl = _make_workload([f0, f1, f2, ig2, ig1, ig0])
 
-        result = strategy.order(wl)
+        plan = strategy.serialize(wl)
 
         # Forward: 0,1,2 (layer 0,1,2)
         # Backward: 3,4,5 (layer 2,1,0 - reversed)
-        assert result[0] == [0, 1, 2, 3, 4, 5]
+        assert plan.compute_order[0] == [0, 1, 2, 3, 4, 5]
 
     def test_complex_workload_full_ordering(self):
         """Test complex workload with multiple iterations, phases, layers."""
         topo = _make_star_topo()
-        serializer = TaskSerializer()
+        serializer = CppReferenceSerializer()
 
         # Create a realistic workload: 2 GAs, 3 layers each
         tasks = []
@@ -421,17 +420,17 @@ class TestTaskSerializer:
 
 
 # ============================================================
-# Tests for Custom OrderingStrategy
+# Tests for Custom TaskSerializer subclass
 # ============================================================
 
 
-class TestCustomOrderingStrategy:
-    """Tests for custom ordering strategy."""
+class TestCustomTaskSerializer:
+    """Tests for custom TaskSerializer subclass."""
 
     def test_custom_strategy(self):
-        """Custom ordering strategy can be used."""
-        class ReverseOrdering(OrderingStrategy):
-            def order(self, workload, analysis=None):
+        """Custom TaskSerializer subclass can provide different ordering."""
+        class ReverseOrdering(TaskSerializer):
+            def serialize(self, workload):
                 # Reverse order by task_id
                 compute_tasks = [t for t in workload.tasks if t.is_compute()]
                 by_node: dict[int, list[Task]] = {}
@@ -439,13 +438,13 @@ class TestCustomOrderingStrategy:
                     if t.node not in by_node:
                         by_node[t.node] = []
                     by_node[t.node].append(t)
-                return {
+                result = {
                     node: [t.task_id for t in sorted(tasks, key=lambda x: -x.task_id)]
                     for node, tasks in by_node.items()
                 }
+                return ExecutionPlan(compute_order=result)
 
-        strategy = ReverseOrdering()
-        serializer = TaskSerializer(strategy=strategy)
+        serializer = ReverseOrdering()
 
         c0 = _make_compute(0, 100, node=0)
         c1 = _make_compute(1, 100, node=0)

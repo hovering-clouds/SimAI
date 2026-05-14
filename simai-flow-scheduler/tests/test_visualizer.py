@@ -13,7 +13,7 @@ from src.executor.visualizer import (
     ChromeTraceVerbose,
     ChromeTraceVisualizer,
 )
-from src.static_analysis.passes.routing_hints import compute_routing_hints
+from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
@@ -39,8 +39,8 @@ def _make_2node_topology(bw_gbps=100.0, latency_us=1.0):
 
 
 def _run_executor(workload, topo):
-    hints = compute_routing_hints(topo, workload)
-    policy = DefaultSchedulingPolicy(hints)
+    analysis = DefaultAnalyzer(topo).analyze(workload)
+    policy = DefaultSchedulingPolicy(analysis)
     executor = AnalyticalExecutor(topo, policy)
     return executor.execute(workload)
 

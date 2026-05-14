@@ -5,9 +5,8 @@ from typing import Optional
 
 from .bandwidth import BandwidthAllocator, FairShareAllocator
 from .runtime import ActiveFlow
-from ..static_analysis.passes.routing_hints import RoutingHints
+from ..static_analysis.strategies.default_strategy import DefaultAnalysisResult
 from ..static_analysis.passes.topology_loader import NetworkTopology
-from ..static_analysis.task_serializer import CppReferenceOrdering
 from ..workload_format.schema import P2PWorkload, Task
 
 
@@ -69,14 +68,18 @@ class DefaultSchedulingPolicy(SchedulingPolicy):
 
     def __init__(
         self,
-        routing_hints: RoutingHints,
+        analysis: DefaultAnalysisResult,
         allocator: Optional[BandwidthAllocator] = None,
     ):
-        self.routing_hints = routing_hints
+        self.routing_hints = analysis.routing_hints
+        self.compute_order = analysis.execution_plan.compute_order
         self.allocator = allocator or FairShareAllocator()
         self._topology: Optional[NetworkTopology] = None
-        self.compute_order: dict[int, list[int]] = {}
-        self.compute_position: dict[int, int] = {}
+        self.compute_position: dict[int, int] = {
+            task_id: idx
+            for node, ids in self.compute_order.items()
+            for idx, task_id in enumerate(ids)
+        }
         self.compute_cursor: dict[int, int] = defaultdict(int)
 
     def initialize(
@@ -85,13 +88,6 @@ class DefaultSchedulingPolicy(SchedulingPolicy):
         topology: NetworkTopology,
     ) -> None:
         self._topology = topology
-        ordering = CppReferenceOrdering()
-        self.compute_order = ordering.order(workload)
-        self.compute_position = {
-            task_id: idx
-            for node, ids in self.compute_order.items()
-            for idx, task_id in enumerate(ids)
-        }
         self.compute_cursor = defaultdict(int)
 
     def emit_ready_tasks(

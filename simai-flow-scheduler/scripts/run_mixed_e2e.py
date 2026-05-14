@@ -30,7 +30,7 @@ from src.workload_generator.inference_trace_expander import InferenceTraceExpand
 from src.workload_generator.job_merger import JobMerger
 from src.static_analysis.passes.topology_loader import TopologyLoader
 from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
-from src.static_analysis.task_serializer import TaskSerializer
+from src.static_analysis.passes.task_serializer import CppReferenceSerializer
 from src.workload_format.writer import WorkloadWriter
 from src.executor.analytical import AnalyticalExecutor
 from src.executor.policy import DefaultSchedulingPolicy
@@ -153,7 +153,7 @@ print(f"  Critical path: {analysis.critical_path.makespan_us} us")
 
 _sep("Step 5: Serialize execution plan")
 
-plan = TaskSerializer().serialize(merged_wl, analysis)
+plan = CppReferenceSerializer().serialize(merged_wl)
 plan_path = os.path.join(OUTPUT_DIR, "execution_plan.json")
 plan.to_json(plan_path)
 print(f"  Nodes with compute tasks: {len(plan.compute_order)}")
@@ -164,7 +164,7 @@ print(f"  Saved: {plan_path}")
 
 _sep("Step 6: Run analytical executor")
 
-policy = DefaultSchedulingPolicy(routing_hints=analysis.routing_hints)
+policy = DefaultSchedulingPolicy(analysis=analysis)
 executor = AnalyticalExecutor(topology=topology, policy=policy)
 result = executor.execute(merged_wl)
 

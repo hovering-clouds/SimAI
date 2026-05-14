@@ -4,7 +4,7 @@ Merged from the original WorkloadAnalyzer + WorkloadAnalysisResult to serve
 as the single default analysis entry point. Custom phase-2 strategies
 (e.g. Puppeteer-specific analysis) can reuse the pipeline or reorder passes.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..passes.contention_analysis import (
     LinkContentionGroup,
@@ -16,6 +16,7 @@ from ..passes.routing_hints import RoutingHints, compute_routing_hints
 from ..passes.topology_loader import NetworkTopology
 from ..passes.traffic_matrix import TrafficMatrix, compute_traffic_matrix
 from ..passes.workload_summary import WorkloadSummary, compute_workload_summary
+from ..passes.task_serializer import CppReferenceSerializer, ExecutionPlan
 from ...workload_format.schema import P2PWorkload
 
 
@@ -29,6 +30,7 @@ class DefaultAnalysisResult:
     node_views: dict[int, NodeLocalView]
     traffic_matrix: TrafficMatrix
     summary: WorkloadSummary
+    execution_plan: ExecutionPlan = field(default_factory=ExecutionPlan)
 
 
 class DefaultAnalyzer:
@@ -57,6 +59,9 @@ class DefaultAnalyzer:
         traffic_matrix = compute_traffic_matrix(workload)
         summary = compute_workload_summary(workload, critical_path, contention_groups)
 
+        serializer = CppReferenceSerializer()
+        execution_plan = serializer.serialize(workload)
+
         return DefaultAnalysisResult(
             routing_hints=routing_hints,
             critical_path=critical_path,
@@ -64,4 +69,5 @@ class DefaultAnalyzer:
             node_views=node_views,
             traffic_matrix=traffic_matrix,
             summary=summary,
+            execution_plan=execution_plan,
         )
