@@ -2,13 +2,12 @@
 import heapq
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Optional
 
-from ..static_analysis.routing_hints import RoutingHints
 from ..static_analysis.topology_loader import NetworkTopology
 from ..workload_format.schema import P2PWorkload, Task, TaskType
-from .bandwidth import BandwidthAllocator, FairShareAllocator
+from .policy import SchedulingPolicy
 from .result import ExecutionResult, TaskTiming
+from .runtime import ActiveFlow
 
 
 @dataclass(order=True)
@@ -21,46 +20,18 @@ class Event:
     version: int = field(compare=False, default=0)
 
 
-@dataclass
-class ActiveFlow:
-    """当前正在传输的流。"""
-    task_id: int
-    src: int
-    dst: int
-    size_bytes: int
-    remaining_bytes: int
-    path: list[int]
-    start_time: int
-    last_update_time: int
-    current_bw_gbps: float = 0.0
-    estimated_end_time: int = 0
-    version: int = 0
-
-
 class AnalyticalExecutor:
-    """离散事件模拟器：处理 P2PWorkload + ExecutionPlan。"""
+    """离散事件模拟器：处理 P2PWorkload + ExecutionPlan。
 
-    def __init__(
-        self,
-        topology: NetworkTopology,
-        routing_hints: RoutingHints,
-        allocator: Optional[BandwidthAllocator] = None,
-    ):
+    Executor 拥有事件队列和 DAG 状态；准入、路径查询和带宽分配通过 SchedulingPolicy 委托。
+    """
+
+    def __init__(self, topology: NetworkTopology, policy: SchedulingPolicy):
         self.topology = topology
-        self.routing_hints = routing_hints
-        self.allocator = allocator or FairShareAllocator()
+        self.policy = policy
 
     def execute(self, workload: P2PWorkload, plan) -> ExecutionResult:
-        """
-        运行离散事件模拟。
-
-        Args:
-            workload: 原始 P2P Workload
-            plan: ExecutionPlan（包含每个节点的 compute 排序）
-
-        Returns:
-            ExecutionResult
-        """
+        """运行离散事件模拟。"""
         # ── 构建索引 ──
         task_map: dict[int, Task] = {t.task_id: t for t in workload.tasks}
 
@@ -96,21 +67,30 @@ class AnalyticalExecutor:
                 task_id=task_id, version=version,
             ))
 
-        # active flows
         active_flows: dict[int, ActiveFlow] = {}
+        ready_pool: set[int] = set()
 
-        # ── 初始化事件 ──
-        # 每个节点的第一个 compute task（仅当 deps 已满足时）
-        for node_id, compute_ids in plan.compute_order.items():
+        # ── 初始化策略 ──
+        self.policy.initialize(workload, self.topology, plan)
+
+        # ── 初始化 ready_pool ──
+        for compute_ids in plan.compute_order.values():
             if compute_ids:
                 first_id = compute_ids[0]
                 if dep_count[first_id] == 0:
-                    push_event(time=0, kind="compute_ready", task_id=first_id)
+                    ready_pool.add(first_id)
 
         # 没有依赖的 flow task
         for task in workload.tasks:
             if task.is_flow() and dep_count[task.task_id] == 0:
-                push_event(time=0, kind="flow_ready", task_id=task.task_id)
+                ready_pool.add(task.task_id)
+
+        # ── 初次 drain ──
+        self._drain_ready_pool(
+            current_time=0, ready_pool=ready_pool, task_map=task_map,
+            start_times=start_times, active_flows=active_flows,
+            push_event=push_event,
+        )
 
         # ── 事件循环 ──
         last_time = 0
@@ -125,49 +105,116 @@ class AnalyticalExecutor:
             )
             last_time = current_time
 
-            if event.kind == "compute_ready":
-                self._handle_compute_ready(
-                    event, task_map, start_times, push_event,
-                )
-
-            elif event.kind == "compute_done":
+            if event.kind == "compute_done":
                 self._handle_compute_done(
                     event, task_map, end_times, dep_count, dependents,
-                    plan, compute_cursor, push_event,
-                )
-
-            elif event.kind == "flow_ready":
-                self._handle_flow_ready(
-                    event, task_map, start_times, active_flows,
-                    push_event, current_time,
+                    plan, compute_cursor, push_event, start_times,
+                    active_flows, ready_pool,
                 )
 
             elif event.kind == "flow_completion":
                 self._handle_flow_completion(
                     event, task_map, active_flows, end_times,
-                    dep_count, dependents, push_event, current_time,
-                    compute_cursor, plan,
+                    dep_count, dependents, push_event,
+                    compute_cursor, plan, start_times, ready_pool,
                 )
+
+        # ── 死锁检查 ──
+        if ready_pool:
+            raise RuntimeError(
+                f"Deadlock detected: {len(ready_pool)} ready tasks pending "
+                f"with empty event queue. Policy: {type(self.policy).__name__}. "
+                f"Pending task IDs: {sorted(ready_pool)}"
+            )
 
         # ── 构建结果 ──
         return self._build_result(task_map, start_times, end_times)
 
-    # ── 事件处理器 ──
+    # ── Ready pool ──
 
-    def _handle_compute_ready(self, event, task_map, start_times, push_event):
-        """处理 compute_ready 事件：记录开始时间，安排 compute_done。"""
-        task_id = event.task_id
-        start_times[task_id] = event.time
-        task = task_map[task_id]
-        push_event(
-            time=event.time + task.duration_us,
-            kind="compute_done",
-            task_id=task_id,
+    def _drain_ready_pool(
+        self, current_time, ready_pool, task_map,
+        start_times, active_flows, push_event,
+    ):
+        """从 ready_pool 获取 task，通过 policy 准入，启动被允许的 task。"""
+        while ready_pool:
+            ready_tasks = [task_map[tid] for tid in ready_pool]
+            emitted_ids = self.policy.emit_ready_tasks(current_time, ready_tasks)
+            if not emitted_ids:
+                break
+
+            flows_started = False
+            for tid in emitted_ids:
+                ready_pool.discard(tid)
+                task = task_map[tid]
+                self.policy.on_task_emitted(current_time, task)
+
+                if task.is_compute():
+                    self._start_compute(task, current_time, start_times, push_event)
+                elif task.is_flow():
+                    self._start_flow(
+                        task, current_time, start_times, active_flows, push_event,
+                    )
+                    flows_started = True
+
+            if flows_started and active_flows:
+                self._reallocate_bandwidth(current_time, active_flows, push_event)
+
+    def _mark_task_ready(
+        self, task_id, current_time, ready_pool, task_map,
+        start_times, active_flows, push_event,
+    ):
+        """将 task 加入 ready_pool 并立即 drain。"""
+        ready_pool.add(task_id)
+        self._drain_ready_pool(
+            current_time, ready_pool, task_map,
+            start_times, active_flows, push_event,
         )
+
+    def _start_compute(self, task, current_time, start_times, push_event):
+        """启动 compute task：记录开始时间，安排 compute_done 事件。"""
+        start_times[task.task_id] = current_time
+        push_event(
+            time=current_time + task.duration_us,
+            kind="compute_done",
+            task_id=task.task_id,
+        )
+
+    def _start_flow(
+        self, task, current_time, start_times, active_flows, push_event,
+    ):
+        """启动 flow task：创建 ActiveFlow，0 字节流直接安排完成事件。"""
+        start_times[task.task_id] = current_time
+
+        path = self.policy.get_flow_path(task)
+
+        flow = ActiveFlow(
+            task_id=task.task_id,
+            src=task.src,
+            dst=task.dst,
+            size_bytes=task.size_bytes,
+            remaining_bytes=task.size_bytes,
+            path=path,
+            start_time=current_time,
+            last_update_time=current_time,
+        )
+        active_flows[task.task_id] = flow
+
+        if not task.size_bytes:
+            propagation_delay = self._compute_propagation_delay(path)
+            push_event(
+                time=current_time + propagation_delay,
+                kind="flow_completion",
+                task_id=task.task_id,
+                version=0,
+            )
+
+    # ── 事件处理器 ──
 
     def _handle_compute_done(
         self, event, task_map, end_times, dep_count, dependents,
-        plan, compute_cursor, push_event,
+        plan, compute_cursor, push_event, start_times,
+        active_flows, ready_pool,
     ):
         """处理 compute_done 事件：释放下游依赖，推进 compute_cursor。"""
         task_id = event.task_id
@@ -175,10 +222,12 @@ class AnalyticalExecutor:
         task = task_map[task_id]
         node_id = task.node
 
-        # 释放下游依赖
+        self.policy.on_task_completed(event.time, task)
+
         self._release_dependents(
-            task_id, task_map, dep_count, dependents, event.time, push_event,
-            compute_cursor=compute_cursor, plan=plan,
+            task_id, task_map, dep_count, dependents, event.time,
+            plan, compute_cursor, ready_pool,
+            start_times, active_flows, push_event,
         )
 
         # 推进该节点的 compute_cursor，检查下一个 compute
@@ -188,51 +237,20 @@ class AnalyticalExecutor:
         if cursor < len(order):
             next_task_id = order[cursor]
             if dep_count[next_task_id] == 0:
-                push_event(time=event.time, kind="compute_ready", task_id=next_task_id)
+                self._mark_task_ready(
+                    next_task_id, event.time, ready_pool, task_map,
+                    start_times, active_flows, push_event,
+                )
 
-    def _handle_flow_ready(
-        self, event, task_map, start_times, active_flows,
-        push_event, current_time,
-    ):
-        """处理 flow_ready 事件：创建 ActiveFlow，分配带宽。"""
-        task_id = event.task_id
-        task = task_map[task_id]
-        start_times[task_id] = current_time
-
-        # 查询路径
-        path = self.routing_hints.get_path(task.src, task.dst)
-
-        # 创建 ActiveFlow
-        flow = ActiveFlow(
-            task_id=task_id,
-            src=task.src,
-            dst=task.dst,
-            size_bytes=task.size_bytes,
-            remaining_bytes=task.size_bytes,
-            path=path,
-            start_time=current_time,
-            last_update_time=current_time,
+        self._drain_ready_pool(
+            event.time, ready_pool, task_map,
+            start_times, active_flows, push_event,
         )
-        active_flows[task_id] = flow
-
-        # 0 字节 flow：无需传输，直接安排 completion（仅含 propagation delay）
-        if not task.size_bytes:
-            propagation_delay = self._compute_propagation_delay(path)
-            push_event(
-                time=current_time + propagation_delay,
-                kind="flow_completion",
-                task_id=task_id,
-                version=0,
-            )
-            return
-
-        # 重新分配带宽（会设置 flow 的 bw 和 estimated_end_time）
-        self._reallocate_bandwidth(current_time, active_flows, push_event)
 
     def _handle_flow_completion(
         self, event, task_map, active_flows, end_times,
-        dep_count, dependents, push_event, current_time,
-        compute_cursor, plan,
+        dep_count, dependents, push_event,
+        compute_cursor, plan, start_times, ready_pool,
     ):
         """处理 flow_completion 事件：懒删除检查，释放流，触发下游。"""
         task_id = event.task_id
@@ -244,25 +262,32 @@ class AnalyticalExecutor:
         if active_flows[task_id].version != version:
             return
 
-        end_times[task_id] = current_time
+        end_times[task_id] = event.time
         del active_flows[task_id]
 
-        # 释放下游依赖
+        self.policy.on_task_completed(event.time, task_map[task_id])
+
         self._release_dependents(
-            task_id, task_map, dep_count, dependents, current_time, push_event,
-            compute_cursor=compute_cursor, plan=plan,
+            task_id, task_map, dep_count, dependents, event.time,
+            plan, compute_cursor, ready_pool,
+            start_times, active_flows, push_event,
         )
 
         # 重新分配剩余 flow 的带宽
         if active_flows:
-            self._reallocate_bandwidth(current_time, active_flows, push_event)
+            self._reallocate_bandwidth(event.time, active_flows, push_event)
+
+        self._drain_ready_pool(
+            event.time, ready_pool, task_map,
+            start_times, active_flows, push_event,
+        )
 
     # ── 辅助方法 ──
 
     def _release_dependents(
         self, task_id, task_map, dep_count, dependents,
-        current_time, push_event,
-        compute_cursor=None, plan=None,
+        current_time, plan, compute_cursor, ready_pool,
+        start_times, active_flows, push_event,
     ):
         """释放 task_id 的下游依赖：减少 dep_count，触发满足条件的下游 task。"""
         for downstream_id in dependents.get(task_id, []):
@@ -270,25 +295,25 @@ class AnalyticalExecutor:
             if dep_count[downstream_id] == 0:
                 downstream_task = task_map[downstream_id]
                 if downstream_task.is_flow():
-                    push_event(
-                        time=current_time, kind="flow_ready",
-                        task_id=downstream_id,
+                    self._mark_task_ready(
+                        downstream_id, current_time, ready_pool, task_map,
+                        start_times, active_flows, push_event,
                     )
-                elif downstream_task.is_compute() and compute_cursor is not None and plan is not None:
+                elif downstream_task.is_compute():
                     # 检查该 compute 是否是其节点 compute_order 中的当前待执行任务
                     node_id = downstream_task.node
                     order = plan.compute_order.get(node_id, [])
                     cursor = compute_cursor.get(node_id, 0)
                     if cursor < len(order) and order[cursor] == downstream_id:
-                        push_event(
-                            time=current_time, kind="compute_ready",
-                            task_id=downstream_id,
+                        self._mark_task_ready(
+                            downstream_id, current_time, ready_pool, task_map,
+                            start_times, active_flows, push_event,
                         )
 
     def _reallocate_bandwidth(
         self, current_time, active_flows, push_event,
     ):
-        """重新分配带宽：更新 remaining_bytes → 调用 allocator → 安排新的 completion 事件。"""
+        """重新分配带宽：更新 remaining_bytes → 调用 policy → 安排新的 completion 事件。"""
         flows_list = list(active_flows.values())
         if not flows_list:
             return
@@ -303,10 +328,8 @@ class AnalyticalExecutor:
                 flow.remaining_bytes = max(0, flow.remaining_bytes - transmitted_bytes)
             flow.last_update_time = current_time
 
-        # Step 2: 调用 allocator 得到新的带宽分配
-        new_bw = self.allocator.allocate(
-            flows_list, self.topology, self.routing_hints, current_time,
-        )
+        # Step 2: 调用 policy 得到新的带宽分配
+        new_bw = self.policy.allocate_bandwidth(current_time, flows_list)
 
         # Step 3: 更新每条 flow 的带宽和预计完成时间
         for flow in flows_list:

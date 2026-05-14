@@ -3,9 +3,11 @@ import math
 
 import pytest
 
-from src.executor.analytical import AnalyticalExecutor, ActiveFlow
+from src.executor.analytical import AnalyticalExecutor
 from src.executor.bandwidth import FairShareAllocator
+from src.executor.policy import DefaultSchedulingPolicy
 from src.executor.result import ExecutionResult, TaskTiming
+from src.executor.runtime import ActiveFlow
 from src.static_analysis.routing_hints import compute_routing_hints
 from src.static_analysis.task_serializer import ExecutionPlan
 from src.static_analysis.topology_loader import Link, NetworkTopology
@@ -63,10 +65,11 @@ def _run_executor(
     compute_order: dict[int, list[int]],
     allocator=None,
 ) -> ExecutionResult:
-    """便捷方法：构建 routing_hints 并运行 executor。"""
+    """便捷方法：构建 policy 并运行 executor。"""
     routing_hints = compute_routing_hints(topology, workload)
     plan = ExecutionPlan(compute_order=compute_order)
-    executor = AnalyticalExecutor(topology, routing_hints, allocator=allocator)
+    policy = DefaultSchedulingPolicy(routing_hints, allocator=allocator)
+    executor = AnalyticalExecutor(topology, policy)
     return executor.execute(workload, plan)
 
 

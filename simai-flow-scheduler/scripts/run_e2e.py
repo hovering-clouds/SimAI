@@ -21,6 +21,7 @@ from src.static_analysis.analyzer import WorkloadAnalyzer
 from src.static_analysis.task_serializer import TaskSerializer
 from src.workload_format.writer import WorkloadWriter
 from src.executor.analytical import AnalyticalExecutor
+from src.executor.policy import DefaultSchedulingPolicy
 
 
 def main():
@@ -124,10 +125,8 @@ def main():
     print("Step 5: Run analytical executor")
     print("=" * 60)
 
-    executor = AnalyticalExecutor(
-        topology=topology,
-        routing_hints=analysis.routing_hints,
-    )
+    policy = DefaultSchedulingPolicy(routing_hints=analysis.routing_hints)
+    executor = AnalyticalExecutor(topology=topology, policy=policy)
     result = executor.execute(workload, plan)
 
     print(f"  Total time: {result.total_time_us} us ({result.total_time_us / 1000:.2f} ms)")

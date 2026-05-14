@@ -26,6 +26,7 @@ from src.static_analysis.analyzer import WorkloadAnalyzer
 from src.static_analysis.task_serializer import TaskSerializer
 from src.workload_format.writer import WorkloadWriter
 from src.executor.analytical import AnalyticalExecutor
+from src.executor.policy import DefaultSchedulingPolicy
 
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -103,7 +104,8 @@ print(f"  Saved: {plan_path}")
 
 _sep("Step 4: Run analytical executor")
 
-executor = AnalyticalExecutor(topology=topology, routing_hints=analysis.routing_hints)
+policy = DefaultSchedulingPolicy(routing_hints=analysis.routing_hints)
+executor = AnalyticalExecutor(topology=topology, policy=policy)
 result = executor.execute(inference_wl, plan)
 
 print(f"  Makespan: {result.makespan_us} us  ({result.makespan_us/1e6:.3f} s)")

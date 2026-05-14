@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from src.executor.analytical import AnalyticalExecutor
+from src.executor.policy import DefaultSchedulingPolicy
 from src.executor.result import ExecutionResult, TaskTiming
 from src.executor.visualizer import (
     ChromeTraceCompact,
@@ -46,7 +47,8 @@ def _run_executor(workload, topo, compute_order=None):
                 compute_order.setdefault(t.node, []).append(t.task_id)
     hints = compute_routing_hints(topo, workload)
     plan = ExecutionPlan(compute_order=compute_order)
-    executor = AnalyticalExecutor(topo, hints)
+    policy = DefaultSchedulingPolicy(hints)
+    executor = AnalyticalExecutor(topo, policy)
     return executor.execute(workload, plan)
 
 
