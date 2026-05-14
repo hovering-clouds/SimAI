@@ -1,9 +1,11 @@
 """SimAI Flow Scheduler Executor."""
 from .analytical import AnalyticalExecutor
-from .bandwidth import BandwidthAllocator, FairShareAllocator
-from .policy import DefaultSchedulingPolicy, SchedulingPolicy
-from .puppeteer_policy import PuppeteerSchedulingPolicy
-from .puppeteer_bandwidth import TteAwareAllocator
+from .policies.base_policy import SchedulingPolicy
+from .policies.default_policy import DefaultSchedulingPolicy
+from .policies.puppeteer_policy import PuppeteerSchedulingPolicy
+from .bandwidth_allocators.base_allocator import BandwidthAllocator
+from .bandwidth_allocators.fair_share_allocator import FairShareAllocator
+from .bandwidth_allocators.tte_aware_allocator import TteAwareAllocator
 from .result import ExecutionResult, TaskTiming
 from .runtime import ActiveFlow
 from .visualizer import ChromeTraceCompact, ChromeTraceVerbose, ChromeTraceVisualizer

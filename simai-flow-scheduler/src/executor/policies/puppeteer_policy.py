@@ -6,16 +6,15 @@ and TTE-aware bandwidth allocation through the SchedulingPolicy interface.
 from collections import defaultdict
 from typing import Optional
 
-from .bandwidth import BandwidthAllocator
-from .policy import SchedulingPolicy
-from .puppeteer_bandwidth import TteAwareAllocator
-from .runtime import ActiveFlow
-from ..static_analysis.passes.puppeteer_coordination import ResourceDependencyTable
-from ..static_analysis.passes.puppeteer_routing import RouteTable
-from ..static_analysis.passes.puppeteer_tte import TTEInfo
-from ..static_analysis.passes.task_serializer import ExecutionPlan
-from ..static_analysis.passes.topology_loader import NetworkTopology
-from ..workload_format.schema import P2PWorkload, Task
+from .base_policy import SchedulingPolicy
+from ..bandwidth_allocators.tte_aware_allocator import TteAwareAllocator
+from ..runtime import ActiveFlow
+from ...static_analysis.passes.puppeteer_coordination import ResourceDependencyTable
+from ...static_analysis.passes.puppeteer_routing import RouteTable
+from ...static_analysis.passes.puppeteer_tte import TTEInfo
+from ...static_analysis.passes.task_serializer import ExecutionPlan
+from ...static_analysis.passes.topology_loader import NetworkTopology
+from ...workload_format.schema import P2PWorkload, Task
 
 
 class PuppeteerSchedulingPolicy(SchedulingPolicy):

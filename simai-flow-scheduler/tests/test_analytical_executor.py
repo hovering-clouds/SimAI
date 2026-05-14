@@ -4,8 +4,8 @@ import math
 import pytest
 
 from src.executor.analytical import AnalyticalExecutor
-from src.executor.bandwidth import FairShareAllocator
-from src.executor.policy import DefaultSchedulingPolicy
+from src.executor.bandwidth_allocators.fair_share_allocator import FairShareAllocator
+from src.executor.policies.default_policy import DefaultSchedulingPolicy
 from src.executor.result import ExecutionResult, TaskTiming
 from src.executor.runtime import ActiveFlow
 from src.static_analysis.strategies.default_strategy import DefaultAnalyzer

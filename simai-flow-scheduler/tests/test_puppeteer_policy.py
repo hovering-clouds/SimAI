@@ -1,7 +1,7 @@
 """Tests for PuppeteerSchedulingPolicy."""
 import pytest
 
-from src.executor.puppeteer_policy import PuppeteerSchedulingPolicy
+from src.executor.policies.puppeteer_policy import PuppeteerSchedulingPolicy
 from src.executor.runtime import ActiveFlow
 from src.static_analysis.passes.puppeteer_coordination import ResourceDependencyTable
 from src.static_analysis.passes.puppeteer_routing import RouteTable

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from src.executor.analytical import AnalyticalExecutor
-from src.executor.policy import DefaultSchedulingPolicy
+from src.executor.policies.default_policy import DefaultSchedulingPolicy
 from src.executor.result import ExecutionResult, TaskTiming
 from src.executor.visualizer import (
     ChromeTraceCompact,

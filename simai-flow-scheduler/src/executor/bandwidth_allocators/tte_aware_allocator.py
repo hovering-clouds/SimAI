@@ -3,12 +3,13 @@
 Provides weighted fair sharing and strict-priority allocation modes
 based on flow TTE (Time-to-Exposed) priority classification.
 """
-from ..static_analysis.passes.routing_hints import RoutingHints
-from ..static_analysis.passes.topology_loader import NetworkTopology
-from ..static_analysis.passes.puppeteer_tte import TTEInfo
+from .base_allocator import BandwidthAllocator
+from ...static_analysis.passes.routing_hints import RoutingHints
+from ...static_analysis.passes.topology_loader import NetworkTopology
+from ...static_analysis.passes.puppeteer_tte import TTEInfo
 
 
-class TteAwareAllocator:
+class TteAwareAllocator(BandwidthAllocator):
     """TTE-aware bandwidth allocator.
 
     Two modes:

@@ -30,9 +30,9 @@ from src.static_analysis.passes.topology_loader import TopologyLoader
 from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
 from src.static_analysis.strategies.puppeteer_strategy import PuppeteerAnalyzer
 from src.executor.analytical import AnalyticalExecutor
-from src.executor.policy import DefaultSchedulingPolicy
-from src.executor.puppeteer_policy import PuppeteerSchedulingPolicy
-from src.executor.bandwidth import FairShareAllocator
+from src.executor.policies.default_policy import DefaultSchedulingPolicy
+from src.executor.policies.puppeteer_policy import PuppeteerSchedulingPolicy
+from src.executor.bandwidth_allocators.fair_share_allocator import FairShareAllocator
 
 
 def run_default(workload, topology):

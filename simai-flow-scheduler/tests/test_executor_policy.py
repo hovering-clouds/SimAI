@@ -2,8 +2,10 @@
 import pytest
 
 from src.executor.analytical import AnalyticalExecutor
-from src.executor.bandwidth import BandwidthAllocator, FairShareAllocator
-from src.executor.policy import DefaultSchedulingPolicy, SchedulingPolicy
+from src.executor.bandwidth_allocators.base_allocator import BandwidthAllocator
+from src.executor.bandwidth_allocators.fair_share_allocator import FairShareAllocator
+from src.executor.policies.default_policy import DefaultSchedulingPolicy
+from src.executor.policies.base_policy import SchedulingPolicy
 from src.executor.runtime import ActiveFlow
 from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
 from src.static_analysis.passes.routing_hints import RoutingHints, compute_routing_hints

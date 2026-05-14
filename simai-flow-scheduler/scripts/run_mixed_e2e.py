@@ -32,7 +32,7 @@ from src.static_analysis.passes.topology_loader import TopologyLoader
 from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
 from src.workload_format.writer import WorkloadWriter
 from src.executor.analytical import AnalyticalExecutor
-from src.executor.policy import DefaultSchedulingPolicy
+from src.executor.policies.default_policy import DefaultSchedulingPolicy
 
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
