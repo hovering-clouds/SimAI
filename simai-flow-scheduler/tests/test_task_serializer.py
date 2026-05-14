@@ -15,7 +15,7 @@ from src.static_analysis.task_serializer import (
     CppReferenceOrdering,
     TaskSerializer,
 )
-from src.static_analysis.topology_loader import Link, NetworkTopology
+from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
     Meta,

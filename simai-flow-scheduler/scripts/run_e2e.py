@@ -16,7 +16,7 @@ os.chdir(project_root)
 from src.workload_format.schema import Job, ParallelismConfig
 from src.workload_generator.aicb_parser import AicbParser
 from src.workload_generator.workload_builder import WorkloadBuilder
-from src.static_analysis.topology_loader import TopologyLoader
+from src.static_analysis.passes.topology_loader import TopologyLoader
 from src.static_analysis.analyzer import WorkloadAnalyzer
 from src.static_analysis.task_serializer import TaskSerializer
 from src.workload_format.writer import WorkloadWriter

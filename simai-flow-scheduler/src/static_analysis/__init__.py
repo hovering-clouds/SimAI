@@ -5,33 +5,35 @@ Provides topology loading, routing hints, critical path analysis,
 link contention analysis, and unified workload analysis.
 """
 
-from .topology_loader import TopologyLoader, NetworkTopology, Link, NodeType
-from .routing_hints import (
+from .passes.topology_loader import TopologyLoader, NetworkTopology, Link, NodeType
+from .passes.routing_hints import (
     RoutingHints,
     compute_routing_hints,
     bfs_shortest_path,
     RoutingStrategy,
 )
-from .critical_path import (
+from .passes.critical_path import (
     TaskTimingInfo,
     CriticalPathInfo,
     CriticalPathStrategy,
     analyze_critical_path,
     analyze_cpm,
+    _estimate_duration,
+    _topological_sort,
 )
-from .contention_analysis import (
+from .passes.contention_analysis import (
     LinkContentionGroup,
     find_contention_groups,
 )
-from .node_view import (
+from .passes.node_view import (
     NodeLocalView,
     build_node_views,
 )
-from .traffic_matrix import (
+from .passes.traffic_matrix import (
     TrafficMatrix,
     compute_traffic_matrix,
 )
-from .workload_summary import (
+from .passes.workload_summary import (
     WorkloadSummary,
     compute_workload_summary,
 )
@@ -39,6 +41,7 @@ from .analyzer import (
     WorkloadAnalysisResult,
     WorkloadAnalyzer,
 )
+from .strategies import DefaultAnalysisStrategy
 from .task_serializer import (
     ExecutionPlan,
     OrderingStrategy,
@@ -70,6 +73,7 @@ __all__ = [
     "compute_workload_summary",
     "WorkloadAnalysisResult",
     "WorkloadAnalyzer",
+    "DefaultAnalysisStrategy",
     "ExecutionPlan",
     "OrderingStrategy",
     "CppReferenceOrdering",

@@ -18,74 +18,31 @@ Flow duration estimation:
 from dataclasses import dataclass
 from typing import Callable
 
-from ..workload_format.schema import P2PWorkload, Task, TaskType
+from ...workload_format.schema import P2PWorkload, Task, TaskType
 from .routing_hints import RoutingHints
 
-# Type alias for critical path analysis strategies
 CriticalPathStrategy = Callable[
     [P2PWorkload, RoutingHints],
     "CriticalPathInfo",
 ]
-"""
-Critical path analysis strategy function signature.
-
-Args:
-    workload: P2P workload with tasks and dependencies
-    routing_hints: Precomputed routing information (contains bound topology)
-
-Returns:
-    CriticalPathInfo with per-task timing and critical task identification
-"""
 
 
 @dataclass
 class TaskTimingInfo:
-    """
-    Timing analysis result for a single task.
-
-    Compatible with all analysis methods:
-    - CPM:   all fields populated via forward/backward pass
-    - TTE:   slack_us == TTE for flow tasks; compute tasks set to inf
-    - RCPSP: earliest_* reflects resource-constrained schedule
-    """
-
     task_id: int
-
-    # Forward pass results (always present)
     earliest_start_us: int
     earliest_finish_us: int
-
-    # Backward pass results (may be approximate depending on method)
     latest_start_us: int
     latest_finish_us: int
-
-    # Slack = latest_start - earliest_start
-    # float to allow inf (tasks with no downstream compute dependency)
     slack_us: float
-
-    # Is this task on the critical path?
     is_critical: bool
 
 
 @dataclass
 class CriticalPathInfo:
-    """
-    Critical path analysis result.
-
-    analysis_method records which algorithm was used,
-    allowing callers to interpret precision accordingly.
-    """
-
-    # Per-task timing info
     task_timings: dict[int, TaskTimingInfo]
-
-    # Critical tasks (slack == 0)
     critical_tasks: list[int]
-
-    # Total makespan (optimistic lower bound)
     makespan_us: int
-
-    # Algorithm used: "cpm" | "tte" | "rcpsp"
     analysis_method: str
 
     def get_slack(self, task_id: int) -> float:
@@ -103,20 +60,6 @@ def analyze_critical_path(
     routing_hints: RoutingHints,
     analysis_strategy: CriticalPathStrategy | None = None,
 ) -> CriticalPathInfo:
-    """
-    Critical path analysis with pluggable strategy.
-
-    Default strategy is CPM (Critical Path Method).
-    Pass a custom analysis_strategy to use TTE, RCPSP, or other methods.
-
-    Args:
-        workload: P2P workload with tasks and dependencies
-        routing_hints: Precomputed routing information (contains bound topology)
-        analysis_strategy: Custom analysis function. If None, uses CPM.
-
-    Returns:
-        CriticalPathInfo with per-task timing and critical task identification
-    """
     strategy = analysis_strategy or analyze_cpm
     return strategy(workload, routing_hints)
 
@@ -125,15 +68,6 @@ def analyze_cpm(
     workload: P2PWorkload,
     routing_hints: RoutingHints,
 ) -> CriticalPathInfo:
-    """
-    CPM (Critical Path Method) analysis with multi-hop delay estimation.
-
-    Flow duration = transmission_delay + propagation_delay
-    - transmission_delay = size / bottleneck_bandwidth (min bw along path)
-    - propagation_delay = sum of all link latencies along path
-
-    Time complexity: O(V + E) where V = tasks, E = dependency edges.
-    """
     tasks = workload.tasks
 
     if not tasks:
@@ -144,30 +78,24 @@ def analyze_cpm(
             analysis_method="cpm",
         )
 
-    # Step 1: Topological sort
     sorted_tasks = _topological_sort(tasks)
 
-    # Step 2: Forward pass (ASAP)
     earliest_start: dict[int, int] = {}
     earliest_finish: dict[int, int] = {}
 
     for task in sorted_tasks:
         earliest_start[task.task_id] = (
-            0
-            if not task.deps
+            0 if not task.deps
             else max(earliest_finish[dep] for dep in task.deps)
         )
         earliest_finish[task.task_id] = (
-            earliest_start[task.task_id]
-            + _estimate_duration(task, routing_hints)
+            earliest_start[task.task_id] + _estimate_duration(task, routing_hints)
         )
 
-    # Step 3: Backward pass (ALAP)
     makespan = max(earliest_finish.values())
     latest_start: dict[int, int] = {}
     latest_finish: dict[int, int] = {}
 
-    # Build dependents map
     dependents: dict[int, list[int]] = {t.task_id: [] for t in tasks}
     for task in tasks:
         for dep in task.deps:
@@ -175,16 +103,13 @@ def analyze_cpm(
 
     for task in reversed(sorted_tasks):
         latest_finish[task.task_id] = (
-            makespan
-            if not dependents[task.task_id]
+            makespan if not dependents[task.task_id]
             else min(latest_start[d] for d in dependents[task.task_id])
         )
         latest_start[task.task_id] = (
-            latest_finish[task.task_id]
-            - _estimate_duration(task, routing_hints)
+            latest_finish[task.task_id] - _estimate_duration(task, routing_hints)
         )
 
-    # Step 4: Build output
     task_timings: dict[int, TaskTimingInfo] = {}
     for task in tasks:
         tid = task.task_id
@@ -209,28 +134,13 @@ def analyze_cpm(
     )
 
 
-def _estimate_duration(
-    task: Task,
-    routing_hints: RoutingHints,
-) -> int:
-    """
-    Estimate task duration for critical path analysis.
-
-    For compute tasks: returns task.duration_us or 0.
-    For flow tasks:
-        Total duration = transmission_delay + propagation_delay
-        - transmission_delay = size_bits / bottleneck_bandwidth
-        - propagation_delay = sum of all link latencies along path
-
-    Uses topology bound in routing_hints for path and link lookups.
-    """
+def _estimate_duration(task: Task, routing_hints: RoutingHints) -> int:
     if not task.is_flow():
         return task.duration_us or 0
 
     if task.src is None or task.dst is None:
         return 0
 
-    # Get full path through topology (from routing hints)
     path = routing_hints.get_path(task.src, task.dst)
     if len(path) < 2:
         return 0
@@ -253,14 +163,11 @@ def _estimate_duration(
     if bottleneck_bw_gbps <= 0 or bottleneck_bw_gbps == float("inf"):
         return 0
 
-    # tx_time on bottleneck link (in microseconds)
     tx_time_us = size_bits / (bottleneck_bw_gbps * 1e9) * 1e6
-
     return int(tx_time_us + total_latency_us)
 
 
 def _topological_sort(tasks: list[Task]) -> list[Task]:
-    """Topological sort via DFS post-order (dependencies appear before dependents)."""
     task_map = {t.task_id: t for t in tasks}
     visited: set[int] = set()
     result: list[Task] = []

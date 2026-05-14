@@ -21,7 +21,7 @@ os.chdir(project_root)
 
 from src.workload_generator.inference_profile import InferenceProfileStore
 from src.workload_generator.inference_trace_expander import InferenceTraceExpander
-from src.static_analysis.topology_loader import TopologyLoader
+from src.static_analysis.passes.topology_loader import TopologyLoader
 from src.static_analysis.analyzer import WorkloadAnalyzer
 from src.static_analysis.task_serializer import TaskSerializer
 from src.workload_format.writer import WorkloadWriter

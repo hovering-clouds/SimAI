@@ -12,36 +12,21 @@ Useful for:
 
 from dataclasses import dataclass, field
 
-from ..workload_format.schema import P2PWorkload
+from ...workload_format.schema import P2PWorkload
 from .critical_path import CriticalPathInfo
 
 
 @dataclass
 class NodeLocalView:
-    """Local scheduling view for a single node."""
-
     node_id: int
-
-    # Flows this node sends
-    send_tasks: list[int] = field(default_factory=list)  # task_ids
+    send_tasks: list[int] = field(default_factory=list)
     total_send_bytes: int = 0
-
-    # Flows this node receives
-    receive_tasks: list[int] = field(default_factory=list)  # task_ids
+    receive_tasks: list[int] = field(default_factory=list)
     total_receive_bytes: int = 0
-
-    # Compute tasks on this node
-    compute_tasks: list[int] = field(default_factory=list)  # task_ids
+    compute_tasks: list[int] = field(default_factory=list)
     total_compute_time_us: int = 0
-
-    # Estimated schedule (based on ASAP from critical path)
     estimated_send_times: list[tuple[int, int]] = field(default_factory=list)
-    # (start_time_us, task_id) — when the node starts transmitting
     estimated_receive_times: list[tuple[int, int]] = field(default_factory=list)
-    # (arrival_time_us, task_id) — when the node finishes receiving
-
-    # Estimated idle ratio (communication time / total active time)
-    # High value = node spends more time waiting on communication
     estimated_idle_ratio: float = 0.0
 
     def add_send_flow(self, task_id: int, size_bytes: int, start_time: int):
@@ -59,19 +44,8 @@ def build_node_views(
     workload: P2PWorkload,
     critical_path: CriticalPathInfo,
 ) -> dict[int, NodeLocalView]:
-    """
-    Build per-node local views.
-
-    For each node:
-    1. Collect send flows (where node is src)
-    2. Collect receive flows (where node is dst)
-    3. Collect compute tasks (where node is node)
-    4. Estimate schedule using ASAP times from critical path
-    5. Compute idle ratio (comm time / total active time)
-    """
     views: dict[int, NodeLocalView] = {}
 
-    # Collect all node IDs
     all_nodes: set[int] = set()
     for task in workload.tasks:
         if task.is_compute() and task.node is not None:
@@ -85,11 +59,6 @@ def build_node_views(
     for node_id in all_nodes:
         views[node_id] = NodeLocalView(node_id=node_id)
 
-    # Build lookup sets for flow task IDs per node
-    send_task_ids: dict[int, set[int]] = {nid: set() for nid in all_nodes}
-    recv_task_ids: dict[int, set[int]] = {nid: set() for nid in all_nodes}
-
-    # Populate views
     for task in workload.tasks:
         if task.is_compute() and task.node is not None:
             node_id = task.node
@@ -105,26 +74,20 @@ def build_node_views(
             timing = critical_path.task_timings[task.task_id]
             size_bytes = task.size_bytes or 0
 
-            # Sender: starts transmitting at earliest_start_us
             if task.src is not None and task.src in views:
                 views[task.src].add_send_flow(
                     task.task_id, size_bytes, timing.earliest_start_us
                 )
-                send_task_ids[task.src].add(task.task_id)
-
-            # Receiver: data arrives at earliest_finish_us
             if task.dst is not None and task.dst in views:
                 views[task.dst].add_receive_flow(
                     task.task_id, size_bytes, timing.earliest_finish_us
                 )
-                recv_task_ids[task.dst].add(task.task_id)
 
-    # Compute idle ratios using flow durations from critical path
     for node_id, view in views.items():
-        # All flow task IDs this node participates in (union to avoid double-count)
-        node_flow_ids = send_task_ids[node_id] | recv_task_ids[node_id]
+        node_flow_ids = set(
+            tid for tid in view.send_tasks
+        ) | set(tid for tid in view.receive_tasks)
 
-        # Sum flow durations from critical path timing
         total_comm_time = 0
         for tid in node_flow_ids:
             timing = critical_path.task_timings[tid]

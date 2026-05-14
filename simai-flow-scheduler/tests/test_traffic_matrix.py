@@ -8,7 +8,7 @@ bidirectional pair detection).
 
 import pytest
 
-from src.static_analysis.traffic_matrix import TrafficMatrix, compute_traffic_matrix
+from src.static_analysis.passes.traffic_matrix import TrafficMatrix, compute_traffic_matrix
 from src.workload_format.schema import (
     CommType,
     Meta,

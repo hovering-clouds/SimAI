@@ -8,7 +8,7 @@ task identification, and flow duration estimation.
 
 import pytest
 
-from src.static_analysis.critical_path import (
+from src.static_analysis.passes.critical_path import (
     CriticalPathInfo,
     CriticalPathStrategy,
     TaskTimingInfo,
@@ -17,8 +17,8 @@ from src.static_analysis.critical_path import (
     analyze_cpm,
     analyze_critical_path,
 )
-from src.static_analysis.routing_hints import RoutingHints, compute_routing_hints
-from src.static_analysis.topology_loader import Link, NetworkTopology
+from src.static_analysis.passes.routing_hints import RoutingHints, compute_routing_hints
+from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
     Job,

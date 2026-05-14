@@ -3,7 +3,7 @@ import heapq
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from ..static_analysis.topology_loader import NetworkTopology
+from ..static_analysis.passes.topology_loader import NetworkTopology
 from ..workload_format.schema import P2PWorkload, Task, TaskType
 from .policy import SchedulingPolicy
 from .result import ExecutionResult, TaskTiming

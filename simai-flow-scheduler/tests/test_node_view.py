@@ -7,10 +7,10 @@ and build_node_views integration with critical path analysis.
 
 import pytest
 
-from src.static_analysis.critical_path import analyze_critical_path, CriticalPathInfo, TaskTimingInfo
-from src.static_analysis.node_view import NodeLocalView, build_node_views
-from src.static_analysis.routing_hints import compute_routing_hints
-from src.static_analysis.topology_loader import Link, NetworkTopology
+from src.static_analysis.passes.critical_path import analyze_critical_path, CriticalPathInfo, TaskTimingInfo
+from src.static_analysis.passes.node_view import NodeLocalView, build_node_views
+from src.static_analysis.passes.routing_hints import compute_routing_hints
+from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
     Meta,

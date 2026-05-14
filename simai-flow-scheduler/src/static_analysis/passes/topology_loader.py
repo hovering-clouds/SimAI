@@ -18,27 +18,15 @@ from typing import Optional
 
 
 class NodeType(str, Enum):
-    """Type of network node."""
-
     GPU = "gpu"
-    NV_SWITCH = "nv_switch"  # NVLink switch
-    ASW_SWITCH = "asw_switch"  # Aggregate switch
-    PSW_SWITCH = "psw_switch"  # Pod switch
-    DSW_SWITCH = "dsw_switch"  # Distribution switch
+    NV_SWITCH = "nv_switch"
+    ASW_SWITCH = "asw_switch"
+    PSW_SWITCH = "psw_switch"
+    DSW_SWITCH = "dsw_switch"
 
 
 @dataclass
 class Link:
-    """
-    Represents one direction of a physical link in the topology.
-
-    Each line in the topology file represents a bidirectional link,
-    which we model as two Link objects: (src→dst) and (dst→src),
-    both sharing the same bandwidth/latency/error_rate.
-
-    Link identification uses (src, dst) tuple as the key.
-    """
-
     src: int
     dst: int
     bandwidth_gbps: float
@@ -47,7 +35,6 @@ class Link:
 
     @property
     def link_id(self) -> tuple[int, int]:
-        """Unique identifier for this link: (src, dst)."""
         return (self.src, self.dst)
 
     def __hash__(self):
@@ -61,88 +48,47 @@ class Link:
 
 @dataclass
 class NetworkTopology:
-    """
-    In-memory representation of the network topology.
-
-    Provides graph traversal APIs for routing algorithms and
-    link lookup for bandwidth/delay queries.
-    """
-
-    # All links indexed by (src, dst) tuple
     links: dict[tuple[int, int], Link] = field(default_factory=dict)
-
-    # Adjacency list: node -> list of (neighbor, link)
     adjacency: dict[int, list[tuple[int, Link]]] = field(default_factory=dict)
-
-    # Node type mapping: node_id -> type
     node_types: dict[int, NodeType] = field(default_factory=dict)
-
-    # Metadata
     total_nodes: int = 0
     gpu_count: int = 0
     switch_count: int = 0
     gpu_type: str = ""
-
-    # List of GPU node IDs for quick iteration
     gpu_nodes: list[int] = field(default_factory=list)
-
-    # List of all switch node IDs
     switch_nodes: list[int] = field(default_factory=list)
 
     def add_link(self, link: Link):
-        """Add a link and update adjacency list."""
         self.links[link.link_id] = link
 
         if link.src not in self.adjacency:
             self.adjacency[link.src] = []
         self.adjacency[link.src].append((link.dst, link))
 
-        # Ensure dst node exists in adjacency (even if it has no outgoing edges yet)
         if link.dst not in self.adjacency:
             self.adjacency[link.dst] = []
 
     def get_link(self, src: int, dst: int) -> Optional[Link]:
-        """Get link by (src, dst), or None if not found."""
         return self.links.get((src, dst))
 
     def get_neighbors(self, node: int) -> list[tuple[int, Link]]:
-        """Get all outgoing neighbors of a node."""
         return self.adjacency.get(node, [])
 
     def get_gpu_nodes(self) -> list[int]:
-        """Return list of all GPU node IDs."""
         return self.gpu_nodes
 
     def get_switch_nodes(self) -> list[int]:
-        """Return list of all switch node IDs."""
         return self.switch_nodes
 
     def is_gpu_node(self, node: int) -> bool:
-        """Check if a node is a GPU."""
         return node in self.gpu_nodes
 
     def is_switch_node(self, node: int) -> bool:
-        """Check if a node is a switch."""
         return node in self.switch_nodes
 
 
 class TopologyLoader:
-    """Load and parse astra-sim topology files."""
-
     def load(self, topo_file: str | Path) -> NetworkTopology:
-        """
-        Parse topology file and build NetworkTopology.
-
-        Args:
-            topo_file: Path to topology file (astra-sim format)
-
-        Returns:
-            Populated NetworkTopology object
-
-        Raises:
-            FileNotFoundError: If topo_file doesn't exist
-            ValueError: If file format is invalid
-        """
         path = Path(topo_file)
         if not path.exists():
             raise FileNotFoundError(f"Topology file not found: {topo_file}")
@@ -155,9 +101,6 @@ class TopologyLoader:
         if len(lines) < 2:
             raise ValueError("Invalid topology file: missing header lines")
 
-        # Parse first line: metadata
-        # Note: header field 2 is "gpus_per_server", not total GPU count.
-        # Actual GPU count = total_nodes - (nv_switch_count + other_switch_count)
         total_nodes, gpus_per_server, nv_switch_count, \
             other_switch_count, total_links, topo.gpu_type = self._parse_header(lines[0])
 
@@ -165,37 +108,27 @@ class TopologyLoader:
         topo.switch_count = nv_switch_count + other_switch_count
         topo.gpu_count = total_nodes - topo.switch_count
 
-        # Parse second line: switch node IDs
         switch_ids = list(map(int, lines[1].split()))
         switch_set = set(switch_ids)
 
-        # GPU nodes = all non-switch nodes
         gpu_nodes_set = set(range(total_nodes)) - switch_set
 
         topo.gpu_nodes = sorted(gpu_nodes_set)
         topo.switch_nodes = sorted(switch_set)
 
-        # Assign node types
         for node_id in topo.gpu_nodes:
             topo.node_types[node_id] = NodeType.GPU
 
-        # Classify switches: first nv_switch_count are NV switches, rest are network switches
         for i, sid in enumerate(switch_ids):
             if i < nv_switch_count:
                 topo.node_types[sid] = NodeType.NV_SWITCH
             elif i < nv_switch_count + other_switch_count:
                 topo.node_types[sid] = NodeType.ASW_SWITCH
 
-        # Parse link definitions (lines 3+)
-        # Each line in the topology file represents a bidirectional link.
-        # We create both (src→dst) and (dst→src) Link objects with the same
-        # bandwidth/latency/error_rate, matching the NS-3 behavior where
-        # qbb.Install(snode, dnode) creates a bidirectional channel.
         for line in lines[2:]:
             link = self._parse_link_line(line)
             if link:
                 topo.add_link(link)
-                # Add reverse link (same properties, opposite direction)
                 reverse = Link(
                     src=link.dst,
                     dst=link.src,
@@ -208,73 +141,53 @@ class TopologyLoader:
         return topo
 
     def _parse_header(self, line: str) -> tuple[int, int, int, int, int, str]:
-        """Parse first line of topology file."""
         parts = line.split()
         if len(parts) < 6:
             raise ValueError(f"Invalid header line: {line}")
-
         return (
-            int(parts[0]),  # total_nodes
-            int(parts[1]),  # gpu_count
-            int(parts[2]),  # nv_switch_count
-            int(parts[3]),  # other_switch_count
-            int(parts[4]),  # total_links
-            parts[5],  # gpu_type
+            int(parts[0]), int(parts[1]), int(parts[2]),
+            int(parts[3]), int(parts[4]), parts[5],
         )
 
     def _parse_link_line(self, line: str) -> Optional[Link]:
-        """Parse a link definition line."""
         parts = line.split()
         if len(parts) < 5:
             return None
-
         try:
             src = int(parts[0])
             dst = int(parts[1])
             bandwidth = self._parse_bandwidth(parts[2])
             latency = self._parse_latency(parts[3])
             error_rate = float(parts[4])
-
-            return Link(
-                src=src,
-                dst=dst,
-                bandwidth_gbps=bandwidth,
-                latency_us=latency,
-                error_rate=error_rate,
-            )
+            return Link(src=src, dst=dst, bandwidth_gbps=bandwidth,
+                        latency_us=latency, error_rate=error_rate)
         except (ValueError, IndexError) as e:
             raise ValueError(f"Invalid link line: {line} ({e})")
 
     def _parse_bandwidth(self, bw_str: str) -> float:
-        """Parse bandwidth string like '400Gbps' or '2880Gbps' to float (Gbps)."""
         match = re.match(r"([\d.]+)\s*(Gbps|Mbps|Tbps)", bw_str, re.IGNORECASE)
         if not match:
             raise ValueError(f"Invalid bandwidth format: {bw_str}")
-
         value = float(match.group(1))
         unit = match.group(2).upper()
-
         if unit == "MBPS":
             return value / 1000.0
         elif unit == "TBPS":
             return value * 1000.0
-        else:  # GBPS
+        else:
             return value
 
     def _parse_latency(self, lat_str: str) -> float:
-        """Parse latency string like '0.0005ms' or '25us' to float (microseconds)."""
         match = re.match(r"([\d.]+)\s*(ms|us|ns|s)", lat_str, re.IGNORECASE)
         if not match:
             raise ValueError(f"Invalid latency format: {lat_str}")
-
         value = float(match.group(1))
         unit = match.group(2).lower()
-
         if unit == "s":
             return value * 1e6
         elif unit == "ms":
             return value * 1e3
         elif unit == "ns":
             return value / 1e3
-        else:  # us
+        else:
             return value

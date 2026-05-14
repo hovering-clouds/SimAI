@@ -9,7 +9,7 @@ that the unified analysis interface works end-to-end.
 import pytest
 
 from src.static_analysis.analyzer import WorkloadAnalysisResult, WorkloadAnalyzer
-from src.static_analysis.topology_loader import Link, NetworkTopology
+from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
     Meta,

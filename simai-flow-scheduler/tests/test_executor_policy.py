@@ -5,9 +5,9 @@ from src.executor.analytical import AnalyticalExecutor
 from src.executor.bandwidth import BandwidthAllocator, FairShareAllocator
 from src.executor.policy import DefaultSchedulingPolicy, SchedulingPolicy
 from src.executor.runtime import ActiveFlow
-from src.static_analysis.routing_hints import RoutingHints, compute_routing_hints
+from src.static_analysis.passes.routing_hints import RoutingHints, compute_routing_hints
 from src.static_analysis.task_serializer import ExecutionPlan
-from src.static_analysis.topology_loader import Link, NetworkTopology
+from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
     Meta,

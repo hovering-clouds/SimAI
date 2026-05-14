@@ -8,9 +8,9 @@ from src.executor.bandwidth import FairShareAllocator
 from src.executor.policy import DefaultSchedulingPolicy
 from src.executor.result import ExecutionResult, TaskTiming
 from src.executor.runtime import ActiveFlow
-from src.static_analysis.routing_hints import compute_routing_hints
+from src.static_analysis.passes.routing_hints import compute_routing_hints
 from src.static_analysis.task_serializer import ExecutionPlan
-from src.static_analysis.topology_loader import Link, NetworkTopology
+from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
     Meta,
@@ -314,7 +314,7 @@ def test_fair_share_allocator_no_contention():
         task_id=0, src=0, dst=1, size_bytes=1000, remaining_bytes=1000,
         path=[0, 1], start_time=0, last_update_time=0,
     )
-    from src.static_analysis.routing_hints import RoutingHints
+    from src.static_analysis.passes.routing_hints import RoutingHints
     hints = RoutingHints(topology=topo)
 
     result = allocator.allocate([flow], topo, hints, current_time=0)
@@ -334,7 +334,7 @@ def test_fair_share_allocator_contention():
         task_id=1, src=0, dst=1, size_bytes=1000, remaining_bytes=1000,
         path=[0, 1], start_time=0, last_update_time=0,
     )
-    from src.static_analysis.routing_hints import RoutingHints
+    from src.static_analysis.passes.routing_hints import RoutingHints
     hints = RoutingHints(topology=topo)
 
     result = allocator.allocate([flow1, flow2], topo, hints, current_time=0)

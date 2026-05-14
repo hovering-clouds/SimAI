@@ -1,8 +1,8 @@
 """Bandwidth allocation strategies."""
 from abc import ABC, abstractmethod
 
-from ..static_analysis.routing_hints import RoutingHints
-from ..static_analysis.topology_loader import NetworkTopology
+from ..static_analysis.passes.routing_hints import RoutingHints
+from ..static_analysis.passes.topology_loader import NetworkTopology
 
 
 class BandwidthAllocator(ABC):

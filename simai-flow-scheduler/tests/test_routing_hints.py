@@ -9,8 +9,8 @@ import os
 
 import pytest
 
-from src.static_analysis.routing_hints import RoutingHints, compute_routing_hints, bfs_shortest_path
-from src.static_analysis.topology_loader import Link, NetworkTopology, TopologyLoader
+from src.static_analysis.passes.routing_hints import RoutingHints, compute_routing_hints, bfs_shortest_path
+from src.static_analysis.passes.topology_loader import Link, NetworkTopology, TopologyLoader
 from src.workload_format.schema import (
     CommType,
     Job,
