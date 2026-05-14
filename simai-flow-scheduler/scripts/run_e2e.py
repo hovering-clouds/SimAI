@@ -18,7 +18,6 @@ from src.workload_generator.aicb_parser import AicbParser
 from src.workload_generator.workload_builder import WorkloadBuilder
 from src.static_analysis.passes.topology_loader import TopologyLoader
 from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
-from src.static_analysis.passes.task_serializer import CppReferenceSerializer
 from src.workload_format.writer import WorkloadWriter
 from src.executor.analytical import AnalyticalExecutor
 from src.executor.policy import DefaultSchedulingPolicy
@@ -99,30 +98,11 @@ def main():
     print(f"  Critical path tasks: {len(analysis.critical_path.critical_tasks)}")
 
     # ============================================================
-    # Step 4: Serialize compute tasks
+    # Step 4: Run analytical executor
     # ============================================================
     print()
     print("=" * 60)
-    print("Step 4: Serialize compute tasks (ExecutionPlan)")
-    print("=" * 60)
-
-    serializer = CppReferenceSerializer()
-    plan = serializer.serialize(workload)
-    print(f"  Nodes with compute tasks: {len(plan.compute_order)}")
-    for node_id, task_ids in sorted(plan.compute_order.items()):
-        print(f"  Node {node_id}: {len(task_ids)} compute tasks")
-
-    # Save ExecutionPlan
-    plan_path = os.path.join(output_dir, "execution_plan.json")
-    plan.to_json(plan_path)
-    print(f"  Saved to: {plan_path}")
-
-    # ============================================================
-    # Step 5: Run analytical executor
-    # ============================================================
-    print()
-    print("=" * 60)
-    print("Step 5: Run analytical executor")
+    print("Step 4: Run analytical executor")
     print("=" * 60)
 
     policy = DefaultSchedulingPolicy(analysis=analysis)

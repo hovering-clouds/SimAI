@@ -23,7 +23,6 @@ from src.workload_generator.inference_profile import InferenceProfileStore
 from src.workload_generator.inference_trace_expander import InferenceTraceExpander
 from src.static_analysis.passes.topology_loader import TopologyLoader
 from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
-from src.static_analysis.passes.task_serializer import CppReferenceSerializer
 from src.workload_format.writer import WorkloadWriter
 from src.executor.analytical import AnalyticalExecutor
 from src.executor.policy import DefaultSchedulingPolicy
@@ -89,20 +88,9 @@ analysis = DefaultAnalyzer(topology).analyze(inference_wl)
 print(f"  Critical path: {analysis.critical_path.makespan_us} us")
 
 
-# ── Step 3: Serialize ─────────────────────────────────────────────────────────
+# ── Step 3: Execute ───────────────────────────────────────────────────────────
 
-_sep("Step 3: Serialize execution plan")
-
-plan = CppReferenceSerializer().serialize(inference_wl)
-plan_path = os.path.join(OUTPUT_DIR, "execution_plan.json")
-plan.to_json(plan_path)
-print(f"  Nodes with compute tasks: {len(plan.compute_order)}")
-print(f"  Saved: {plan_path}")
-
-
-# ── Step 4: Execute ───────────────────────────────────────────────────────────
-
-_sep("Step 4: Run analytical executor")
+_sep("Step 3: Run analytical executor")
 
 policy = DefaultSchedulingPolicy(analysis=analysis)
 executor = AnalyticalExecutor(topology=topology, policy=policy)
@@ -116,9 +104,9 @@ result.to_json(result_path)
 print(f"  Saved: {result_path}")
 
 
-# ── Step 5: QoS report ────────────────────────────────────────────────────────
+# ── Step 4: QoS report ────────────────────────────────────────────────────────
 
-_sep("Step 5: QoS analysis (per-request inference metrics)")
+_sep("Step 4: QoS analysis (per-request inference metrics)")
 
 task_map = {t.task_id: t for t in inference_wl.tasks}
 
@@ -181,6 +169,5 @@ print(f"  Saved: {qos_path}")
 _sep("Done")
 print(f"  Output directory: {OUTPUT_DIR}/")
 print(f"  workload.json        — inference P2PWorkload")
-print(f"  execution_plan.json  — serialized compute order")
 print(f"  execution_result.json— per-task timing")
 print(f"  qos_report.json      — per-request TTFT / TBT / E2E")
