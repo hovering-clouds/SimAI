@@ -61,11 +61,10 @@ def _make_4node_ring_topology(bw_gbps: float = 100.0, latency_us: float = 1.0) -
 def _run_executor(
     workload: P2PWorkload,
     topology: NetworkTopology,
-    allocator=None,
 ) -> ExecutionResult:
     """便捷方法：构建 policy 并运行 executor。"""
     analysis = DefaultAnalyzer(topology).analyze(workload)
-    policy = DefaultSchedulingPolicy(analysis, allocator=allocator)
+    policy = DefaultSchedulingPolicy(analysis)
     executor = AnalyticalExecutor(topology, policy)
     return executor.execute(workload)
 

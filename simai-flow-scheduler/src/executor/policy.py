@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Optional
 
-from .bandwidth import BandwidthAllocator, FairShareAllocator
+from .bandwidth import FairShareAllocator
 from .runtime import ActiveFlow
 from ..static_analysis.strategies.default_strategy import DefaultAnalysisResult
 from ..static_analysis.passes.topology_loader import NetworkTopology
@@ -69,11 +69,10 @@ class DefaultSchedulingPolicy(SchedulingPolicy):
     def __init__(
         self,
         analysis: DefaultAnalysisResult,
-        allocator: Optional[BandwidthAllocator] = None,
     ):
         self.routing_hints = analysis.routing_hints
         self.compute_order = analysis.execution_plan.compute_order
-        self.allocator = allocator or FairShareAllocator()
+        self.allocator = FairShareAllocator()
         self._topology: Optional[NetworkTopology] = None
         self.compute_position: dict[int, int] = {
             task_id: idx
