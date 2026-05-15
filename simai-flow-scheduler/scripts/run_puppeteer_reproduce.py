@@ -11,10 +11,9 @@ Runs a workload through all comparison modes and reports key metrics:
         full          Puppeteer route table + TTE-aware + co-start coordination
 
 Usage:
-    python scripts/run_puppeteer_reproduce.py [--workload W] [--topo T] [--output O]
+    python scripts/run_puppeteer_reproduce.py
 """
 
-import argparse
 import os
 import sys
 import time
@@ -35,7 +34,7 @@ from src.executor.policies.puppeteer_policy import PuppeteerSchedulingPolicy
 from src.executor.bandwidth_allocators.fair_share_allocator import FairShareAllocator
 
 
-def run_default(workload, topology):
+def run_default(workload, topology, **_):
     """Baseline: DefaultSchedulingPolicy."""
     analysis = DefaultAnalyzer(topology).analyze(workload)
     policy = DefaultSchedulingPolicy(analysis=analysis)
@@ -43,9 +42,9 @@ def run_default(workload, topology):
     return executor.execute(workload)
 
 
-def run_route_only(workload, topology):
+def run_route_only(workload, topology, k_paths=4):
     """Puppeteer routing + fair share (no TTE, no coordination)."""
-    puppet = PuppeteerAnalyzer(topology, k_paths=4)
+    puppet = PuppeteerAnalyzer(topology, k_paths=k_paths)
     result = puppet.analyze(workload)
 
     # Use DefaultSchedulingPolicy but override routing hints with route table
@@ -72,7 +71,7 @@ def run_route_only(workload, topology):
     return executor.execute(workload)
 
 
-def run_tte_only(workload, topology):
+def run_tte_only(workload, topology, **_):
     """BFS shortest paths + TTE-aware allocation (no greedy routing)."""
     from src.static_analysis.passes.routing_hints import compute_routing_hints
     from src.static_analysis.passes.puppeteer_tte import compute_tte
@@ -101,11 +100,11 @@ def run_tte_only(workload, topology):
     return executor.execute(workload)
 
 
-def run_route_tte(workload, topology):
+def run_route_tte(workload, topology, k_paths=4):
     """Puppeteer routing + TTE-aware allocation (no coordination)."""
     from src.static_analysis.passes.puppeteer_coordination import ResourceDependencyTable
 
-    puppet = PuppeteerAnalyzer(topology, k_paths=4)
+    puppet = PuppeteerAnalyzer(topology, k_paths=k_paths)
     result = puppet.analyze(workload)
 
     policy = PuppeteerSchedulingPolicy(
@@ -119,9 +118,9 @@ def run_route_tte(workload, topology):
     return executor.execute(workload)
 
 
-def run_full(workload, topology):
+def run_full(workload, topology, k_paths=4):
     """Full Puppeteer: routing + TTE-aware + coordination."""
-    puppet = PuppeteerAnalyzer(topology, k_paths=4)
+    puppet = PuppeteerAnalyzer(topology, k_paths=k_paths)
     result = puppet.analyze(workload)
 
     policy = PuppeteerSchedulingPolicy(
@@ -192,22 +191,15 @@ def print_comparison(all_metrics):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Puppeteer reproduction comparison")
-    parser.add_argument("--workload", default="inputs/aicb-workload/gpt175b-a100.txt",
-                        help="AICB workload file")
-    parser.add_argument("--topo", default="inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100",
-                        help="Topology file")
-    parser.add_argument("--output", default="outputs/puppeteer_reproduce",
-                        help="Output directory")
-    parser.add_argument("--modes", nargs="+",
-                        default=["default", "route-only", "tte-only", "route-tte", "full"],
-                        choices=["default", "route-only", "tte-only", "route-tte", "full"],
-                        help="Modes to run (default: all)")
-    parser.add_argument("--dp", type=int, default=2, help="Data parallelism degree")
-    parser.add_argument("--k-paths", type=int, default=4, help="Candidate paths for greedy routing")
-    args = parser.parse_args()
+    # --- Configuration ---
+    aicb_file = "inputs/aicb-workload/gpt175b-a100.txt"
+    topo_file = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100"
+    output_dir = "outputs/puppeteer_reproduce"
+    dp = 2
+    k_paths = 4
+    # modes = ["default", "route-only", "tte-only", "route-tte", "full"]
+    modes = ["default", "route-only", "tte-only"]
 
-    output_dir = args.output
     os.makedirs(output_dir, exist_ok=True)
 
     # ---- Load AICB workload ----
@@ -215,14 +207,13 @@ def main():
     print("Loading AICB workload")
     print("=" * 60)
     parser_aicb = AicbParser()
-    header, items = parser_aicb.parse(args.workload)
-    print(f"  Model: {os.path.basename(args.workload)}")
+    header, items = parser_aicb.parse(aicb_file)
+    print(f"  Model: {os.path.basename(aicb_file)}")
     print(f"  Header: tp={header.tp}, dp={header.all_gpus // header.tp}, "
           f"pp={header.pp}, ga={header.ga}, all_gpus={header.all_gpus}")
 
     # ---- Build P2PWorkload ----
     tp = header.tp
-    dp = args.dp
     pp = header.pp
     ep = header.ep
     total_gpus = header.all_gpus
@@ -240,13 +231,19 @@ def main():
     print(f"  Total tasks: {len(workload.tasks)}")
     print(f"  Compute: {len(workload.get_compute_tasks())}, Flow: {len(workload.get_flow_tasks())}")
 
+    # Save workload for visualization
+    from src.workload_format.writer import WorkloadWriter
+    workload_path = os.path.join(output_dir, "workload.json")
+    WorkloadWriter().write(workload, workload_path)
+    print(f"  Workload saved to: {workload_path}")
+
     # ---- Load topology ----
     print()
     print("=" * 60)
     print("Loading topology")
     print("=" * 60)
     loader = TopologyLoader()
-    topology = loader.load(args.topo)
+    topology = loader.load(topo_file)
     print(f"  Nodes: {topology.total_nodes} (GPUs: {topology.gpu_count}, "
           f"Switches: {topology.switch_count})")
 
@@ -260,7 +257,7 @@ def main():
     }
 
     all_metrics = []
-    for mode in args.modes:
+    for mode in modes:
         print()
         print("=" * 60)
         print(f"Running mode: {mode}")
@@ -268,8 +265,14 @@ def main():
 
         t0 = time.time()
         try:
-            result = mode_map[mode](workload, topology)
+            result = mode_map[mode](workload, topology, k_paths=k_paths)
             elapsed = time.time() - t0
+
+            # Save per-mode execution result for visualization
+            result_path = os.path.join(output_dir, f"result_{mode}.json")
+            result.to_json(result_path)
+            print(f"  Saved: {result_path}")
+
             metrics = _summarize(result, mode, workload)
             metrics["elapsed_s"] = elapsed
             all_metrics.append(metrics)
@@ -286,8 +289,8 @@ def main():
     # ---- Save detailed results ----
     import json
     report = {
-        "workload": args.workload,
-        "topology": args.topo,
+        "workload": aicb_file,
+        "topology": topo_file,
         "modes": all_metrics,
     }
     report_path = os.path.join(output_dir, "comparison.json")

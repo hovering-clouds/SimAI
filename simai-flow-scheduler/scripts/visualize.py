@@ -26,7 +26,10 @@ from src.executor.visualizer import (
 # ── Configuration ──────────────────────────────────────────────
 
 # Output directory from run_e2e.py (must contain workload.json and execution_result.json)
-OUTPUT_DIR = "outputs/inference_e2e"
+OUTPUT_DIR = "outputs/puppeteer_reproduce"
+
+# Result file name (default: execution_result.json; for puppeteer: result_route-tte.json, etc.)
+RESULT_FILE = "result_default.json"
 
 # Visualization mode: "verbose" | "compact" | "detail"
 MODE = "verbose"
@@ -45,7 +48,7 @@ OUTPUT_FILE = None
 
 def main():
     workload_path = os.path.join(OUTPUT_DIR, "workload.json")
-    result_path = os.path.join(OUTPUT_DIR, "execution_result.json")
+    result_path = os.path.join(OUTPUT_DIR, RESULT_FILE)
 
     if not os.path.exists(workload_path):
         print(f"Error: {workload_path} not found. Run run_e2e.py first.")
