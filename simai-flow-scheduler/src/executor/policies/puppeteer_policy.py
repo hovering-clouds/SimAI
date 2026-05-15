@@ -32,7 +32,6 @@ class PuppeteerSchedulingPolicy(SchedulingPolicy):
         resource_dependency: Coordination groups for co-start barriers
         execution_plan: Compute ordering per node
         allocator_mode: Bandwidth allocation mode ("weighted" or "strict_priority")
-        min_background_share: Minimum bandwidth share for background flows
     """
 
     def __init__(
@@ -42,7 +41,6 @@ class PuppeteerSchedulingPolicy(SchedulingPolicy):
         resource_dependency: ResourceDependencyTable,
         execution_plan: ExecutionPlan,
         allocator_mode: str = "weighted",
-        min_background_share: float = 0.05,
     ):
         self.route_table = route_table
         self.tte_info = tte_info
@@ -61,7 +59,6 @@ class PuppeteerSchedulingPolicy(SchedulingPolicy):
         self.allocator = TteAwareAllocator(
             tte_info=tte_info,
             mode=allocator_mode,
-            min_background_share=min_background_share,
         )
 
         # Coordination state (initialized in initialize())

@@ -65,7 +65,6 @@ def run_route_only(workload, topology):
                 resource_dependency=ResourceDependencyTable(),
                 execution_plan=execution_plan,
                 allocator_mode="weighted",
-                min_background_share=1.0,  # all equal
             )
 
     policy = RouteOnlyPolicy(result.route_table, result.execution_plan)

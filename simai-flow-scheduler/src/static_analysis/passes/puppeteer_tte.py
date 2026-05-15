@@ -83,13 +83,13 @@ def compute_optimistic_timing(
     """
     tasks = {t.task_id: t for t in workload.tasks}
 
-    # Build compute-order successors: task_id -> set of successor task ids
-    compute_successors: dict[int, set[int]] = {}
+    # Build compute-order chain: each task has at most one successor and one predecessor
+    compute_successors: dict[int, int] = {}
+    compute_predecessors: dict[int, int] = {}
     for node, tids in execution_plan.compute_order.items():
         for i in range(len(tids) - 1):
-            pred = tids[i]
-            succ = tids[i + 1]
-            compute_successors.setdefault(pred, set()).add(succ)
+            compute_successors[tids[i]] = tids[i + 1]
+            compute_predecessors[tids[i + 1]] = tids[i]
 
     # Topological sort of the DAG
     visited: set[int] = set()
@@ -114,9 +114,9 @@ def compute_optimistic_timing(
 
         # Collect predecessor finish times (DAG deps + compute-order deps)
         pred_finishes = [earliest_finish[dep] for dep in task.deps if dep in earliest_finish]
-        for pred, succs in compute_successors.items():
-            if tid in succs and pred in earliest_finish:
-                pred_finishes.append(earliest_finish[pred])
+        pred = compute_predecessors.get(tid)
+        if pred is not None and pred in earliest_finish:
+            pred_finishes.append(earliest_finish[pred])
 
         start = max(pred_finishes) if pred_finishes else 0
 

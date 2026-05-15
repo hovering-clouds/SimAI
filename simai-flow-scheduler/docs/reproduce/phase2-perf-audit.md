@@ -111,6 +111,8 @@ count = sum(
 
 `PuppeteerAnalyzer.analyze()` 在 step 3（最短路径 TTE）和 step 5（重算 TTE with 贪心路由）中各调用一次 `compute_tte`，每次内部都调用 `compute_optimistic_timing`。拓扑排序和 DAG 结构在两次调用间不变，可裁剪为一次。
 
+PS: 两次调用传的路由表不一样，没有重复执行
+
 ---
 
 ### 3.2 child duration 未缓存
@@ -143,17 +145,17 @@ my_w = next((w for fid, w in flows_on_link if fid == tid), 0.0)
 
 ## 性能问题全景
 
-| ID | 文件 | 复杂度 | 触发频次 | 瓶颈类型 |
-|----|------|--------|----------|----------|
-| 1.1 | routing.py | O(F × L × k × I) | 每次 analyst | 线性 interval 扫描 → 映射聚合 |
-| 1.2 | routing.py | O(F × BFS) | 每次 analyst | 重复 BFS → (src,dst) 缓存 |
-| 2.1 | tte.py | O(N × N_compute) | 每次 TTE 计算 | 缺失反向索引 |
-| 2.2 | routing.py | O(L) per BFS step | 每次 analyst | 不可变路径 → 回溯指针 |
-| 2.3 | tte_aware_allocator.py | O(A² × L) | 每轮调度 | 缺失 link 索引 |
-| 3.1 | strategy.py | 2× 冗余 | 每次 analyst | 缓存不变结果 |
-| 3.2 | tte.py | O(L × children) | 每次 TTE 计算 | 缺失缓存 |
-| 3.3 | routing.py | 2× 计算 | 每次 analyst | 变量复用 |
-| 3.4 | tte_aware_allocator.py | O(link_flows) per flow | 每轮调度 | 数据结构不当 |
+| ID  | 文件                   | 复杂度                 | 触发频次      | 瓶颈类型                       |
+| --- | ---------------------- | ---------------------- | ------------- | ------------------------------ |
+| 1.1 | routing.py             | O(F × L × k × I)    | 每次 analyst  | 线性 interval 扫描 → 映射聚合 |
+| 1.2 | routing.py             | O(F × BFS)            | 每次 analyst  | 重复 BFS → (src,dst) 缓存     |
+| 2.1 | tte.py                 | O(N × N_compute)      | 每次 TTE 计算 | 缺失反向索引                   |
+| 2.2 | routing.py             | O(L) per BFS step      | 每次 analyst  | 不可变路径 → 回溯指针         |
+| 2.3 | tte_aware_allocator.py | O(A² × L)            | 每轮调度      | 缺失 link 索引                 |
+| 3.1 | strategy.py            | 2× 冗余               | 每次 analyst  | 缓存不变结果                   |
+| 3.2 | tte.py                 | O(L × children)       | 每次 TTE 计算 | 缺失缓存                       |
+| 3.3 | routing.py             | 2× 计算               | 每次 analyst  | 变量复用                       |
+| 3.4 | tte_aware_allocator.py | O(link_flows) per flow | 每轮调度      | 数据结构不当                   |
 
 > **Legend**: F=flow 数, N=总 task 数, N_compute=compute task 数, L=路径长度, k=候选路径数, I=每个 link 上累积的 interval 数, A=活跃 flow 数
 

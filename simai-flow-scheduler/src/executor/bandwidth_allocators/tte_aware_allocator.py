@@ -19,7 +19,6 @@ class TteAwareAllocator(BandwidthAllocator):
     Args:
         tte_info: Map of flow task_id -> TTEInfo
         mode: Allocation mode ("weighted" or "strict_priority")
-        min_background_share: Minimum fraction of link capacity for background flows
         epsilon: Small constant to avoid division by zero in weight calculation
     """
 
@@ -27,12 +26,10 @@ class TteAwareAllocator(BandwidthAllocator):
         self,
         tte_info: dict[int, TTEInfo],
         mode: str = "weighted",
-        min_background_share: float = 0.05,
         epsilon: float = 1.0,
     ):
         self.tte_info = tte_info
         self.mode = mode
-        self.min_background_share = min_background_share
         self.epsilon = epsilon
 
     def allocate(
@@ -75,21 +72,21 @@ class TteAwareAllocator(BandwidthAllocator):
         topology: NetworkTopology,
     ) -> dict[int, float]:
         """Weighted fair sharing: bandwidth proportional to 1/TTE."""
-        # Build per-link flow lists with weights
-        link_flows: dict[tuple[int, int], list[tuple[int, float]]] = {}
+        # Build per-link total weight (only need the sum, not per-flow lists)
+        link_total_weight: dict[tuple[int, int], float] = {}
 
         for flow in active_flows:
-            tid = flow.task_id
-            weight = self._get_weight(tid)
+            weight = self._get_weight(flow.task_id)
             path = flow.path
             for i in range(len(path) - 1):
                 link = (path[i], path[i + 1])
-                link_flows.setdefault(link, []).append((tid, weight))
+                link_total_weight[link] = link_total_weight.get(link, 0.0) + weight
 
         # Compute per-flow allocation as bottleneck across path links
         flow_alloc: dict[int, float] = {}
         for flow in active_flows:
             tid = flow.task_id
+            my_w = self._get_weight(tid)
             min_alloc = float("inf")
             path = flow.path
             for i in range(len(path) - 1):
@@ -97,33 +94,13 @@ class TteAwareAllocator(BandwidthAllocator):
                 link_obj = topology.get_link(link[0], link[1])
                 if link_obj is None:
                     continue
-                cap = link_obj.bandwidth_gbps
-                flows_on_link = link_flows.get(link, [])
-                total_w = sum(w for _, w in flows_on_link)
+                total_w = link_total_weight.get(link, 0.0)
                 if total_w > 0:
-                    my_w = next((w for fid, w in flows_on_link if fid == tid), 0.0)
-                    alloc = cap * my_w / total_w
+                    alloc = link_obj.bandwidth_gbps * my_w / total_w
                     min_alloc = min(min_alloc, alloc)
             flow_alloc[tid] = min_alloc if min_alloc != float("inf") else 0.0
 
-        # Apply minimum background share
-        if self.min_background_share > 0:
-            for flow in active_flows:
-                tid = flow.task_id
-                info = self.tte_info.get(tid)
-                if info and info.priority_class == "background":
-                    current = flow_alloc.get(tid, 0.0)
-                    # Find minimum bottleneck capacity along path for min share
-                    path = flow.path
-                    for i in range(len(path) - 1):
-                        link = (path[i], path[i + 1])
-                        link_obj = topology.get_link(link[0], link[1])
-                        if link_obj is not None:
-                            min_share = link_obj.bandwidth_gbps * self.min_background_share
-                            current = max(current, min_share)
-                    flow_alloc[tid] = current
-
-        return {flow.task_id: flow_alloc.get(flow.task_id, 0.0) for flow in active_flows}
+        return flow_alloc
 
     def _allocate_strict_priority(
         self,
@@ -137,6 +114,17 @@ class TteAwareAllocator(BandwidthAllocator):
             tid = flow.task_id
             info = self.tte_info.get(tid, TTEInfo(tid, float("inf"), 0, "background"))
             groups[info.priority_class].append(flow)
+
+        # Pre-build per-tier link→flow mapping to avoid O(A) re-counting per link
+        tier_link_flows: dict[str, dict[tuple[int, int], list]] = {}
+        for priority, group in groups.items():
+            link_map: dict[tuple[int, int], list] = {}
+            for flow in group:
+                path = flow.path
+                for i in range(len(path) - 1):
+                    link = (path[i], path[i + 1])
+                    link_map.setdefault(link, []).append(flow)
+            tier_link_flows[priority] = link_map
 
         # Track remaining capacity per link
         link_rem: dict[tuple[int, int], float] = {}
@@ -155,6 +143,8 @@ class TteAwareAllocator(BandwidthAllocator):
             if not group:
                 continue
 
+            link_map = tier_link_flows[priority]
+
             # Fair share within this priority tier using remaining capacity
             for flow in group:
                 tid = flow.task_id
@@ -163,13 +153,7 @@ class TteAwareAllocator(BandwidthAllocator):
                 for i in range(len(path) - 1):
                     link = (path[i], path[i + 1])
                     if link in link_rem and link_rem[link] > 0:
-                        count = sum(
-                            1 for f in group
-                            if any(
-                                (f.path[j], f.path[j + 1]) == link
-                                for j in range(len(f.path) - 1)
-                            )
-                        )
+                        count = len(link_map.get(link, []))
                         if count > 0:
                             alloc = link_rem[link] / count
                             min_alloc = min(min_alloc, alloc)

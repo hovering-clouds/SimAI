@@ -82,8 +82,13 @@ def compute_greedy_routes(
     """
     route_table = RouteTable()
 
-    # Track planned link activity: link -> list of (start_us, finish_us)
-    link_intervals: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    # Sliding-window active-flow tracking per link (amortized O(1) per check).
+    # Since flows are sorted by start time, we only need to track finish times —
+    # intervals with finish <= current start are automatically expired.
+    link_active: dict[tuple[int, int], deque] = {}
+
+    # (src, dst) -> path list cache — many flows share the same endpoints
+    path_cache: dict[tuple[int, int], list[list[int]]] = {}
 
     # Collect flow tasks and sort by optimistic start time
     flow_entries: list[tuple] = []
@@ -100,7 +105,11 @@ def compute_greedy_routes(
     for _start_us, task in flow_entries:
         start_us, finish_us = flow_timing.get(task.task_id, (0, 0))
 
-        candidates = k_shortest_paths(topology, task.src, task.dst, k)
+        # Cache k_shortest_paths per (src, dst) — most flows share endpoints
+        key = (task.src, task.dst)
+        if key not in path_cache:
+            path_cache[key] = k_shortest_paths(topology, task.src, task.dst, k)
+        candidates = path_cache[key]
         if not candidates:
             raise ValueError(
                 f"No path from node {task.src} to {task.dst} for flow task {task.task_id}"
@@ -115,10 +124,13 @@ def compute_greedy_routes(
             links = [(path[i], path[i + 1]) for i in range(len(path) - 1)]
 
             for link in links:
+                dq = link_active.get(link)
                 active_count = 0
-                for (l_start, l_finish) in link_intervals.get(link, []):
-                    if start_us < l_finish and l_start < finish_us:
-                        active_count += 1
+                if dq is not None:
+                    # Expire finished intervals (finish <= start_us)
+                    while dq and dq[0] <= start_us:
+                        dq.popleft()
+                    active_count = len(dq)
                 max_active = max(max_active, active_count)
                 total_active += active_count
 
@@ -130,11 +142,11 @@ def compute_greedy_routes(
 
         route_table.paths[task.task_id] = best_path
 
-        # Update planned link activity
+        # Record link activity for the selected path
         links = [(best_path[i], best_path[i + 1]) for i in range(len(best_path) - 1)]
         for link in links:
-            if link not in link_intervals:
-                link_intervals[link] = []
-            link_intervals[link].append((start_us, finish_us))
+            if link not in link_active:
+                link_active[link] = deque()
+            link_active[link].append(finish_us)
 
     return route_table
