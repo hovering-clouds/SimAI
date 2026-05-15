@@ -19,10 +19,11 @@ from dataclasses import dataclass
 from typing import Callable
 
 from ...workload_format.schema import P2PWorkload, Task, TaskType
-from .routing_hints import RoutingHints
+from .routing import RouteTable
+from .topology_loader import NetworkTopology
 
 CriticalPathStrategy = Callable[
-    [P2PWorkload, RoutingHints],
+    [P2PWorkload, RouteTable, NetworkTopology],
     "CriticalPathInfo",
 ]
 
@@ -57,16 +58,18 @@ class CriticalPathInfo:
 
 def analyze_critical_path(
     workload: P2PWorkload,
-    routing_hints: RoutingHints,
+    route_table: RouteTable,
+    topology: NetworkTopology,
     analysis_strategy: CriticalPathStrategy | None = None,
 ) -> CriticalPathInfo:
     strategy = analysis_strategy or analyze_cpm
-    return strategy(workload, routing_hints)
+    return strategy(workload, route_table, topology)
 
 
 def analyze_cpm(
     workload: P2PWorkload,
-    routing_hints: RoutingHints,
+    route_table: RouteTable,
+    topology: NetworkTopology,
 ) -> CriticalPathInfo:
     tasks = workload.tasks
 
@@ -89,7 +92,7 @@ def analyze_cpm(
             else max(earliest_finish[dep] for dep in task.deps)
         )
         earliest_finish[task.task_id] = (
-            earliest_start[task.task_id] + _estimate_duration(task, routing_hints)
+            earliest_start[task.task_id] + _estimate_duration(task, route_table, topology)
         )
 
     makespan = max(earliest_finish.values())
@@ -107,7 +110,7 @@ def analyze_cpm(
             else min(latest_start[d] for d in dependents[task.task_id])
         )
         latest_start[task.task_id] = (
-            latest_finish[task.task_id] - _estimate_duration(task, routing_hints)
+            latest_finish[task.task_id] - _estimate_duration(task, route_table, topology)
         )
 
     task_timings: dict[int, TaskTimingInfo] = {}
@@ -134,14 +137,14 @@ def analyze_cpm(
     )
 
 
-def _estimate_duration(task: Task, routing_hints: RoutingHints) -> int:
+def _estimate_duration(task: Task, route_table: RouteTable, topology: NetworkTopology) -> int:
     if not task.is_flow():
         return task.duration_us or 0
 
     if task.src is None or task.dst is None:
         return 0
 
-    path = routing_hints.get_path(task.src, task.dst)
+    path = route_table.get_path(task)
     if len(path) < 2:
         return 0
 
@@ -149,7 +152,6 @@ def _estimate_duration(task: Task, routing_hints: RoutingHints) -> int:
     if size_bits == 0:
         return 0
 
-    topology = routing_hints.topology
     bottleneck_bw_gbps = float("inf")
     total_latency_us = 0.0
 

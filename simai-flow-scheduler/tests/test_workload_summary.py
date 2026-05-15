@@ -9,7 +9,7 @@ import pytest
 
 from src.static_analysis.passes.contention_analysis import find_contention_groups
 from src.static_analysis.passes.critical_path import analyze_critical_path
-from src.static_analysis.passes.routing_hints import compute_routing_hints
+from src.static_analysis.passes.routing import BfsStrategy
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.static_analysis.passes.workload_summary import WorkloadSummary, compute_workload_summary
 from src.workload_format.schema import (
@@ -63,9 +63,9 @@ def _make_star_topo(bw=400.0, lat=0.5):
 
 
 def _analyze(wl, topo):
-    hints = compute_routing_hints(topo, wl)
-    cp = analyze_critical_path(wl, hints)
-    cg = find_contention_groups(wl, hints, cp)
+    route_table = BfsStrategy().compute_routes(wl, topo)
+    cp = analyze_critical_path(wl, route_table, topo)
+    cg = find_contention_groups(wl, route_table, topo, cp)
     return compute_workload_summary(wl, cp, cg)
 
 
@@ -80,9 +80,9 @@ class TestComputeWorkloadSummary:
     def test_empty_workload(self):
         topo = _make_star_topo()
         wl = P2PWorkload(version="1.0", meta=Meta(num_jobs=0, num_nodes=0))
-        hints = compute_routing_hints(topo, wl)
-        cp = analyze_critical_path(wl, hints)
-        cg = find_contention_groups(wl, hints, cp)
+        route_table = BfsStrategy().compute_routes(wl, topo)
+        cp = analyze_critical_path(wl, route_table, topo)
+        cg = find_contention_groups(wl, route_table, topo, cp)
         summary = compute_workload_summary(wl, cp, cg)
 
         assert summary.total_tasks == 0

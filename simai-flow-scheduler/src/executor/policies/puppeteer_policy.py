@@ -10,7 +10,7 @@ from .base_policy import SchedulingPolicy
 from ..bandwidth_allocators.tte_aware_allocator import TteAwareAllocator
 from ..runtime import ActiveFlow
 from ...static_analysis.passes.puppeteer_coordination import ResourceDependencyTable
-from ...static_analysis.passes.puppeteer_routing import RouteTable
+from ...static_analysis.passes.routing import RouteTable
 from ...static_analysis.passes.puppeteer_tte import TTEInfo
 from ...static_analysis.passes.task_serializer import ExecutionPlan
 from ...static_analysis.passes.topology_loader import NetworkTopology
@@ -119,7 +119,7 @@ class PuppeteerSchedulingPolicy(SchedulingPolicy):
 
     def get_flow_path(self, task: Task) -> list[int]:
         try:
-            return self.route_table.get_path(task.task_id)
+            return self.route_table.get_path(task)
         except KeyError:
             raise KeyError(
                 f"No route for flow task {task.task_id} "
@@ -133,7 +133,7 @@ class PuppeteerSchedulingPolicy(SchedulingPolicy):
         active_flows: list[ActiveFlow],
     ) -> dict[int, float]:
         return self.allocator.allocate(
-            active_flows, self._topology, None, current_time,
+            active_flows, self._topology, current_time,
         )
 
     def on_task_emitted(self, current_time: int, task: Task) -> None:

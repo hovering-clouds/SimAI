@@ -9,7 +9,7 @@ import pytest
 
 from src.static_analysis.passes.critical_path import analyze_critical_path, CriticalPathInfo, TaskTimingInfo
 from src.static_analysis.passes.node_view import NodeLocalView, build_node_views
-from src.static_analysis.passes.routing_hints import compute_routing_hints
+from src.static_analysis.passes.routing import BfsStrategy
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
@@ -62,8 +62,8 @@ def _make_star_topo(bw=400.0, lat=0.5):
 
 
 def _analyze(wl, topo):
-    hints = compute_routing_hints(topo, wl)
-    cp = analyze_critical_path(wl, hints)
+    route_table = BfsStrategy().compute_routes(wl, topo)
+    cp = analyze_critical_path(wl, route_table, topo)
     return build_node_views(wl, cp)
 
 
@@ -184,8 +184,8 @@ class TestBuildNodeViews:
         f0 = _make_flow(1, src=0, dst=1, size_bytes=1024, deps=[0])
         wl = _make_workload([c0, f0])
 
-        hints = compute_routing_hints(topo, wl)
-        cp = analyze_critical_path(wl, hints)
+        route_table = BfsStrategy().compute_routes(wl, topo)
+        cp = analyze_critical_path(wl, route_table, topo)
         views = build_node_views(wl, cp)
 
         # Receiver gets data at flow finish time, not start time

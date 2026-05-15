@@ -7,7 +7,7 @@ logic is intentionally omitted.
 from dataclasses import dataclass, field
 
 from ...workload_format.schema import P2PWorkload
-from .puppeteer_routing import RouteTable
+from .routing import RouteTable
 from .puppeteer_tte import TTEInfo
 
 

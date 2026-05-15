@@ -8,7 +8,7 @@ from src.static_analysis.passes.puppeteer_coordination import (
     ResourceDependencyTable,
     compute_resource_dependency,
 )
-from src.static_analysis.passes.puppeteer_routing import RouteTable
+from src.static_analysis.passes.routing import GreedyRouteTable
 from src.static_analysis.passes.puppeteer_tte import TTEInfo
 from src.workload_format.schema import (
     CommType,
@@ -72,14 +72,14 @@ class TestComputeResourceDependency:
 
     def test_returns_empty_by_default(self):
         dep = compute_resource_dependency(
-            _make_workload([]), RouteTable(), {},
+            _make_workload([]), GreedyRouteTable(), {},
         )
         assert dep.peers == {}
         assert dep.groups == {}
 
     def test_empty_with_data(self):
         """Even with real inputs, stub returns empty."""
-        route_table = RouteTable(paths={0: [0, 10, 1]})
+        route_table = GreedyRouteTable(paths={0: [0, 10, 1]})
         wl = _make_workload([
             _make_flow(0, src=0, dst=1, size_bytes=1024),
         ])

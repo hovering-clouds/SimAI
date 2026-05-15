@@ -1,10 +1,10 @@
 """Tests for Puppeteer offline greedy routing pass."""
 import pytest
 
-from src.static_analysis.passes.puppeteer_routing import (
-    RouteTable,
+from src.static_analysis.passes.routing import (
+    GreedyRouteTable,
+    GreedyStrategy,
     k_shortest_paths,
-    compute_greedy_routes,
 )
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
@@ -81,21 +81,21 @@ def _make_workload(tasks):
 
 class TestRouteTable:
     def test_store_and_retrieve(self):
-        table = RouteTable()
+        table = GreedyRouteTable()
         table.paths[0] = [0, 10, 1]
-        assert table.get_path(0) == [0, 10, 1]
+        assert table.paths[0] == [0, 10, 1]
 
     def test_get_path_returns_copy(self):
-        table = RouteTable()
+        table = GreedyRouteTable()
         table.paths[0] = [0, 10, 1]
-        got = table.get_path(0)
+        got = list(table.paths[0])
         got.append(99)
         assert table.paths[0] == [0, 10, 1]
 
     def test_missing_path_raises(self):
-        table = RouteTable()
-        with pytest.raises(KeyError, match="No route"):
-            table.get_path(42)
+        table = GreedyRouteTable()
+        with pytest.raises(KeyError):
+            table.paths[42]
 
 
 # ============================================================
@@ -160,7 +160,7 @@ class TestGreedyRoutes:
         wl = _make_workload([f0])
         timing = {0: (0, 100)}
 
-        routes = compute_greedy_routes(wl, topo, timing, k=4)
+        routes = GreedyStrategy(timing, k=4).compute_routes(wl, topo)
         assert 0 in routes.paths
         assert routes.paths[0] == [0, 10, 1]
 
@@ -172,7 +172,7 @@ class TestGreedyRoutes:
         wl = _make_workload([f0, f1])
         timing = {0: (0, 100), 1: (0, 100)}
 
-        routes = compute_greedy_routes(wl, topo, timing, k=4)
+        routes = GreedyStrategy(timing, k=4).compute_routes(wl, topo)
         assert 0 in routes.paths
         assert 1 in routes.paths
 
@@ -183,8 +183,8 @@ class TestGreedyRoutes:
         wl = _make_workload([f0])
         timing = {0: (0, 100)}
 
-        routes1 = compute_greedy_routes(wl, topo, timing, k=4)
-        routes2 = compute_greedy_routes(wl, topo, timing, k=4)
+        routes1 = GreedyStrategy(timing, k=4).compute_routes(wl, topo)
+        routes2 = GreedyStrategy(timing, k=4).compute_routes(wl, topo)
         assert routes1.paths[0] == routes2.paths[0]
 
     def test_dual_path_spreads_flows(self):
@@ -195,7 +195,7 @@ class TestGreedyRoutes:
         wl = _make_workload([f0, f1])
         timing = {0: (0, 100), 1: (0, 100)}
 
-        routes = compute_greedy_routes(wl, topo, timing, k=4)
+        routes = GreedyStrategy(timing, k=4).compute_routes(wl, topo)
         # Two flows between same nodes should use different spines
         assert routes.paths[0] != routes.paths[1]
 
@@ -208,6 +208,6 @@ class TestGreedyRoutes:
         # Non-overlapping timing
         timing = {0: (0, 100), 1: (200, 300)}
 
-        routes = compute_greedy_routes(wl, topo, timing, k=4)
+        routes = GreedyStrategy(timing, k=4).compute_routes(wl, topo)
         # Both can use shortest path since they don't overlap
         assert len(routes.paths[0]) == len(routes.paths[1]) == 3

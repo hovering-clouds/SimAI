@@ -14,9 +14,8 @@ from ..passes.puppeteer_coordination import (
     ResourceDependencyTable,
     compute_resource_dependency,
 )
-from ..passes.puppeteer_routing import RouteTable, compute_greedy_routes
+from ..passes.routing import GreedyRouteTable, GreedyStrategy, BfsStrategy
 from ..passes.puppeteer_tte import TTEInfo, FlowTiming, compute_tte
-from ..passes.routing_hints import compute_routing_hints
 from ..passes.task_serializer import ExecutionPlan
 from ..passes.topology_loader import NetworkTopology
 from ...workload_format.schema import P2PWorkload
@@ -28,7 +27,7 @@ class PuppeteerAnalysisResult:
 
     Contains all precomputed tables needed by PuppeteerSchedulingPolicy.
     """
-    route_table: RouteTable
+    route_table: GreedyRouteTable
     tte_info: dict[int, TTEInfo]
     flow_timing: dict[int, FlowTiming]
     resource_dependency: ResourceDependencyTable
@@ -75,11 +74,11 @@ class PuppeteerAnalyzer:
         execution_plan = serializer.serialize(workload)
 
         # Step 2: Initial routing hints (shortest paths)
-        routing_hints = compute_routing_hints(self.topology, workload)
+        route_table = BfsStrategy().compute_routes(workload, self.topology)
 
         # Step 3: TTE with shortest paths
         tte_info, flow_timing = compute_tte(
-            workload, routing_hints, execution_plan,
+            workload, route_table, self.topology, execution_plan,
             route_paths=None,
             small_threshold_us=self.tte_threshold_us,
         )
@@ -89,14 +88,14 @@ class PuppeteerAnalyzer:
             ft.task_id: (ft.start_time_us, ft.finish_time_us)
             for ft in flow_timing.values()
         }
-        route_table = compute_greedy_routes(
-            workload, self.topology, timing_dict, k=self.k_paths,
+        route_table = GreedyStrategy(timing_dict, k=self.k_paths).compute_routes(
+            workload, self.topology,
         )
 
         # Step 5: Recompute TTE with greedy routes (if enabled)
         if self.recompute_tte:
             tte_info, flow_timing = compute_tte(
-                workload, routing_hints, execution_plan,
+                workload, route_table, self.topology, execution_plan,
                 route_paths=route_table.paths,
                 small_threshold_us=self.tte_threshold_us,
             )

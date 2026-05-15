@@ -10,7 +10,7 @@ Key design:
 - Sweep line algorithm computes peak concurrency per link
 
 Dependencies:
-- Task 1 (RoutingHints): provides paths through topology
+- Task 1 (RouteTable): provides paths through topology
 - Task 2 (CriticalPathInfo): provides ASAP timing for each flow
 """
 
@@ -18,7 +18,8 @@ from dataclasses import dataclass, field
 
 from ...workload_format.schema import P2PWorkload
 from .critical_path import CriticalPathInfo
-from .routing_hints import RoutingHints
+from .routing import RouteTable
+from .topology_loader import NetworkTopology
 
 
 @dataclass
@@ -103,10 +104,10 @@ class LinkContentionGroup:
 
 def find_contention_groups(
     workload: P2PWorkload,
-    routing_hints: RoutingHints,
+    route_table: RouteTable,
+    topology: NetworkTopology,
     critical_path_info: CriticalPathInfo,
 ) -> dict[tuple[int, int], LinkContentionGroup]:
-    topology = routing_hints.topology
     groups: dict[tuple[int, int], LinkContentionGroup] = {}
 
     for task in workload.tasks:
@@ -124,7 +125,7 @@ def find_contention_groups(
         timing = critical_path_info.task_timings.get(task.task_id)
         flow_start_time = timing.earliest_start_us if timing else 0
 
-        path = routing_hints.get_path(task.src, task.dst)
+        path = route_table.get_path(task)
         if len(path) < 2:
             continue
 

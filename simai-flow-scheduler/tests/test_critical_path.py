@@ -17,7 +17,7 @@ from src.static_analysis.passes.critical_path import (
     analyze_cpm,
     analyze_critical_path,
 )
-from src.static_analysis.passes.routing_hints import RoutingHints, compute_routing_hints
+from src.static_analysis.passes.routing import BfsStrategy, BfsRouteTable
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
@@ -99,27 +99,25 @@ class TestEstimateDuration:
     def test_compute_task_duration(self):
         """Compute task returns its duration_us."""
         topo = _make_simple_topo()
-        hints = RoutingHints(topology=topo)
+        route_table = BfsRouteTable(topo)
         task = _make_compute_task(0, duration_us=100)
-        assert _estimate_duration(task, hints) == 100
+        assert _estimate_duration(task, route_table, topo) == 100
 
     def test_compute_task_no_duration(self):
         """Compute task without duration_us returns 0."""
         topo = _make_simple_topo()
-        hints = RoutingHints(topology=topo)
+        route_table = BfsRouteTable(topo)
         task = Task(task_id=0, job_id=0, type=TaskType.COMPUTE, node=0)
-        assert _estimate_duration(task, hints) == 0
+        assert _estimate_duration(task, route_table, topo) == 0
 
     def test_flow_direct_link(self):
         """Flow on direct link: duration = tx_time + latency."""
         topo = _make_simple_topo()
-        hints = RoutingHints(topology=topo)
-        # 1 byte = 8 bits, 400Gbps → tx = 8 / (400e9) * 1e6 = 0.00002 us
-        # + 0.5 us latency → total ~0.5 us, int(0.50002) = 0
-        # Use larger size: 50 MB = 50*1024*1024 bytes
         size = 50 * 1024 * 1024  # 50 MiB
         task = _make_flow_task(0, src=0, dst=1, size_bytes=size)
-        dur = _estimate_duration(task, hints)
+        wl = _make_workload([task])
+        route_table = BfsStrategy().compute_routes(wl, topo)
+        dur = _estimate_duration(task, route_table, topo)
         # tx = 50*1024*1024*8 / (400e9) * 1e6 = ~1048.58 us
         # + 0.5 us latency
         assert dur == pytest.approx(1049, abs=2)
@@ -127,11 +125,11 @@ class TestEstimateDuration:
     def test_flow_two_hops(self):
         """Flow through switch: bottleneck is min bandwidth, latency is sum."""
         topo = _make_star_topo()
-        hints = RoutingHints(topology=topo)
-        # Path 0 → 10 → 1, both links 400Gbps, 0.5us each
         size = 50 * 1024 * 1024
         task = _make_flow_task(0, src=0, dst=1, size_bytes=size)
-        dur = _estimate_duration(task, hints)
+        wl = _make_workload([task])
+        route_table = BfsStrategy().compute_routes(wl, topo)
+        dur = _estimate_duration(task, route_table, topo)
         # tx = same as direct (bottleneck = 400Gbps)
         # latency = 0.5 + 0.5 = 1.0 us
         # total ≈ 1048.58 + 1.0 ≈ 1050
@@ -140,16 +138,17 @@ class TestEstimateDuration:
     def test_flow_zero_size(self):
         """Flow with zero size_bytes returns 0."""
         topo = _make_simple_topo()
-        hints = RoutingHints(topology=topo)
         task = _make_flow_task(0, src=0, dst=1, size_bytes=0)
-        assert _estimate_duration(task, hints) == 0
+        wl = _make_workload([task])
+        route_table = BfsStrategy().compute_routes(wl, topo)
+        assert _estimate_duration(task, route_table, topo) == 0
 
     def test_flow_none_src(self):
         """Flow with src=None returns 0."""
         topo = _make_simple_topo()
-        hints = RoutingHints(topology=topo)
+        route_table = BfsRouteTable(topo)
         task = Task(task_id=0, job_id=0, type=TaskType.FLOW, dst=1, size_bytes=1000)
-        assert _estimate_duration(task, hints) == 0
+        assert _estimate_duration(task, route_table, topo) == 0
 
 
 # ============================================================
@@ -202,8 +201,8 @@ class TestAnalyzeCriticalPath:
         """Empty workload returns empty analysis."""
         topo = _make_simple_topo()
         wl = P2PWorkload(version="1.0", meta=Meta(num_jobs=0, num_nodes=0))
-        hints = compute_routing_hints(topo, wl)
-        result = analyze_critical_path(wl, hints)
+        route_table = BfsStrategy().compute_routes(wl, topo)
+        result = analyze_critical_path(wl, route_table, topo)
         assert result.task_timings == {}
         assert result.critical_tasks == []
         assert result.makespan_us == 0
@@ -214,9 +213,9 @@ class TestAnalyzeCriticalPath:
         topo = _make_simple_topo()
         t0 = _make_compute_task(0, duration_us=100)
         wl = _make_workload([t0])
-        hints = RoutingHints(topology=topo)
+        route_table = BfsRouteTable(topo)
 
-        result = analyze_critical_path(wl, hints)
+        result = analyze_critical_path(wl, route_table, topo)
 
         assert result.makespan_us == 100
         assert result.critical_tasks == [0]
@@ -234,9 +233,9 @@ class TestAnalyzeCriticalPath:
         t1 = _make_compute_task(1, 200, deps=[0])
         t2 = _make_compute_task(2, 300, deps=[1])
         wl = _make_workload([t0, t1, t2])
-        hints = RoutingHints(topology=topo)
+        route_table = BfsRouteTable(topo)
 
-        result = analyze_critical_path(wl, hints)
+        result = analyze_critical_path(wl, route_table, topo)
 
         assert result.makespan_us == 600
         assert result.critical_tasks == [0, 1, 2]
@@ -260,9 +259,9 @@ class TestAnalyzeCriticalPath:
         t4 = _make_compute_task(4, 100, deps=[3])
         t5 = _make_compute_task(5, 50, deps=[1, 4])
         wl = _make_workload([t0, t1, t2, t3, t4, t5])
-        hints = RoutingHints(topology=topo)
+        route_table = BfsRouteTable(topo)
 
-        result = analyze_critical_path(wl, hints)
+        result = analyze_critical_path(wl, route_table, topo)
 
         # Critical path: 2 → 3 → 4 → 5 (300 + 50 = 350us)
         # Non-critical: 0 → 1 (200us), slack = 350 - 200 - 50 = 100us for task 1
@@ -281,9 +280,9 @@ class TestAnalyzeCriticalPath:
         t0 = _make_compute_task(0, 100)
         t1 = _make_compute_task(1, 200)
         wl = _make_workload([t0, t1])
-        hints = RoutingHints(topology=topo)
+        route_table = BfsRouteTable(topo)
 
-        result = analyze_critical_path(wl, hints)
+        result = analyze_critical_path(wl, route_table, topo)
 
         # Both start at 0, makespan = 200
         assert result.makespan_us == 200
@@ -301,9 +300,9 @@ class TestAnalyzeCriticalPath:
         t1 = _make_compute_task(1, 200, deps=[0])
         t2 = _make_compute_task(2, 50, deps=[1])
         wl = _make_workload([t0, t1, t2])
-        hints = RoutingHints(topology=topo)
+        route_table = BfsRouteTable(topo)
 
-        result = analyze_critical_path(wl, hints)
+        result = analyze_critical_path(wl, route_table, topo)
 
         max_finish = max(t.earliest_finish_us for t in result.task_timings.values())
         assert result.makespan_us == max_finish
@@ -315,9 +314,9 @@ class TestAnalyzeCriticalPath:
         t1 = _make_flow_task(1, src=0, dst=1, size_bytes=1024, deps=[0])
         t2 = _make_compute_task(2, 200, deps=[1])
         wl = _make_workload([t0, t1, t2])
-        hints = compute_routing_hints(topo, wl)
+        route_table = BfsStrategy().compute_routes(wl, topo)
 
-        result = analyze_critical_path(wl, hints)
+        result = analyze_critical_path(wl, route_table, topo)
 
         for timing in result.task_timings.values():
             assert timing.slack_us >= 0.0
@@ -329,9 +328,9 @@ class TestAnalyzeCriticalPath:
         t1 = _make_compute_task(1, 200, deps=[0])
         t2 = _make_compute_task(2, 300, deps=[1])
         wl = _make_workload([t0, t1, t2])
-        hints = RoutingHints(topology=topo)
+        route_table = BfsRouteTable(topo)
 
-        result = analyze_critical_path(wl, hints)
+        result = analyze_critical_path(wl, route_table, topo)
 
         for tid in result.critical_tasks:
             assert result.task_timings[tid].slack_us == 0.0
@@ -346,9 +345,9 @@ class TestAnalyzeCriticalPath:
         t1 = _make_flow_task(1, src=0, dst=1, size_bytes=size, deps=[0])
         t2 = _make_compute_task(2, 500, deps=[1])
         wl = _make_workload([t0, t1, t2])
-        hints = compute_routing_hints(topo, wl)
+        route_table = BfsStrategy().compute_routes(wl, topo)
 
-        result = analyze_critical_path(wl, hints)
+        result = analyze_critical_path(wl, route_table, topo)
 
         # Flow duration: tx = 1GiB * 8 / 400Gbps * 1e6 ≈ 21474.84us + 0.5us
         flow_dur = result.task_timings[1].earliest_finish_us - result.task_timings[1].earliest_start_us
@@ -367,9 +366,9 @@ class TestAnalyzeCriticalPath:
         t2 = _make_flow_task(2, src=0, dst=2, size_bytes=1024 * 1024, deps=[0])
         t3 = _make_compute_task(3, 100, deps=[1, 2])
         wl = _make_workload([t0, t1, t2, t3])
-        hints = compute_routing_hints(topo, wl)
+        route_table = BfsStrategy().compute_routes(wl, topo)
 
-        result = analyze_critical_path(wl, hints)
+        result = analyze_critical_path(wl, route_table, topo)
 
         # Both flows have same duration (same path length, same bandwidth)
         flow_dur_1 = result.task_timings[1].earliest_finish_us - result.task_timings[1].earliest_start_us
@@ -382,8 +381,8 @@ class TestAnalyzeCriticalPath:
         """Default analysis method is 'cpm'."""
         topo = _make_simple_topo()
         wl = _make_workload([_make_compute_task(0, 100)])
-        hints = RoutingHints(topology=topo)
-        result = analyze_critical_path(wl, hints)
+        route_table = BfsRouteTable(topo)
+        result = analyze_critical_path(wl, route_table, topo)
         assert result.analysis_method == "cpm"
 
     def test_get_slack_and_is_critical(self):
@@ -392,9 +391,9 @@ class TestAnalyzeCriticalPath:
         t0 = _make_compute_task(0, 100)
         t1 = _make_compute_task(1, 200, deps=[0])
         wl = _make_workload([t0, t1])
-        hints = RoutingHints(topology=topo)
+        route_table = BfsRouteTable(topo)
 
-        result = analyze_critical_path(wl, hints)
+        result = analyze_critical_path(wl, route_table, topo)
 
         assert result.get_slack(0) == 0.0
         assert result.get_slack(1) == 0.0
@@ -416,8 +415,8 @@ class TestCustomAnalysisStrategy:
         """Without strategy argument, uses CPM."""
         topo = _make_simple_topo()
         wl = _make_workload([_make_compute_task(0, 100)])
-        hints = RoutingHints(topology=topo)
-        result = analyze_critical_path(wl, hints)
+        route_table = BfsRouteTable(topo)
+        result = analyze_critical_path(wl, route_table, topo)
         assert result.analysis_method == "cpm"
 
     def test_explicit_cpm_strategy(self):
@@ -426,10 +425,10 @@ class TestCustomAnalysisStrategy:
         t0 = _make_compute_task(0, 100)
         t1 = _make_compute_task(1, 200, deps=[0])
         wl = _make_workload([t0, t1])
-        hints = RoutingHints(topology=topo)
+        route_table = BfsRouteTable(topo)
 
-        default = analyze_critical_path(wl, hints)
-        explicit = analyze_critical_path(wl, hints, analysis_strategy=analyze_cpm)
+        default = analyze_critical_path(wl, route_table, topo)
+        explicit = analyze_critical_path(wl, route_table, topo, analysis_strategy=analyze_cpm)
 
         assert default.makespan_us == explicit.makespan_us
         assert default.critical_tasks == explicit.critical_tasks
@@ -438,9 +437,9 @@ class TestCustomAnalysisStrategy:
         """Custom strategy is invoked and its result returned."""
         topo = _make_simple_topo()
         wl = _make_workload([_make_compute_task(0, 100)])
-        hints = RoutingHints(topology=topo)
+        route_table = BfsRouteTable(topo)
 
-        def mock_strategy(workload, routing_hints):
+        def mock_strategy(workload, route_table, topology):
             return CriticalPathInfo(
                 task_timings={
                     0: TaskTimingInfo(
@@ -458,6 +457,6 @@ class TestCustomAnalysisStrategy:
                 analysis_method="mock",
             )
 
-        result = analyze_critical_path(wl, hints, analysis_strategy=mock_strategy)
+        result = analyze_critical_path(wl, route_table, topo, analysis_strategy=mock_strategy)
         assert result.analysis_method == "mock"
         assert result.makespan_us == 42

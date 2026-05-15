@@ -310,10 +310,10 @@ def test_fair_share_allocator_no_contention():
         task_id=0, src=0, dst=1, size_bytes=1000, remaining_bytes=1000,
         path=[0, 1], start_time=0, last_update_time=0,
     )
-    from src.static_analysis.passes.routing_hints import RoutingHints
-    hints = RoutingHints(topology=topo)
+    from src.static_analysis.passes.routing import BfsRouteTable
+    route_table = BfsRouteTable(topo)
 
-    result = allocator.allocate([flow], topo, hints, current_time=0)
+    result = allocator.allocate([flow], topo, current_time=0)
     assert result[0] == 100.0
 
 
@@ -330,10 +330,10 @@ def test_fair_share_allocator_contention():
         task_id=1, src=0, dst=1, size_bytes=1000, remaining_bytes=1000,
         path=[0, 1], start_time=0, last_update_time=0,
     )
-    from src.static_analysis.passes.routing_hints import RoutingHints
-    hints = RoutingHints(topology=topo)
+    from src.static_analysis.passes.routing import BfsRouteTable
+    route_table = BfsRouteTable(topo)
 
-    result = allocator.allocate([flow1, flow2], topo, hints, current_time=0)
+    result = allocator.allocate([flow1, flow2], topo, current_time=0)
     assert result[0] == 50.0
     assert result[1] == 50.0
 

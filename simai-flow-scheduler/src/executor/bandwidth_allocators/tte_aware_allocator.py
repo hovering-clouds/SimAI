@@ -4,7 +4,6 @@ Provides weighted fair sharing and strict-priority allocation modes
 based on flow TTE (Time-to-Exposed) priority classification.
 """
 from .base_allocator import BandwidthAllocator
-from ...static_analysis.passes.routing_hints import RoutingHints
 from ...static_analysis.passes.topology_loader import NetworkTopology
 from ...static_analysis.passes.puppeteer_tte import TTEInfo
 
@@ -36,7 +35,6 @@ class TteAwareAllocator(BandwidthAllocator):
         self,
         active_flows: list,
         topology: NetworkTopology,
-        routing_hints: RoutingHints | None = None,
         current_time: int = 0,
     ) -> dict[int, float]:
         """Allocate bandwidth to active flows based on TTE priority.
@@ -44,7 +42,6 @@ class TteAwareAllocator(BandwidthAllocator):
         Args:
             active_flows: List of ActiveFlow objects
             topology: Network topology
-            routing_hints: Not used by this allocator (included for interface compatibility)
             current_time: Current simulation time
 
         Returns:

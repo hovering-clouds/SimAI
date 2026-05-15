@@ -5,7 +5,7 @@ see ExampleAnalyzer in example_strategy.py.
 """
 from dataclasses import dataclass, field
 
-from ..passes.routing_hints import RoutingHints, compute_routing_hints
+from ..passes.routing import RouteTable, BfsStrategy
 from ..passes.topology_loader import NetworkTopology
 from ..passes.task_serializer import CppReferenceSerializer, ExecutionPlan
 from ...workload_format.schema import P2PWorkload
@@ -19,7 +19,7 @@ class DefaultAnalysisResult:
     ExampleAnalysisResult (example_strategy.py).
     """
 
-    routing_hints: RoutingHints
+    route_table: RouteTable
     execution_plan: ExecutionPlan = field(default_factory=ExecutionPlan)
 
 
@@ -35,11 +35,11 @@ class DefaultAnalyzer:
 
     def analyze(self, workload: P2PWorkload) -> DefaultAnalysisResult:
         """Run minimized passes and return the combined result."""
-        routing_hints = compute_routing_hints(self.topology, workload)
+        route_table = BfsStrategy().compute_routes(workload, self.topology)
         serializer = CppReferenceSerializer()
         execution_plan = serializer.serialize(workload)
 
         return DefaultAnalysisResult(
-            routing_hints=routing_hints,
+            route_table=route_table,
             execution_plan=execution_plan,
         )

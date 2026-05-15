@@ -1,16 +1,20 @@
 """
 Static analysis module - pre-scheduling workload analysis infrastructure.
 
-Provides topology loading, routing hints, critical path analysis,
+Provides topology loading, routing strategies, critical path analysis,
 link contention analysis, and unified workload analysis.
 """
 
 from .passes.topology_loader import TopologyLoader, NetworkTopology, Link, NodeType
-from .passes.routing_hints import (
-    RoutingHints,
-    compute_routing_hints,
+from .passes.routing import (
+    RouteTable,
+    RouteStrategy,
+    BfsRouteTable,
+    BfsStrategy,
+    GreedyRouteTable,
+    GreedyStrategy,
     bfs_shortest_path,
-    RoutingStrategy,
+    k_shortest_paths,
 )
 from .passes.critical_path import (
     TaskTimingInfo,
@@ -52,9 +56,6 @@ from .passes.puppeteer_tte import (
     TTEInfo,
     FlowTiming,
 )
-from .passes.puppeteer_routing import (
-    RouteTable,
-)
 from .passes.puppeteer_coordination import (
     ResourceDependencyTable,
 )
@@ -72,10 +73,14 @@ __all__ = [
     "NetworkTopology",
     "Link",
     "NodeType",
-    "RoutingHints",
-    "compute_routing_hints",
+    "RouteTable",
+    "RouteStrategy",
+    "BfsRouteTable",
+    "BfsStrategy",
+    "GreedyRouteTable",
+    "GreedyStrategy",
     "bfs_shortest_path",
-    "RoutingStrategy",
+    "k_shortest_paths",
     "TaskTimingInfo",
     "CriticalPathInfo",
     "CriticalPathStrategy",
@@ -98,7 +103,6 @@ __all__ = [
     "TaskSerializer",
     "TTEInfo",
     "FlowTiming",
-    "RouteTable",
     "ResourceDependencyTable",
     "PuppeteerAnalyzer",
     "PuppeteerAnalysisResult",

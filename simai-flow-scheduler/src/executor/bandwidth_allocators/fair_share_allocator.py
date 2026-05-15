@@ -1,6 +1,5 @@
 """Fair-share bandwidth allocation — equal split per link."""
 from .base_allocator import BandwidthAllocator
-from ...static_analysis.passes.routing_hints import RoutingHints
 from ...static_analysis.passes.topology_loader import NetworkTopology
 
 
@@ -11,7 +10,6 @@ class FairShareAllocator(BandwidthAllocator):
         self,
         active_flows: list,
         topology: NetworkTopology,
-        routing_hints: RoutingHints,
         current_time: int,
     ) -> dict[int, float]:
         if not active_flows:

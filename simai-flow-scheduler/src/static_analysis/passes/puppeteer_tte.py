@@ -10,7 +10,7 @@ Formula:
 from dataclasses import dataclass
 
 from ...workload_format.schema import P2PWorkload, Task
-from .routing_hints import RoutingHints
+from .routing import RouteTable
 from .topology_loader import NetworkTopology
 from .task_serializer import ExecutionPlan
 
@@ -63,7 +63,8 @@ def _estimate_flow_duration_on_path(
 
 def compute_optimistic_timing(
     workload: P2PWorkload,
-    routing_hints: RoutingHints,
+    route_table: RouteTable,
+    topology: NetworkTopology,
     execution_plan: ExecutionPlan,
     route_paths: dict[int, list[int]] | None = None,
 ) -> dict[int, int]:
@@ -74,7 +75,8 @@ def compute_optimistic_timing(
 
     Args:
         workload: P2P workload
-        routing_hints: Routing hints for default flow duration estimation
+        route_table: Route table for default flow duration estimation
+        topology: Network topology for delay estimation
         execution_plan: Compute ordering (implicit per-node serialization edges)
         route_paths: Optional explicit paths for flow tasks (from greedy routing)
 
@@ -130,8 +132,8 @@ def compute_optimistic_timing(
                 if task.src is None or task.dst is None:
                     duration = 0
                 else:
-                    path = routing_hints.get_path(task.src, task.dst)
-            duration = _estimate_flow_duration_on_path(task, path, routing_hints.topology)
+                    path = route_table.get_path(task)
+            duration = _estimate_flow_duration_on_path(task, path, topology)
 
         earliest_finish[tid] = start + duration
 
@@ -140,7 +142,8 @@ def compute_optimistic_timing(
 
 def compute_tte(
     workload: P2PWorkload,
-    routing_hints: RoutingHints,
+    route_table: RouteTable,
+    topology: NetworkTopology,
     execution_plan: ExecutionPlan,
     route_paths: dict[int, list[int]] | None = None,
     small_threshold_us: float = 1000.0,
@@ -149,7 +152,8 @@ def compute_tte(
 
     Args:
         workload: P2P workload
-        routing_hints: Routing hints for default path estimation
+        route_table: Route table for default path estimation
+        topology: Network topology for delay estimation
         execution_plan: Compute ordering (includes implicit edges)
         route_paths: Optional explicit paths for flows (from greedy routing)
         small_threshold_us: Threshold for elastic vs background classification
@@ -161,7 +165,7 @@ def compute_tte(
     """
     # Compute optimistic timing
     earliest_finish = compute_optimistic_timing(
-        workload, routing_hints, execution_plan, route_paths,
+        workload, route_table, topology, execution_plan, route_paths,
     )
 
     tasks = {t.task_id: t for t in workload.tasks}
@@ -186,9 +190,9 @@ def compute_tte(
         if route_paths and tid in route_paths:
             path = route_paths[tid]
         else:
-            path = routing_hints.get_path(t.src, t.dst)
+            path = route_table.get_path(t)
 
-        duration = _estimate_flow_duration_on_path(t, path, routing_hints.topology)
+        duration = _estimate_flow_duration_on_path(t, path, topology)
         finish = earliest_finish.get(tid, 0)
         start = finish - duration
 
@@ -213,8 +217,8 @@ def compute_tte(
                 else:
                     child_duration = _estimate_flow_duration_on_path(
                         child_task,
-                        routing_hints.get_path(child_task.src, child_task.dst),
-                        routing_hints.topology,
+                        route_table.get_path(child_task),
+                        topology,
                     )
                 child_start = earliest_finish.get(child_id, 0) - child_duration
                 tte = min(tte, child_start - finish)

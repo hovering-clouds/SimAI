@@ -6,6 +6,7 @@ from .base_policy import SchedulingPolicy
 from ..bandwidth_allocators.fair_share_allocator import FairShareAllocator
 from ..runtime import ActiveFlow
 from ...static_analysis.strategies.default_strategy import DefaultAnalysisResult
+from ...static_analysis.passes.routing import RouteTable
 from ...static_analysis.passes.topology_loader import NetworkTopology
 from ...workload_format.schema import P2PWorkload, Task
 
@@ -21,7 +22,7 @@ class DefaultSchedulingPolicy(SchedulingPolicy):
         self,
         analysis: DefaultAnalysisResult,
     ):
-        self.routing_hints = analysis.routing_hints
+        self.route_table = analysis.route_table
         self.compute_order = analysis.execution_plan.compute_order
         self.allocator = FairShareAllocator()
         self._topology: Optional[NetworkTopology] = None
@@ -60,7 +61,7 @@ class DefaultSchedulingPolicy(SchedulingPolicy):
         return cursor < len(order) and order[cursor] == task.task_id
 
     def get_flow_path(self, task: Task) -> list[int]:
-        return self.routing_hints.get_path(task.src, task.dst)
+        return self.route_table.get_path(task)
 
     def allocate_bandwidth(
         self,
@@ -68,7 +69,7 @@ class DefaultSchedulingPolicy(SchedulingPolicy):
         active_flows: list[ActiveFlow],
     ) -> dict[int, float]:
         return self.allocator.allocate(
-            active_flows, self._topology, self.routing_hints, current_time,
+            active_flows, self._topology, current_time,
         )
 
     def on_task_emitted(self, current_time: int, task: Task) -> None:

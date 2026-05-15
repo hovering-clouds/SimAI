@@ -2,7 +2,7 @@
 
 from .task_serializer import ExecutionPlan, TaskSerializer, CppReferenceSerializer
 from .puppeteer_tte import TTEInfo, FlowTiming
-from .puppeteer_routing import RouteTable
+from .routing import RouteTable, RouteStrategy, BfsStrategy, GreedyStrategy
 from .puppeteer_coordination import ResourceDependencyTable
 
 __all__ = [
@@ -12,5 +12,8 @@ __all__ = [
     "TTEInfo",
     "FlowTiming",
     "RouteTable",
+    "RouteStrategy",
+    "BfsStrategy",
+    "GreedyStrategy",
     "ResourceDependencyTable",
 ]

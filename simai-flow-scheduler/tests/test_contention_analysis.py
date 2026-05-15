@@ -13,7 +13,7 @@ from src.static_analysis.passes.contention_analysis import (
     LinkContentionGroup,
     find_contention_groups,
 )
-from src.static_analysis.passes.routing_hints import RoutingHints, compute_routing_hints
+from src.static_analysis.passes.routing import BfsStrategy, BfsRouteTable
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
@@ -191,10 +191,10 @@ class TestFindContentionGroups:
     def test_empty_workload(self):
         topo = _make_star_topo()
         wl = P2PWorkload(version="1.0", meta=Meta(num_jobs=0, num_nodes=0))
-        hints = compute_routing_hints(topo, wl)
-        cp = analyze_critical_path(wl, hints)
+        route_table = BfsStrategy().compute_routes(wl, topo)
+        cp = analyze_critical_path(wl, route_table, topo)
 
-        groups = find_contention_groups(wl, hints, cp)
+        groups = find_contention_groups(wl, route_table, topo, cp)
         assert groups == {}
 
     def test_single_flow(self):
@@ -202,10 +202,10 @@ class TestFindContentionGroups:
         topo = _make_star_topo()
         f0 = _make_flow(0, src=0, dst=1, size_bytes=1024 * 1024)  # 1 MiB
         wl = _make_workload([f0])
-        hints = compute_routing_hints(topo, wl)
-        cp = analyze_critical_path(wl, hints)
+        route_table = BfsStrategy().compute_routes(wl, topo)
+        cp = analyze_critical_path(wl, route_table, topo)
 
-        groups = find_contention_groups(wl, hints, cp)
+        groups = find_contention_groups(wl, route_table, topo, cp)
 
         # Path: 0 → 10 → 1, so groups for (0,10) and (10,1)
         assert (0, 10) in groups
@@ -220,10 +220,10 @@ class TestFindContentionGroups:
         f0 = _make_flow(0, src=0, dst=1, size_bytes=1024 * 1024)
         f1 = _make_flow(1, src=0, dst=2, size_bytes=1024 * 1024)
         wl = _make_workload([f0, f1])
-        hints = compute_routing_hints(topo, wl)
-        cp = analyze_critical_path(wl, hints)
+        route_table = BfsStrategy().compute_routes(wl, topo)
+        cp = analyze_critical_path(wl, route_table, topo)
 
-        groups = find_contention_groups(wl, hints, cp)
+        groups = find_contention_groups(wl, route_table, topo, cp)
 
         # Link (0, 10) has 2 flows
         assert groups[(0, 10)].num_flows == 2
@@ -239,10 +239,10 @@ class TestFindContentionGroups:
         f0 = _make_flow(1, src=0, dst=1, size_bytes=1024 * 1024, deps=[0])
         f1 = _make_flow(2, src=0, dst=1, size_bytes=1024 * 1024, deps=[1])
         wl = _make_workload([c0, f0, f1])
-        hints = compute_routing_hints(topo, wl)
-        cp = analyze_critical_path(wl, hints)
+        route_table = BfsStrategy().compute_routes(wl, topo)
+        cp = analyze_critical_path(wl, route_table, topo)
 
-        groups = find_contention_groups(wl, hints, cp)
+        groups = find_contention_groups(wl, route_table, topo, cp)
 
         g = groups[(0, 10)]
         assert g.num_flows == 2
@@ -254,10 +254,10 @@ class TestFindContentionGroups:
         topo = _make_star_topo(bw=400.0, lat=10.0)  # 10us latency per hop
         f0 = _make_flow(0, src=0, dst=1, size_bytes=1024 * 1024)
         wl = _make_workload([f0])
-        hints = compute_routing_hints(topo, wl)
-        cp = analyze_critical_path(wl, hints)
+        route_table = BfsStrategy().compute_routes(wl, topo)
+        cp = analyze_critical_path(wl, route_table, topo)
 
-        groups = find_contention_groups(wl, hints, cp)
+        groups = find_contention_groups(wl, route_table, topo, cp)
 
         # Path: 0 → 10 → 1
         # Link (0,10): entry=0, exit=0+tx
@@ -273,10 +273,10 @@ class TestFindContentionGroups:
         topo = _make_star_topo()
         c0 = _make_compute(0, 100)
         wl = _make_workload([c0])
-        hints = compute_routing_hints(topo, wl)
-        cp = analyze_critical_path(wl, hints)
+        route_table = BfsStrategy().compute_routes(wl, topo)
+        cp = analyze_critical_path(wl, route_table, topo)
 
-        groups = find_contention_groups(wl, hints, cp)
+        groups = find_contention_groups(wl, route_table, topo, cp)
         assert groups == {}
 
     def test_skips_flow_zero_size(self):
@@ -284,10 +284,10 @@ class TestFindContentionGroups:
         topo = _make_star_topo()
         f0 = _make_flow(0, src=0, dst=1, size_bytes=0)
         wl = _make_workload([f0])
-        hints = compute_routing_hints(topo, wl)
-        cp = analyze_critical_path(wl, hints)
+        route_table = BfsStrategy().compute_routes(wl, topo)
+        cp = analyze_critical_path(wl, route_table, topo)
 
-        groups = find_contention_groups(wl, hints, cp)
+        groups = find_contention_groups(wl, route_table, topo, cp)
         assert groups == {}
 
     def test_contention_groups_with_critical_path_timing(self):
@@ -297,10 +297,10 @@ class TestFindContentionGroups:
         f0 = _make_flow(1, src=0, dst=1, size_bytes=1024 * 1024, deps=[0])
         f1 = _make_flow(2, src=0, dst=1, size_bytes=1024 * 1024)  # starts at 0
         wl = _make_workload([c0, f0, f1])
-        hints = compute_routing_hints(topo, wl)
-        cp = analyze_critical_path(wl, hints)
+        route_table = BfsStrategy().compute_routes(wl, topo)
+        cp = analyze_critical_path(wl, route_table, topo)
 
-        groups = find_contention_groups(wl, hints, cp)
+        groups = find_contention_groups(wl, route_table, topo, cp)
 
         g = groups[(0, 10)]
         # f1 starts at 0, f0 starts at 1000 → likely overlap depends on duration

@@ -4,7 +4,7 @@ import pytest
 from src.executor.policies.puppeteer_policy import PuppeteerSchedulingPolicy
 from src.executor.runtime import ActiveFlow
 from src.static_analysis.passes.puppeteer_coordination import ResourceDependencyTable
-from src.static_analysis.passes.puppeteer_routing import RouteTable
+from src.static_analysis.passes.routing import GreedyRouteTable
 from src.static_analysis.passes.puppeteer_tte import TTEInfo
 from src.static_analysis.passes.task_serializer import ExecutionPlan
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
@@ -55,7 +55,7 @@ def _make_compute(task_id, duration_us, node=0, deps=None):
 class TestPuppeteerSchedulingPolicy:
     def test_emit_flow_immediate_no_coordination(self):
         """Flow without coordination group is emitted immediately."""
-        route_table = RouteTable(paths={0: [0, 1]})
+        route_table = GreedyRouteTable(paths={0: [0, 1]})
         tte_info = {0: TTEInfo(task_id=0, tte_us=float("inf"), priority_score=0.0, priority_class="background")}
         resource_dep = ResourceDependencyTable()
         plan = ExecutionPlan()
@@ -70,7 +70,7 @@ class TestPuppeteerSchedulingPolicy:
 
     def test_emit_compute_in_order(self):
         """Compute tasks are emitted in the order specified by ExecutionPlan."""
-        route_table = RouteTable()
+        route_table = GreedyRouteTable()
         tte_info = {}
         resource_dep = ResourceDependencyTable()
         plan = ExecutionPlan(compute_order={0: [0, 1]})
@@ -92,7 +92,7 @@ class TestPuppeteerSchedulingPolicy:
 
     def test_coordination_delays_flow(self):
         """Flow in coordination group waits for all members to be ready."""
-        route_table = RouteTable(paths={0: [0, 1], 1: [0, 1]})
+        route_table = GreedyRouteTable(paths={0: [0, 1], 1: [0, 1]})
         tte_info = {
             0: TTEInfo(task_id=0, tte_us=0.0, priority_score=0.0, priority_class="critical"),
             1: TTEInfo(task_id=1, tte_us=0.0, priority_score=0.0, priority_class="critical"),
@@ -120,7 +120,7 @@ class TestPuppeteerSchedulingPolicy:
 
     def test_get_flow_path(self):
         """get_flow_path returns the precomputed path."""
-        route_table = RouteTable(paths={0: [0, 1]})
+        route_table = GreedyRouteTable(paths={0: [0, 1]})
         tte_info = {0: TTEInfo(task_id=0, tte_us=float("inf"), priority_score=0.0, priority_class="background")}
         resource_dep = ResourceDependencyTable()
         plan = ExecutionPlan()
@@ -134,7 +134,7 @@ class TestPuppeteerSchedulingPolicy:
 
     def test_get_flow_path_missing(self):
         """Missing route table entry raises KeyError."""
-        route_table = RouteTable()  # empty
+        route_table = GreedyRouteTable()  # empty
         tte_info = {}
         resource_dep = ResourceDependencyTable()
         plan = ExecutionPlan()
@@ -149,7 +149,7 @@ class TestPuppeteerSchedulingPolicy:
 
     def test_allocate_bandwidth_weighted(self):
         """TTE-aware weighted allocation gives more to critical flows."""
-        route_table = RouteTable(paths={0: [0, 1], 1: [0, 1]})
+        route_table = GreedyRouteTable(paths={0: [0, 1], 1: [0, 1]})
         tte_info = {
             0: TTEInfo(task_id=0, tte_us=0.0, priority_score=0.0, priority_class="critical"),
             1: TTEInfo(task_id=1, tte_us=1000.0, priority_score=0.001, priority_class="elastic"),
@@ -172,7 +172,7 @@ class TestPuppeteerSchedulingPolicy:
 
     def test_allocate_bandwidth_strict_priority(self):
         """Strict priority allocates bandwidth to critical before background."""
-        route_table = RouteTable(paths={0: [0, 1], 1: [0, 1]})
+        route_table = GreedyRouteTable(paths={0: [0, 1], 1: [0, 1]})
         tte_info = {
             0: TTEInfo(task_id=0, tte_us=0.0, priority_score=0.0, priority_class="critical"),
             1: TTEInfo(task_id=1, tte_us=float("inf"), priority_score=0.0, priority_class="background"),
@@ -196,7 +196,7 @@ class TestPuppeteerSchedulingPolicy:
 
     def test_on_task_completed_advances_cursor(self):
         """Completing a compute task advances the per-node cursor."""
-        route_table = RouteTable()
+        route_table = GreedyRouteTable()
         tte_info = {}
         resource_dep = ResourceDependencyTable()
         plan = ExecutionPlan(compute_order={0: [0, 1]})
@@ -213,7 +213,7 @@ class TestPuppeteerSchedulingPolicy:
 
     def test_compute_ordering_respected(self):
         """Policy respects compute ordering, only emitting next in sequence."""
-        route_table = RouteTable()
+        route_table = GreedyRouteTable()
         tte_info = {}
         resource_dep = ResourceDependencyTable()
         plan = ExecutionPlan(compute_order={0: [0, 1]})
@@ -231,7 +231,7 @@ class TestPuppeteerSchedulingPolicy:
 
     def test_emitted_flows_no_coordination(self):
         """All flows without coordination groups are emitted immediately."""
-        route_table = RouteTable(paths={0: [0, 1], 1: [0, 1]})
+        route_table = GreedyRouteTable(paths={0: [0, 1], 1: [0, 1]})
         tte_info = {
             0: TTEInfo(task_id=0, tte_us=float("inf"), priority_score=0.0, priority_class="background"),
             1: TTEInfo(task_id=1, tte_us=float("inf"), priority_score=0.0, priority_class="background"),

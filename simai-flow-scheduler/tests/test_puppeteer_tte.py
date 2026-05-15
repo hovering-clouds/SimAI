@@ -7,7 +7,7 @@ from src.static_analysis.passes.puppeteer_tte import (
     compute_optimistic_timing,
     compute_tte,
 )
-from src.static_analysis.passes.routing_hints import RoutingHints, compute_routing_hints
+from src.static_analysis.passes.routing import BfsStrategy, BfsRouteTable
 from src.static_analysis.passes.task_serializer import CppReferenceSerializer, ExecutionPlan
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
@@ -94,20 +94,20 @@ class TestOptimisticTiming:
     def test_empty_workload(self):
         topo = _make_star_topo()
         wl = P2PWorkload(version="1.0", meta=Meta(num_jobs=0, num_nodes=0))
-        hints = compute_routing_hints(topo, wl)
+        route_table = BfsStrategy().compute_routes(wl, topo)
         plan = _make_empty_execution_plan()
 
-        timing = compute_optimistic_timing(wl, hints, plan)
+        timing = compute_optimistic_timing(wl, route_table, topo, plan)
         assert timing == {}
 
     def test_single_compute(self):
         topo = _make_star_topo()
         c0 = _make_compute(0, 1000, node=0)
         wl = _make_workload([c0])
-        hints = compute_routing_hints(topo, wl)
+        route_table = BfsStrategy().compute_routes(wl, topo)
         plan = _make_empty_execution_plan()
 
-        timing = compute_optimistic_timing(wl, hints, plan)
+        timing = compute_optimistic_timing(wl, route_table, topo, plan)
         assert timing[0] == 1000
 
     def test_linear_chain(self):
@@ -117,10 +117,10 @@ class TestOptimisticTiming:
         c1 = _make_compute(1, 200, node=0, deps=[0])
         c2 = _make_compute(2, 300, node=0, deps=[1])
         wl = _make_workload([c0, c1, c2])
-        hints = compute_routing_hints(topo, wl)
+        route_table = BfsStrategy().compute_routes(wl, topo)
         plan = _make_empty_execution_plan()
 
-        timing = compute_optimistic_timing(wl, hints, plan)
+        timing = compute_optimistic_timing(wl, route_table, topo, plan)
         assert timing[0] == 100
         assert timing[1] == 300  # 100 + 200
         assert timing[2] == 600  # 100 + 200 + 300
@@ -133,10 +133,10 @@ class TestOptimisticTiming:
         c2 = _make_compute(2, 300, node=0, deps=[0])
         c3 = _make_compute(3, 50, node=0, deps=[1, 2])
         wl = _make_workload([c0, c1, c2, c3])
-        hints = compute_routing_hints(topo, wl)
+        route_table = BfsStrategy().compute_routes(wl, topo)
         plan = _make_empty_execution_plan()
 
-        timing = compute_optimistic_timing(wl, hints, plan)
+        timing = compute_optimistic_timing(wl, route_table, topo, plan)
         # B fin: 100+200=300, C fin: 100+300=400, D start=max(300,400)=400, D fin: 450
         assert timing[0] == 100
         assert timing[1] == 300
@@ -150,11 +150,11 @@ class TestOptimisticTiming:
         c0 = _make_compute(0, 100, node=0)
         c1 = _make_compute(1, 200, node=0)
         wl = _make_workload([c0, c1])
-        hints = compute_routing_hints(topo, wl)
+        route_table = BfsStrategy().compute_routes(wl, topo)
 
         # With serialized order 0->1
         plan = ExecutionPlan(compute_order={0: [0, 1]})
-        timing = compute_optimistic_timing(wl, hints, plan)
+        timing = compute_optimistic_timing(wl, route_table, topo, plan)
         assert timing[0] == 100
         assert timing[1] == 300  # waits for 0
 
@@ -165,10 +165,10 @@ class TestOptimisticTiming:
         f1 = _make_flow(1, src=0, dst=1, size_bytes=1024 * 1024, deps=[0])  # ~20us at 400G
         c2 = _make_compute(2, 50, node=1, deps=[1])
         wl = _make_workload([c0, f1, c2])
-        hints = compute_routing_hints(topo, wl)
+        route_table = BfsStrategy().compute_routes(wl, topo)
         plan = _make_empty_execution_plan()
 
-        timing = compute_optimistic_timing(wl, hints, plan)
+        timing = compute_optimistic_timing(wl, route_table, topo, plan)
         assert timing[0] == 100
         assert timing[2] > 150  # flow duration > 0
 
@@ -184,10 +184,10 @@ class TestComputeTTE:
         topo = _make_star_topo()
         f0 = _make_flow(0, src=0, dst=1, size_bytes=1024)
         wl = _make_workload([f0])
-        hints = compute_routing_hints(topo, wl)
+        route_table = BfsStrategy().compute_routes(wl, topo)
         plan = _make_empty_execution_plan()
 
-        tte_info, _ = compute_tte(wl, hints, plan)
+        tte_info, _ = compute_tte(wl, route_table, topo, plan)
         assert 0 in tte_info
         assert tte_info[0].tte_us == float("inf")
         assert tte_info[0].priority_class == "background"
@@ -198,10 +198,10 @@ class TestComputeTTE:
         f0 = _make_flow(0, src=0, dst=1, size_bytes=1024)
         c1 = _make_compute(1, 500, node=1, deps=[0])
         wl = _make_workload([f0, c1])
-        hints = compute_routing_hints(topo, wl)
+        route_table = BfsStrategy().compute_routes(wl, topo)
         plan = _make_empty_execution_plan()
 
-        tte_info, flow_timing = compute_tte(wl, hints, plan)
+        tte_info, flow_timing = compute_tte(wl, route_table, topo, plan)
         assert 0 in tte_info
         # TTE = child_start - flow_finish. Since flow finish pushes child start,
         # TTE should be 0 (critical)
@@ -218,10 +218,10 @@ class TestComputeTTE:
         c2 = _make_compute(2, 1000, node=0, deps=[0])  # long compute
         c3 = _make_compute(3, 100, node=1, deps=[1, 2])  # child waiting for both
         wl = _make_workload([c0, f1, c2, c3])
-        hints = compute_routing_hints(topo, wl)
+        route_table = BfsStrategy().compute_routes(wl, topo)
         plan = _make_empty_execution_plan()
 
-        tte_info, _ = compute_tte(wl, hints, plan)
+        tte_info, _ = compute_tte(wl, route_table, topo, plan)
         assert 1 in tte_info
         # TTE should be > 0 because the child must wait for the long compute too
         assert tte_info[1].tte_us > 0
@@ -235,10 +235,10 @@ class TestComputeTTE:
         c2 = _make_compute(2, 50, node=1, deps=[1])  # urgent
         c3 = _make_compute(3, 10000, node=1, deps=[1, 0])  # also waits for c0, starts later
         wl = _make_workload([c0, f1, c2, c3])
-        hints = compute_routing_hints(topo, wl)
+        route_table = BfsStrategy().compute_routes(wl, topo)
         plan = _make_empty_execution_plan()
 
-        tte_info, _ = compute_tte(wl, hints, plan)
+        tte_info, _ = compute_tte(wl, route_table, topo, plan)
         assert 1 in tte_info
         # TTE should reflect the more urgent child
         assert tte_info[1].tte_us <= 0  # at least one child is critical
@@ -249,10 +249,10 @@ class TestComputeTTE:
         f0 = _make_flow(0, src=0, dst=1, size_bytes=1024)
         c1 = _make_compute(1, 100, node=1, deps=[0])
         wl = _make_workload([f0, c1])
-        hints = compute_routing_hints(topo, wl)
+        route_table = BfsStrategy().compute_routes(wl, topo)
         plan = _make_empty_execution_plan()
 
-        tte_info, _ = compute_tte(wl, hints, plan)
+        tte_info, _ = compute_tte(wl, route_table, topo, plan)
         assert tte_info[0].priority_class == "critical"
         assert tte_info[0].priority_score == 0.0
 
@@ -261,10 +261,10 @@ class TestComputeTTE:
         topo = _make_star_topo()
         f0 = _make_flow(0, src=0, dst=1, size_bytes=1024)
         wl = _make_workload([f0])
-        hints = compute_routing_hints(topo, wl)
+        route_table = BfsStrategy().compute_routes(wl, topo)
         plan = _make_empty_execution_plan()
 
-        _, flow_timing = compute_tte(wl, hints, plan)
+        _, flow_timing = compute_tte(wl, route_table, topo, plan)
         assert 0 in flow_timing
         assert flow_timing[0].start_time_us >= 0
         assert flow_timing[0].finish_time_us > flow_timing[0].start_time_us

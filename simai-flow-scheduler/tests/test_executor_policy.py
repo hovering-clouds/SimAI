@@ -8,7 +8,7 @@ from src.executor.policies.default_policy import DefaultSchedulingPolicy
 from src.executor.policies.base_policy import SchedulingPolicy
 from src.executor.runtime import ActiveFlow
 from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
-from src.static_analysis.passes.routing_hints import RoutingHints, compute_routing_hints
+from src.static_analysis.passes.routing import BfsStrategy, BfsRouteTable
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
 from src.workload_format.schema import (
     CommType,
@@ -78,12 +78,12 @@ def test_default_path_matches_routing_hints():
     )
     topo = _make_2node_topology()
     analysis = DefaultAnalyzer(topo).analyze(workload)
-    hints = analysis.routing_hints
+    route_table = analysis.route_table
     policy = DefaultSchedulingPolicy(analysis)
     policy.initialize(workload, topo)
 
     task = workload.tasks[0]
-    assert policy.get_flow_path(task) == hints.get_path(0, 1)
+    assert policy.get_flow_path(task) == route_table.get_path_by_endpoints(0, 1)
     assert policy.get_flow_path(task) == [0, 1]
 
 
@@ -140,10 +140,10 @@ class HoldFirstFlowPolicy(SchedulingPolicy):
         return [t.task_id for t in ready_tasks]
 
     def get_flow_path(self, task):
-        return self.routing_hints.get_path(task.src, task.dst)
+        return self.routing_hints.get_path(task)
 
     def allocate_bandwidth(self, current_time, active_flows):
-        return FairShareAllocator().allocate(active_flows, self._topology, self.routing_hints, current_time)
+        return FairShareAllocator().allocate(active_flows, self._topology, current_time)
 
     def on_task_emitted(self, current_time, task):
         pass
@@ -166,9 +166,9 @@ def test_custom_policy_can_hold_flow():
         ],
     )
     topo = _make_2node_topology(bw_gbps=100.0, latency_us=1.0)
-    hints = compute_routing_hints(topo, workload)
+    route_table = BfsStrategy().compute_routes(workload, topo)
 
-    policy = HoldFirstFlowPolicy(hints)
+    policy = HoldFirstFlowPolicy(route_table)
     executor = AnalyticalExecutor(topo, policy)
     result = executor.execute(workload)
 
@@ -201,8 +201,8 @@ class PrecomputedPathPolicy(SchedulingPolicy):
         return self.path_map[(task.src, task.dst)]
 
     def allocate_bandwidth(self, current_time, active_flows):
-        hints = RoutingHints(topology=self._topology)
-        return FairShareAllocator().allocate(active_flows, self._topology, hints, current_time)
+        route_table = BfsRouteTable(self._topology)
+        return FairShareAllocator().allocate(active_flows, self._topology, current_time)
 
     def on_task_emitted(self, current_time, task):
         pass
@@ -288,10 +288,10 @@ class TrackingPolicy(SchedulingPolicy):
         return [t.task_id for t in ready_tasks]
 
     def get_flow_path(self, task):
-        return self.routing_hints.get_path(task.src, task.dst)
+        return self.routing_hints.get_path(task)
 
     def allocate_bandwidth(self, current_time, active_flows):
-        return FairShareAllocator().allocate(active_flows, self._topology, self.routing_hints, current_time)
+        return FairShareAllocator().allocate(active_flows, self._topology, current_time)
 
     def on_task_emitted(self, current_time, task):
         self.emitted.append(task.task_id)
@@ -315,9 +315,9 @@ def test_tracking_policy_callbacks():
         ],
     )
     topo = _make_2node_topology(bw_gbps=100.0, latency_us=1.0)
-    hints = compute_routing_hints(topo, workload)
+    route_table = BfsStrategy().compute_routes(workload, topo)
 
-    policy = TrackingPolicy(hints)
+    policy = TrackingPolicy(route_table)
     executor = AnalyticalExecutor(topo, policy)
     executor.execute(workload)
 

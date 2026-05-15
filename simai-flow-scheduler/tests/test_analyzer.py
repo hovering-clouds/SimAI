@@ -76,7 +76,7 @@ class TestExampleAnalyzer:
         result = analyzer.analyze(wl)
 
         assert isinstance(result, ExampleAnalysisResult)
-        assert result.routing_hints is not None
+        assert result.route_table is not None
         assert result.critical_path is not None
         assert result.contention_groups == {}
         assert result.node_views == {}
@@ -123,7 +123,7 @@ class TestExampleAnalyzer:
         result = analyzer.analyze(wl)
 
         # All analysis modules should have results
-        assert result.routing_hints is not None
+        assert result.route_table is not None
         assert result.critical_path.makespan_us > 1500
         assert len(result.contention_groups) > 0
         assert len(result.node_views) >= 2
@@ -140,15 +140,15 @@ class TestExampleAnalyzer:
         result = analyzer.analyze(wl)
 
         # Check all fields exist
-        assert hasattr(result, 'routing_hints')
+        assert hasattr(result, 'route_table')
         assert hasattr(result, 'critical_path')
         assert hasattr(result, 'contention_groups')
         assert hasattr(result, 'node_views')
         assert hasattr(result, 'traffic_matrix')
         assert hasattr(result, 'summary')
 
-    def test_routing_hints_used_by_critical_path(self):
-        """Critical path uses routing hints for multi-hop duration."""
+    def test_route_table_used_by_critical_path(self):
+        """Critical path uses route table for multi-hop duration."""
         topo = _make_star_topo()
         analyzer = ExampleAnalyzer(topo)
         f0 = _make_flow(0, src=0, dst=1, size_bytes=1024)
@@ -156,12 +156,12 @@ class TestExampleAnalyzer:
 
         result = analyzer.analyze(wl)
 
-        # Flow should have non-zero duration (uses routing hints for path)
+        # Flow should have non-zero duration (uses route table for path)
         timing = result.critical_path.task_timings[0]
         assert timing.earliest_finish_us > timing.earliest_start_us
 
     def test_contention_groups_use_routing_and_timing(self):
-        """Contention groups use both routing hints and critical path timing."""
+        """Contention groups use both route table and critical path timing."""
         topo = _make_star_topo()
         analyzer = ExampleAnalyzer(topo)
         f0 = _make_flow(0, src=0, dst=1, size_bytes=1024)
@@ -254,7 +254,7 @@ class TestExampleAnalyzer:
         result = analyzer.analyze(wl)
 
         # Verify all modules produced results
-        assert result.routing_hints is not None
+        assert result.route_table is not None
         assert result.critical_path.makespan_us > 300
         assert len(result.contention_groups) > 0
         assert len(result.node_views) >= 3
