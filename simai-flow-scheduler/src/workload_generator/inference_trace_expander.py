@@ -523,8 +523,9 @@ class InferenceTraceExpander:
         """Extract total number of layers from the trace or profile store."""
         if "total_layers" in trace:
             return trace["total_layers"]
-        # Fallback: count distinct layer_ids across all batches' implied profiles
-        # This is a best-effort heuristic; prefer explicit trace metadata.
+        model_config = trace.get("model_config", {})
+        if isinstance(model_config, dict) and "num_layers" in model_config:
+            return model_config["num_layers"]
         return 0
 
     # ── Profile helpers ───────────────────────────────────────────────────────
