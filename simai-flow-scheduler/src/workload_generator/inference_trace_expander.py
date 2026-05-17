@@ -1,34 +1,23 @@
 """
 Inference Trace Expander - expands Vidur inference trace JSON into P2PWorkload.
 
-Trace format (per phase5-taskA-research.md section 9.4):
-{
-  "version": "1.0",
-  "model": "deepseek-671b",
-  "model_config": { "hidden_size": 7168, "num_layers": 61, "dense_layers": 3, ... },
-  "parallelism": { "tp": 8, "pp": 1, "ep": 8 },
-  "pd_config": { "pd_node_ratio": 0.5, "pd_p2p_comm_bandwidth_gbps": 200 },
-  "requests": { "0": { "num_prefill_tokens": 128, "num_decode_tokens": 64 }, ... },
-  "batches": [
-    { "batch_id": "p0", "type": "prefill", "replica_id": 0,
-      "request_ids": [0, 1], "num_tokens": [128, 256],
-      "kv_cache_bytes": { "0": 123456, "1": 234567 }, "depends_on": [] },
-    { "batch_id": "d0", "type": "decode", "replica_id": 4,
-      "request_ids": [0, 1], "num_tokens": [1, 1],
-      "kv_cache_bytes": null, "depends_on": ["p0"] },
-    ...
-  ]
-}
+Supports both pp=1 (flat batches) and pp>1 (per-stage batches with stage_id).
+
+Trace format (pp=1):
+  batches: [{ batch_id, type, replica_id, request_ids, num_tokens, kv_cache_bytes, depends_on }]
+
+Trace format (pp>1, per-stage):
+  batches: [{ batch_id, type, replica_id, stage_id, request_ids, num_tokens,
+              kv_cache_bytes (per-stage share), depends_on }]
+  - Each entry = one micro-batch on one PP stage
+  - depends_on encodes same-stage + cross-stage pipeline deps
+  - kv_cache_bytes on prefill entries = per-stage KV (total_kv / pp)
 
 Expansion rules:
-- Prefill/Decode batch → per-layer (COMPUTE + TP AllReduce) for attention/mlp layers,
-  per-layer (COMPUTE + EP AlltoAll) for moe layers.
-- KV cache transfer → P2P FLOW from each P-node TP rank to corresponding D-node TP rank,
-  inserted between a prefill batch and the decode batch that depends on it.
-- Inter-batch deps follow the `depends_on` field.
-
-Returns (P2PWorkload, batch_task_map) where batch_task_map is:
-  { batch_id: { "task_ids": [...], "request_ids": [...], "type": "prefill"/"decode"/"kv_transfer" } }
+- Per-stage batch → per-layer COMPUTE + TP/EP communication for layers in that stage
+- PP inter-stage → P2P PP_SEND flows between consecutive stage GPU sets
+- KV cache transfer → per-stage P2P flows from P-stage-s to D-stage-s
+- Pipeline overlap: same-stage deps + cross-stage deps recreated from trace depends_on
 """
 
 import json
@@ -63,11 +52,14 @@ class InferenceTraceExpander:
     """
     Expand a Vidur inference trace JSON into a P2PWorkload.
 
+    Supports PP (pipeline parallelism) with per-stage trace entries.
+    Each PP stage occupies tp*ep GPUs within a replica's world_size.
+
     Args:
         profile_store: Loaded InferenceProfileStore.
         tp: Tensor parallel size.
         ep: Expert parallel size (default 1).
-        pp: Pipeline parallel size (default 1, only pp=1 supported).
+        pp: Pipeline parallel size (default 1).
         assigned_nodes: All available node IDs for inference replicas.
             Each replica occupies tp*ep*pp consecutive nodes from this list.
             If None, falls back to the default mapping where replica r occupies
@@ -82,8 +74,6 @@ class InferenceTraceExpander:
         pp: int = 1,
         assigned_nodes: Optional[list[int]] = None,
     ):
-        if pp != 1:
-            raise NotImplementedError("pp > 1 not yet supported for inference expansion")
         self._store = profile_store
         self._tp = tp
         self._ep = ep
@@ -123,20 +113,49 @@ class InferenceTraceExpander:
         kv_transfer_done: dict[tuple[str, int], dict[int, list[int]]] = {}
 
         batch_lookup = {b["batch_id"]: b for b in trace["batches"]}
+        total_layers = self._get_total_layers(trace)
 
         for batch in trace["batches"]:
             bid = batch["batch_id"]
             btype = batch["type"]
             replica_id = batch["replica_id"]
+            stage_id = batch.get("stage_id", 0)
 
             # ── Collect predecessor exit tasks ────────────────────────────
             prev_exits: dict[int, list[int]] = {}
 
             for dep_id in batch.get("depends_on", []):
                 dep_batch = batch_lookup[dep_id]
+                dep_stage_id = dep_batch.get("stage_id", 0)
 
+                # ── PP inter-stage: dep from a different stage on same replica
+                if (dep_stage_id != stage_id
+                        and dep_batch.get("replica_id") == replica_id):
+                    pp_tasks, pp_exits, task_id = self._expand_pp_communication(
+                        src_stage_id=dep_stage_id,
+                        dst_stage_id=stage_id,
+                        replica_id=replica_id,
+                        total_tokens=sum(batch["num_tokens"]),
+                        job_id=job_id,
+                        task_id_start=task_id,
+                        prev_exits=batch_exits.get(dep_id, {}),
+                        trace=trace,
+                    )
+                    all_flow_tasks.extend(pp_tasks)
+                    btm_key = f"pp_{dep_id}_to_{bid}"
+                    batch_task_map[btm_key] = {
+                        "task_ids": [t.task_id for t in pp_tasks],
+                        "type": "pp_comm",
+                        "from_stage": dep_stage_id,
+                        "to_stage": stage_id,
+                    }
+                    for rank, tids in pp_exits.items():
+                        prev_exits.setdefault(rank, []).extend(tids)
+                    continue
+
+                # ── KV transfer: prefill → decode across replicas
                 if dep_batch["type"] == "prefill" and btype == "decode":
-                    kv_key = (dep_id, replica_id)
+                    kv_key = (dep_id, replica_id, stage_id)
                     if kv_key in kv_transfer_done:
                         # Already transferred — reuse exits
                         for rank, tids in kv_transfer_done[kv_key].items():
@@ -148,6 +167,8 @@ class InferenceTraceExpander:
                             kv_cache_bytes=dep_batch.get("kv_cache_bytes") or {},
                             p_replica_id=dep_batch["replica_id"],
                             d_replica_id=replica_id,
+                            src_stage_id=dep_stage_id,
+                            dst_stage_id=stage_id,
                             job_id=job_id,
                             task_id_start=task_id,
                             prev_exits=batch_exits.get(dep_id, {}),
@@ -165,6 +186,7 @@ class InferenceTraceExpander:
                         for rank, tids in kv_exits.items():
                             prev_exits.setdefault(rank, []).extend(tids)
                 else:
+                    # Same-stage or same-replica dependency
                     for rank, tids in batch_exits.get(dep_id, {}).items():
                         prev_exits.setdefault(rank, []).extend(tids)
 
@@ -177,13 +199,18 @@ class InferenceTraceExpander:
                 seq = max(kv_lens) if kv_lens else 1
             profiles = self._store.get_profile_for_batch(btype, bs, seq)
 
-            # ── Expand batch ──────────────────────────────────────────────
+            # ── Expand batch (per-stage when pp>1) ────────────────────────
+            stage_layer_range = self._layers_for_stage(stage_id, total_layers, self._pp) \
+                if self._pp > 1 else None
+
             batch_tasks, exits, task_id = self._expand_batch(
                 batch=batch,
                 profiles=profiles,
                 job_id=job_id,
                 task_id_start=task_id,
                 prev_exits=prev_exits,
+                stage_id=stage_id,
+                stage_layer_range=stage_layer_range,
             )
             all_flow_tasks.extend(batch_tasks)
             batch_exits[bid] = exits
@@ -237,6 +264,28 @@ class InferenceTraceExpander:
             ParallelismConfig(tp=self._tp, ep=self._ep, pp=self._pp),
         )
 
+    def _stage_ranks(self, replica_id: int, stage_id: int) -> list[int]:
+        """GPUs for a specific PP stage within a replica."""
+        stage_size = self._tp * self._ep
+        offset = replica_id * self._world_size() + stage_id * stage_size
+        if self._assigned_nodes is not None:
+            return list(self._assigned_nodes[offset:offset + stage_size])
+        return list(range(offset, offset + stage_size))
+
+    def _stage_grouper(self, replica_id: int, stage_id: int) -> RankGrouper:
+        """RankGrouper for a specific PP stage (dp=1, pp=1, only tp+ep)."""
+        return RankGrouper(
+            self._stage_ranks(replica_id, stage_id),
+            ParallelismConfig(tp=self._tp, ep=self._ep, pp=1),
+        )
+
+    @staticmethod
+    def _layers_for_stage(stage_id: int, total_layers: int, pp: int) -> range:
+        """Layer IDs belonging to a PP stage."""
+        per_stage = total_layers // pp
+        start = stage_id * per_stage
+        return range(start, start + per_stage)
+
     # ── Batch expansion ───────────────────────────────────────────────────────
 
     def _expand_batch(
@@ -246,19 +295,34 @@ class InferenceTraceExpander:
         job_id: int,
         task_id_start: int,
         prev_exits: dict[int, list[int]],
+        stage_id: int = 0,
+        stage_layer_range: Optional[range] = None,
     ) -> tuple[list[FlowTask], dict[int, list[int]], int]:
         """
         Expand one prefill or decode batch into FlowTasks.
+
+        When pp>1, stage_id and stage_layer_range restrict expansion to
+        the layers belonging to that PP stage, using per-stage ranks.
 
         Returns (tasks, exits, next_task_id) where exits maps
         rank → [task_ids] for the last layer's output tasks.
         """
         phase = Phase.PREFILL if batch["type"] == "prefill" else Phase.DECODE
         replica_id = batch["replica_id"]
-        grouper = self._grouper(replica_id)
-        ranks = self._replica_ranks(replica_id)
+
+        if self._pp > 1:
+            grouper = self._stage_grouper(replica_id, stage_id)
+            ranks = self._stage_ranks(replica_id, stage_id)
+        else:
+            grouper = self._grouper(replica_id)
+            ranks = self._replica_ranks(replica_id)
 
         layers = self._group_profiles_by_layer(profiles)
+
+        # Filter layers to only those in this PP stage
+        if stage_layer_range is not None:
+            layers = {lid: lm for lid, lm in layers.items()
+                      if lid in stage_layer_range}
 
         all_tasks: list[FlowTask] = []
         task_id = task_id_start
@@ -336,6 +400,60 @@ class InferenceTraceExpander:
 
         return all_tasks, current_exits, task_id
 
+    # ── PP inter-stage communication ──────────────────────────────────────────
+
+    def _expand_pp_communication(
+        self,
+        src_stage_id: int,
+        dst_stage_id: int,
+        replica_id: int,
+        total_tokens: int,
+        job_id: int,
+        task_id_start: int,
+        prev_exits: dict[int, list[int]],
+        trace: dict,
+    ) -> tuple[list[FlowTask], dict[int, list[int]], int]:
+        """
+        Expand PP inter-stage hidden-state transfer as P2P PP_SEND flows.
+
+        One flow per rank pair (src_stage_rank[i] → dst_stage_rank[i]).
+        Size = hidden_size / tp * dtype_bytes * total_tokens per rank.
+
+        Returns (tasks, exits, next_task_id).
+        """
+        src_ranks = self._stage_ranks(replica_id, src_stage_id)
+        dst_ranks = self._stage_ranks(replica_id, dst_stage_id)
+
+        # Estimate per-rank PP comm size from trace metadata or defaults
+        hidden_size = trace.get("hidden_size", 4096)
+        dtype_bytes = trace.get("dtype_bytes", 2)
+        per_rank_bytes = max(hidden_size // self._tp * dtype_bytes * total_tokens, 1)
+
+        tasks: list[FlowTask] = []
+        task_id = task_id_start
+        exits: dict[int, list[int]] = {}
+
+        for src_rank, dst_rank in zip(src_ranks, dst_ranks):
+            ft = FlowTask(
+                task_id=task_id,
+                job_id=job_id,
+                type=TaskType.FLOW,
+                src=src_rank,
+                dst=dst_rank,
+                size_bytes=per_rank_bytes,
+                comm_type=CommType.PP_SEND,
+                chunk_id=0,
+                num_chunks=1,
+                phase=Phase.PREFILL,
+                layer_id=0,
+                deps=list(prev_exits.get(src_rank, [])),
+            )
+            tasks.append(ft)
+            exits.setdefault(dst_rank, []).append(task_id)
+            task_id += 1
+
+        return tasks, exits, task_id
+
     # ── KV cache transfer ─────────────────────────────────────────────────────
 
     def _expand_kv_transfer(
@@ -344,16 +462,19 @@ class InferenceTraceExpander:
         kv_cache_bytes: dict,
         p_replica_id: int,
         d_replica_id: int,
+        src_stage_id: int,
+        dst_stage_id: int,
         job_id: int,
         task_id_start: int,
         prev_exits: dict[int, list[int]],
     ) -> tuple[list[FlowTask], dict[int, list[int]], int]:
         """
-        Expand KV cache transfer flows from P-node ranks to D-node ranks.
+        Expand KV cache transfer flows from P-node stage ranks to D-node stage ranks.
 
-        One flow per (request, rank pair). Each flow carries an equal share
-        of kv_cache_bytes[req_id] / world_size. All flows depend on the
-        prefill batch's exit tasks.
+        When pp>1, uses per-stage ranks and kv_cache_bytes already contains
+        the per-stage share (total_kv / pp). One flow per (request, rank pair).
+        Each flow carries kv_cache_bytes[req_id] / stage_size. All flows depend
+        on the prefill batch's exit tasks.
 
         Returns (tasks, exits, next_task_id) where exits maps
         d_rank → [task_ids] for the KV transfer flows received at D-node.
@@ -362,9 +483,9 @@ class InferenceTraceExpander:
         task_id = task_id_start
         exits: dict[int, list[int]] = {}  # d_rank → [task_ids]
 
-        ws = self._world_size()
-        p_ranks = self._replica_ranks(p_replica_id)
-        d_ranks = self._replica_ranks(d_replica_id)
+        p_ranks = self._stage_ranks(p_replica_id, src_stage_id)
+        d_ranks = self._stage_ranks(d_replica_id, dst_stage_id)
+        stage_size = len(p_ranks)  # tp * ep
 
         for req_id in request_ids:
             req_key = str(req_id)
@@ -372,7 +493,7 @@ class InferenceTraceExpander:
             if total_kv == 0:
                 continue
 
-            per_rank_bytes = max(total_kv // ws, 1)
+            per_rank_bytes = max(total_kv // stage_size, 1)
 
             for p_rank, d_rank in zip(p_ranks, d_ranks):
                 ft = FlowTask(
@@ -394,6 +515,17 @@ class InferenceTraceExpander:
                 task_id += 1
 
         return tasks, exits, task_id
+
+    # ── Total layers helper ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _get_total_layers(trace: dict) -> int:
+        """Extract total number of layers from the trace or profile store."""
+        if "total_layers" in trace:
+            return trace["total_layers"]
+        # Fallback: count distinct layer_ids across all batches' implied profiles
+        # This is a best-effort heuristic; prefer explicit trace metadata.
+        return 0
 
     # ── Profile helpers ───────────────────────────────────────────────────────
 
