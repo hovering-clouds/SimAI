@@ -134,11 +134,13 @@ class TraceRecorder:
             if prev_stage_entry is not None and prev_stage_entry not in depends_on:
                 depends_on.append(prev_stage_entry)
 
-        # 3. KV transfer dependency (decode → prefill, same stage across replicas)
+        # 3. KV transfer dependency (decode → prefill, same stage across replicas).
+        #    Using pop() so each (request, stage) pair only produces the KV dep once.
+        #    Subsequent decode batches reach KV transitively via the same-stage serial chain.
         if batch_type == "decode":
             for req in batch_stage.requests:
-                prefill_bid = self._request_prefill_stage_map.get(
-                    (req.id, stage_id))
+                prefill_bid = self._request_prefill_stage_map.pop(
+                    (req.id, stage_id), None)
                 if prefill_bid is not None and prefill_bid not in depends_on:
                     depends_on.append(prefill_bid)
 

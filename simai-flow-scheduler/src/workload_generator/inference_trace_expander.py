@@ -108,10 +108,6 @@ class InferenceTraceExpander:
         # (the tasks that the next batch's first tasks should depend on)
         batch_exits: dict[str, dict[int, list[int]]] = {}
 
-        # (prefill_batch_id, d_replica_id) → {rank: [task_ids]}
-        # Ensures KV transfer is only created once per prefill→replica pair.
-        kv_transfer_done: dict[tuple[str, int], dict[int, list[int]]] = {}
-
         batch_lookup = {b["batch_id"]: b for b in trace["batches"]}
         total_layers = self._get_total_layers(trace)
 
@@ -155,36 +151,28 @@ class InferenceTraceExpander:
 
                 # ── KV transfer: prefill → decode across replicas
                 if dep_batch["type"] == "prefill" and btype == "decode":
-                    kv_key = (dep_id, replica_id, stage_id)
-                    if kv_key in kv_transfer_done:
-                        # Already transferred — reuse exits
-                        for rank, tids in kv_transfer_done[kv_key].items():
-                            prev_exits.setdefault(rank, []).extend(tids)
-                    else:
-                        # First time — create KV transfer
-                        kv_tasks, kv_exits, task_id = self._expand_kv_transfer(
-                            request_ids=batch["request_ids"],
-                            kv_cache_bytes=dep_batch.get("kv_cache_bytes") or {},
-                            p_replica_id=dep_batch["replica_id"],
-                            d_replica_id=replica_id,
-                            src_stage_id=dep_stage_id,
-                            dst_stage_id=stage_id,
-                            job_id=job_id,
-                            task_id_start=task_id,
-                            prev_exits=batch_exits.get(dep_id, {}),
-                        )
-                        all_flow_tasks.extend(kv_tasks)
-                        kv_transfer_done[kv_key] = kv_exits
+                    kv_tasks, kv_exits, task_id = self._expand_kv_transfer(
+                        request_ids=batch["request_ids"],
+                        kv_cache_bytes=dep_batch.get("kv_cache_bytes") or {},
+                        p_replica_id=dep_batch["replica_id"],
+                        d_replica_id=replica_id,
+                        src_stage_id=dep_stage_id,
+                        dst_stage_id=stage_id,
+                        job_id=job_id,
+                        task_id_start=task_id,
+                        prev_exits=batch_exits.get(dep_id, {}),
+                    )
+                    all_flow_tasks.extend(kv_tasks)
 
-                        btm_key = f"kv_{dep_id}_to_{bid}"
-                        batch_task_map[btm_key] = {
-                            "task_ids": [t.task_id for t in kv_tasks],
-                            "type": "kv_transfer",
-                            "from_batch": dep_id,
-                            "to_batch": bid,
-                        }
-                        for rank, tids in kv_exits.items():
-                            prev_exits.setdefault(rank, []).extend(tids)
+                    btm_key = f"kv_{dep_id}_to_{bid}"
+                    batch_task_map[btm_key] = {
+                        "task_ids": [t.task_id for t in kv_tasks],
+                        "type": "kv_transfer",
+                        "from_batch": dep_id,
+                        "to_batch": bid,
+                    }
+                    for rank, tids in kv_exits.items():
+                        prev_exits.setdefault(rank, []).extend(tids)
                 else:
                     # Same-stage or same-replica dependency
                     for rank, tids in batch_exits.get(dep_id, {}).items():
