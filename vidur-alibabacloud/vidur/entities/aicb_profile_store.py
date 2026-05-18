@@ -50,8 +50,10 @@ class AicbProfileStore:
 
             key, file_tp, file_ep, file_pp = parsed
 
-            # Filter by parallelism parameters (exact match)
-            if file_tp != self._tp or file_ep != self._ep or file_pp != self._pp:
+            # Filter by parallelism parameters (exact match on tp/ep, pp relaxed)
+            # PP doesn't affect per-layer behavior, so accept any pp (e.g., pp=1
+            # profiles work for pp=2+ — each stage only processes its assigned layers).
+            if file_tp != self._tp or file_ep != self._ep:
                 continue
 
             try:
