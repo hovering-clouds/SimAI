@@ -170,6 +170,7 @@ class BaseExecutionTimePredictor(ABC):
                 replica_config,
                 self.replica_scheduler_config,
                 aicb_profile_store=self._aicb_profile_store,
+                pipeline_stage_id=pipeline_stage,
             )
         else:
             return ExecutionTime(
@@ -195,9 +196,8 @@ class BaseExecutionTimePredictor(ABC):
                 self._get_ray_comm_time(batch),
                 self._config,
                 self._replica_config,
-                self.replica_scheduler_config
-                
-                # self._model_config
+                self.replica_scheduler_config,
+                pipeline_stage_id=pipeline_stage,
             )
 
     @abstractmethod

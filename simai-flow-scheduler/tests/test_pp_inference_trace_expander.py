@@ -613,3 +613,175 @@ class TestPPPipelineOverlap:
             assert has_same_stage or has_cross_stage, (
                 f"p1_s1 first compute {tid} should depend on p0_s1 or PP comm"
             )
+
+
+# ── Test: Uneven layer split (total_layers % pp != 0) ──────────────────────────
+
+class TestPPUnevenLayers:
+    """5 layers with pp=2: stage 0 gets layers 0-1, stage 1 gets layers 2-4."""
+
+    UNEVEN_LAYERS = 5
+    UNEVEN_PREFILL_TSV = (
+        "layer_id\tlayer_name\tcomp_time\tcomm_size\n"
+        "0\tattention\t1000000\t8192\n"
+        "0\tmlp\t2000000\t8192\n"
+        "1\tattention\t1000000\t8192\n"
+        "1\tmlp\t2000000\t8192\n"
+        "2\tattention\t1500000\t8192\n"
+        "2\tmlp\t2500000\t8192\n"
+        "3\tattention\t1500000\t8192\n"
+        "3\tmlp\t2500000\t8192\n"
+        "4\tattention\t1800000\t8192\n"
+        "4\tmlp\t2800000\t8192\n"
+    )
+    UNEVEN_DECODE_TSV = (
+        "layer_id\tlayer_name\tcomp_time\tcomm_size\n"
+        "0\tattention\t100000\t1024\n"
+        "0\tmlp\t200000\t1024\n"
+        "1\tattention\t100000\t1024\n"
+        "1\tmlp\t200000\t1024\n"
+        "2\tattention\t150000\t1024\n"
+        "2\tmlp\t250000\t1024\n"
+        "3\tattention\t150000\t1024\n"
+        "3\tmlp\t250000\t1024\n"
+        "4\tattention\t180000\t1024\n"
+        "4\tmlp\t280000\t1024\n"
+    )
+
+    UNEVEN_TRACE = {
+        "version": "1.0",
+        "model": "test-uneven",
+        "hidden_size": 64,
+        "dtype_bytes": 2,
+        "total_layers": UNEVEN_LAYERS,
+        "parallelism": {"tp": TP, "ep": EP, "pp": PP},
+        "requests": {
+            "0": {"num_prefill_tokens": 128, "num_decode_tokens": 4},
+            "1": {"num_prefill_tokens": 64, "num_decode_tokens": 2},
+        },
+        "batches": [
+            # Prefill stage 0 layers 0-1: 2/5 of total KV
+            {
+                "batch_id": "p0_s0",
+                "type": "prefill",
+                "replica_id": 0,
+                "stage_id": 0,
+                "request_ids": [0, 1],
+                "num_tokens": [128, 64],
+                "kv_cache_bytes": {"0": 2048, "1": 1024},
+                "depends_on": [],
+            },
+            # Prefill stage 1 layers 2-4: 3/5 of total KV (more than stage 0!)
+            {
+                "batch_id": "p0_s1",
+                "type": "prefill",
+                "replica_id": 0,
+                "stage_id": 1,
+                "request_ids": [0, 1],
+                "num_tokens": [128, 64],
+                "kv_cache_bytes": {"0": 3072, "1": 1536},
+                "depends_on": ["p0_s0"],
+            },
+            # Decode stage 0
+            {
+                "batch_id": "d0_s0",
+                "type": "decode",
+                "replica_id": 1,
+                "stage_id": 0,
+                "request_ids": [0, 1],
+                "num_tokens": [1, 1],
+                "kv_cache_seq_lens": [129, 65],
+                "kv_cache_bytes": None,
+                "depends_on": ["p0_s0"],
+            },
+            # Decode stage 1
+            {
+                "batch_id": "d0_s1",
+                "type": "decode",
+                "replica_id": 1,
+                "stage_id": 1,
+                "request_ids": [0, 1],
+                "num_tokens": [1, 1],
+                "kv_cache_seq_lens": [129, 65],
+                "kv_cache_bytes": None,
+                "depends_on": ["p0_s1", "d0_s0"],
+            },
+        ],
+    }
+
+    @pytest.fixture
+    def uneven_store(self, tmp_path):
+        p_file = tmp_path / "prefill_uneven.tsv"
+        d_file = tmp_path / "decode_uneven.tsv"
+        p_file.write_text(self.UNEVEN_PREFILL_TSV)
+        d_file.write_text(self.UNEVEN_DECODE_TSV)
+        s = InferenceProfileStore()
+        s.load(str(p_file), PREFILL_PROFILE_KEY)
+        s.load(str(d_file), DECODE_PROFILE_KEY)
+        return s
+
+    @pytest.fixture
+    def uneven_result(self, uneven_store):
+        expander = InferenceTraceExpander(uneven_store, tp=TP, ep=EP, pp=PP)
+        return expander.expand(self.UNEVEN_TRACE, job_id=0)
+
+    def test_stage0_gets_first_two_layers(self, uneven_result):
+        """Stage 0: layers 0, 1. Should NOT have layers 2, 3, 4."""
+        workload, btm = uneven_result
+        task_map = {t.task_id: t for t in workload.tasks}
+        layers = {
+            task_map[tid].layer_id
+            for tid in btm["p0_s0"]["task_ids"]
+            if task_map[tid].type == TaskType.COMPUTE
+        }
+        assert layers == {0, 1}
+
+    def test_stage1_gets_remaining_three_layers(self, uneven_result):
+        """Stage 1: layers 2, 3, 4 (the remainder). Should NOT have 0, 1."""
+        workload, btm = uneven_result
+        task_map = {t.task_id: t for t in workload.tasks}
+        layers = {
+            task_map[tid].layer_id
+            for tid in btm["p0_s1"]["task_ids"]
+            if task_map[tid].type == TaskType.COMPUTE
+        }
+        assert layers == {2, 3, 4}
+
+    def test_stage1_has_more_compute_than_stage0(self, uneven_result):
+        """Stage 1 has 3 layers, stage 0 has 2. Stage 1 should have more compute tasks."""
+        workload, btm = uneven_result
+        task_map = {t.task_id: t for t in workload.tasks}
+        s0_compute = sum(
+            1 for tid in btm["p0_s0"]["task_ids"]
+            if task_map[tid].type == TaskType.COMPUTE
+        )
+        s1_compute = sum(
+            1 for tid in btm["p0_s1"]["task_ids"]
+            if task_map[tid].type == TaskType.COMPUTE
+        )
+        # Stage 0: 2 layers × 2 sub-ops × 2 ranks = 8
+        # Stage 1: 3 layers × 2 sub-ops × 2 ranks = 12
+        assert s0_compute == 2 * 2 * TP, f"Expected 8, got {s0_compute}"
+        assert s1_compute == 3 * 2 * TP, f"Expected 12, got {s1_compute}"
+
+    def test_uneven_kv_bytes_per_rank(self, uneven_result):
+        """Stage 1 KV bytes per rank > stage 0, because stage 1 has more layers."""
+        workload, btm = uneven_result
+        task_map = {t.task_id: t for t in workload.tasks}
+        kv_key_s0 = "kv_p0_s0_to_d0_s0"
+        kv_key_s1 = "kv_p0_s1_to_d0_s1"
+        kv_s0 = [task_map[tid] for tid in btm[kv_key_s0]["task_ids"]]
+        kv_s1 = [task_map[tid] for tid in btm[kv_key_s1]["task_ids"]]
+        # All tasks for the same request within a stage have equal size
+        s0_size = kv_s0[0].size_bytes if kv_s0 else 0
+        s1_size = kv_s1[0].size_bytes if kv_s1 else 0
+        assert s1_size > s0_size, (
+            f"Stage 1 per-rank KV bytes ({s1_size}) should exceed stage 0 ({s0_size})"
+            " since stage 1 has more layers"
+        )
+
+    def test_uneven_workload_validates(self, uneven_result):
+        """Uneven layer split workload must pass validation."""
+        workload, _ = uneven_result
+        errors = workload.validate()
+        assert errors == [], f"Validation errors: {errors}"

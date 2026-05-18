@@ -19,7 +19,6 @@ class TPTimePredictor:
         replica_config: ReplicaConfig,
         predictor_config: BaseExecutionTimePredictorConfig
     ):
-        assert model_config.num_layers % replica_config.num_pipeline_stages == 0
         self.num_layers_per_pp_stage = model_config.num_layers // replica_config.num_pipeline_stages
         self.hidden_size = model_config.embedding_dim
         self.predictor_config = predictor_config

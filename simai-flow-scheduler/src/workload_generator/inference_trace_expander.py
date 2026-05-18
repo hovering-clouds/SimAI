@@ -11,7 +11,7 @@ Trace format (pp>1, per-stage):
               kv_cache_bytes (per-stage share), depends_on }]
   - Each entry = one micro-batch on one PP stage
   - depends_on encodes same-stage + cross-stage pipeline deps
-  - kv_cache_bytes on prefill entries = per-stage KV (total_kv / pp)
+  - kv_cache_bytes on prefill entries = per-stage KV (proportional to actual layers in that stage)
 
 Expansion rules:
 - Per-stage batch → per-layer COMPUTE + TP/EP communication for layers in that stage
@@ -281,10 +281,18 @@ class InferenceTraceExpander:
 
     @staticmethod
     def _layers_for_stage(stage_id: int, total_layers: int, pp: int) -> range:
-        """Layer IDs belonging to a PP stage."""
+        """Layer IDs belonging to a PP stage.
+
+        The last stage takes any remainder from uneven splits
+        (e.g. 61 layers with pp=2 → stage 0: 0-29, stage 1: 30-60).
+        """
         per_stage = total_layers // pp
         start = stage_id * per_stage
-        return range(start, start + per_stage)
+        if stage_id == pp - 1:
+            end = total_layers
+        else:
+            end = start + per_stage
+        return range(start, end)
 
     # ── Batch expansion ───────────────────────────────────────────────────────
 
@@ -472,7 +480,8 @@ class InferenceTraceExpander:
         Expand KV cache transfer flows from P-node stage ranks to D-node stage ranks.
 
         When pp>1, uses per-stage ranks and kv_cache_bytes already contains
-        the per-stage share (total_kv / pp). One flow per (request, rank pair).
+        the per-stage share (proportional to actual layers in that stage).
+        One flow per (request, rank pair).
         Each flow carries kv_cache_bytes[req_id] / stage_size. All flows depend
         on the prefill batch's exit tasks.
 

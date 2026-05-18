@@ -145,7 +145,7 @@ class TraceRecorder:
         # --- Per-stage KV cache bytes (prefill only) ---
         kv_cache_bytes = None
         if batch_type == "prefill":
-            kv_cache_bytes = self._compute_stage_kv_bytes(batch_stage, replica)
+            kv_cache_bytes = self._compute_stage_kv_bytes(batch_stage, replica, stage_id)
 
         # --- Build entry ---
         batch_entry = {
@@ -180,23 +180,32 @@ class TraceRecorder:
     # ── KV cache computation ───────────────────────────────────────────────
 
     @staticmethod
-    def _compute_stage_kv_bytes(batch_stage, replica) -> dict[str, int]:
+    def _compute_stage_kv_bytes(batch_stage, replica, stage_id: int = 0) -> dict[str, int]:
         """
         Compute per-stage KV cache bytes using correct attention dimensions.
 
-        Formula: 2 * head_dim * kv_heads_per_tp * layers_per_stage * tokens * dtype_bytes
+        Formula: 2 * head_dim * kv_heads_per_tp * (layers_in_this_stage) * tokens * dtype_bytes
         """
         dtype_str = getattr(replica, 'pd_p2p_comm_dtype', 'float16')
         dtype_bytes = _DTYPE_BYTES.get(dtype_str, 2)
 
         head_dim = replica.embedding_dim // replica.num_q_heads
         kv_heads = ceil(replica.num_kv_heads / replica.num_tensor_parallel_workers)
-        layers_per_stage = replica.num_layers // replica.num_pipeline_stages
-        kv_per_token_per_layer = 2 * head_dim * kv_heads * dtype_bytes
+
+        # Compute actual layers assigned to this stage (last stage takes remainder)
+        total_layers = replica.num_layers
+        pp = replica.num_pipeline_stages
+        layers_per_stage = total_layers // pp
+        if stage_id == pp - 1:
+            num_stage_layers = total_layers - stage_id * layers_per_stage
+        else:
+            num_stage_layers = layers_per_stage
+
+        kv_per_token = 2 * head_dim * kv_heads * num_stage_layers * dtype_bytes
 
         kv_bytes = {}
         for req, tokens in zip(batch_stage.requests, batch_stage.num_tokens):
-            kv_bytes[str(req.id)] = kv_per_token_per_layer * tokens * layers_per_stage
+            kv_bytes[str(req.id)] = kv_per_token * tokens
         return kv_bytes
 
     # ── Legacy method (kept for backward compatibility) ────────────────────

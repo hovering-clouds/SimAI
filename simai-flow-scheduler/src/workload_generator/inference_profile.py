@@ -84,12 +84,13 @@ class InferenceProfileStore:
 
             key, tp, ep, pp = parsed
 
-            # Filter by parallelism parameters
+            # Filter by parallelism parameters.
+            # tp/ep filters are used to match profiles to the correct config.
+            # PP is deliberately NOT filtered: per-layer profiles are independent
+            # of pipeline parallelism (PP only affects which layers go to which stage).
             if self._tp is not None and tp != self._tp:
                 continue
             if self._ep is not None and ep != self._ep:
-                continue
-            if self._pp is not None and pp != self._pp:
                 continue
 
             try:

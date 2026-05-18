@@ -36,10 +36,12 @@ class ExecutionTime(BaseEntity):
         replica_config: ReplicaConfig,
         replica_scheduler_config: BaseReplicaSchedulerConfig,
         aicb_profile_store=None,
+        pipeline_stage_id: int = 0,
     ) -> None:
         self._id = ExecutionTime.generate_id()
 
         self._num_layers_per_pipeline_stage = num_layers_per_pipeline_stage
+        self._pipeline_stage_id = pipeline_stage_id
         self._attention_rope_execution_time = attention_rope_execution_time
         self._attention_kv_cache_save_execution_time = (
             attention_kv_cache_save_execution_time
@@ -342,12 +344,11 @@ class ExecutionTime(BaseEntity):
         if self._replica_config.model_name in ['deepseek-671B', 'qwen3-moe-235B', 'qwen3-next-80B'] and self._config.backend == 'aicb':
             # 计算当前 pipeline stage 包含的 layer_id 范围
             # Calculate the range of layer_ids included in the current pipeline stage
-            
-            # > TODO: 找_pipeline_stage_id 在哪， 结合batch id
-            # > TODO: Find where _pipeline_stage_id is defined and integrate with batch id
-            if self._replica_config.num_pipeline_stages == 1:
-                self._pipeline_stage_id = 0
-                start_layer = self._pipeline_stage_id * self._num_layers_per_pipeline_stage
+            start_layer = self._pipeline_stage_id * self._num_layers_per_pipeline_stage
+            if self._pipeline_stage_id == self._replica_config.num_pipeline_stages - 1:
+                # Last stage takes any remainder from uneven layer split
+                end_layer = self._replica_config.model_config.num_layers
+            else:
                 end_layer = start_layer + self._num_layers_per_pipeline_stage
             total_block_time = 0.0
             

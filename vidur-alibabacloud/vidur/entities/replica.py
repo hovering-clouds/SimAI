@@ -30,10 +30,7 @@ class Replica(BaseEntity):
         self._device_config = replica_config.device_config
         self._generator_config = generator_config
 
-        assert (
-            self._model_config.num_layers % self._replica_config.num_pipeline_stages
-            == 0
-        )
+        # Pipeline stages divide layers; the last stage takes any remainder.
         assert (
             self._model_config.embedding_dim % self._replica_config.tensor_parallel_size
             == 0
