@@ -173,9 +173,12 @@ class TraceRecorder:
 
         if batch_type == "prefill":
             for req in batch_stage.requests:
-                if req.is_prefill_complete or req.completed:
-                    self._request_prefill_stage_map[
-                        (req.id, stage_id)] = batch_id
+                # Record KV dependency immediately when this stage finishes prefill.
+                # In PP mode, each stage independently produces its own KV cache
+                # for its layers. Stage 0's KV cache is available as soon as stage 0
+                # completes, regardless of whether the full prefill (all stages) is done.
+                self._request_prefill_stage_map[
+                    (req.id, stage_id)] = batch_id
 
     # ── KV cache computation ───────────────────────────────────────────────
 
