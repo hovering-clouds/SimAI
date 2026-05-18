@@ -1,10 +1,12 @@
 """
 Trace Recorder for Vidur inference simulation.
 
-Captures per-batch scheduling decisions during a Vidur simulation run
+Captures per-batch-stage scheduling decisions during a Vidur simulation run
 and outputs a trace JSON file suitable for replay in simai-flow-scheduler.
 
-Trace format follows simai-flow-scheduler/docs/phase5-dev/phase5-taskA-research.md section 9.4.
+Supports both pp=1 (one entry per batch) and pp>1 (one entry per batch-stage).
+Each trace entry records stage_id, per-stage KV cache bytes, and three-layer
+dependency chain: same-stage serial, cross-stage PP, and KV transfer.
 
 Usage:
     # In simulator.py:
@@ -19,11 +21,19 @@ Usage:
 
 import json
 import os
+from math import ceil
 from typing import Optional
 
 
+_DTYPE_BYTES = {
+    'float16': 2, 'bfloat16': 2, 'float32': 4,
+    'int8': 1, 'int16': 2, 'int32': 4, 'int64': 8,
+    'float64': 8,
+}
+
+
 class TraceRecorder:
-    """Records batch events from Vidur simulation into a trace JSON."""
+    """Records batch-stage events from Vidur simulation into a trace JSON."""
 
     def __init__(
         self,
@@ -45,13 +55,19 @@ class TraceRecorder:
         self._requests: dict[str, dict] = {}
         self._batches: list[dict] = []
 
-        # State for depends_on tracking
-        self._last_batch_per_replica: dict[int, str] = {}  # replica_id → batch_id
-        self._request_prefill_batch: dict[int, str] = {}    # request_id → prefill batch_id
+        # --- Per-stage tracking state ---
+        # Vidur batch.id → sequential counter for human-readable batch_id
+        self._parent_batch_counter: dict[int, int] = {}
+        self._next_counter = 0
 
-        # Counter for batch_id generation
-        self._prefill_counter = 0
-        self._decode_counter = 0
+        # (replica_id, stage_id) → last entry batch_id (same-stage serial dep)
+        self._last_entry_per_stage: dict[tuple[int, int], str] = {}
+
+        # (vidur_batch.id, stage_id) → entry batch_id (cross-stage PP dep)
+        self._batch_stage_entries: dict[tuple[int, int], str] = {}
+
+        # (request_id, stage_id) → prefill entry batch_id (KV transfer dep)
+        self._request_prefill_stage_map: dict[tuple[int, int], str] = {}
 
     def record_request(self, request) -> None:
         """Record a request when it first arrives (call from global scheduler)."""
@@ -62,88 +78,148 @@ class TraceRecorder:
             "num_decode_tokens": request.num_decode_tokens,
         }
 
-    def record_batch(self, batch, replica) -> None:
+    def record_batch_stage(
+        self,
+        batch,
+        batch_stage,
+        replica,
+        replica_id: int,
+        stage_id: int,
+    ) -> None:
         """
-        Record a completed batch event.
+        Record a completed batch-stage event.
 
-        Call from BatchEndEvent.handle_event() after existing logic.
+        Called from BatchStageEndEvent.handle_event() after existing logic.
 
         Args:
-            batch: The Batch object that just completed.
-            replica: The Replica object that executed this batch.
+            batch: The parent Batch object.
+            batch_stage: The BatchStage object that just completed on this stage.
+            replica: The Replica object that executed this batch-stage.
+            replica_id: ID of the replica.
+            stage_id: Pipeline stage index (0-indexed).
         """
         if not self._enabled:
             return
 
-        # Determine batch type from replica type
         from vidur.entities.replica import ReplicaType
 
+        # Determine batch type from replica type
         if replica.replica_type == ReplicaType.PREFILL:
             batch_type = "prefill"
-            batch_id = f"p{self._prefill_counter}"
-            self._prefill_counter += 1
         elif replica.replica_type == ReplicaType.DECODE:
             batch_type = "decode"
-            batch_id = f"d{self._decode_counter}"
-            self._decode_counter += 1
         else:
-            # MIXED or unknown — skip
             return
 
-        # Compute depends_on
+        # --- Generate batch_id ---
+        if batch.id not in self._parent_batch_counter:
+            self._parent_batch_counter[batch.id] = self._next_counter
+            self._next_counter += 1
+        counter = self._parent_batch_counter[batch.id]
+        prefix = "p" if batch_type == "prefill" else "d"
+        batch_id = f"{prefix}{counter}_s{stage_id}"
+
+        # --- Compute depends_on ---
         depends_on = []
 
-        # 1. Same-replica serial dependency
-        last_on_replica = self._last_batch_per_replica.get(replica.id)
-        if last_on_replica is not None:
-            depends_on.append(last_on_replica)
+        # 1. Same-stage serial dependency
+        last_in_stage = self._last_entry_per_stage.get((replica_id, stage_id))
+        if last_in_stage is not None:
+            depends_on.append(last_in_stage)
 
-        # 2. For decode batches: depend on the prefill batch that contains each request
+        # 2. Cross-stage PP dependency (same parent batch, previous stage)
+        if stage_id > 0:
+            prev_stage_entry = self._batch_stage_entries.get(
+                (batch.id, stage_id - 1))
+            if prev_stage_entry is not None and prev_stage_entry not in depends_on:
+                depends_on.append(prev_stage_entry)
+
+        # 3. KV transfer dependency (decode → prefill, same stage across replicas)
         if batch_type == "decode":
-            for req in batch.requests:
-                prefill_bid = self._request_prefill_batch.get(req.id)
+            for req in batch_stage.requests:
+                prefill_bid = self._request_prefill_stage_map.get(
+                    (req.id, stage_id))
                 if prefill_bid is not None and prefill_bid not in depends_on:
                     depends_on.append(prefill_bid)
 
-        # Collect per-request KV cache bytes (only for prefill batches)
+        # --- Per-stage KV cache bytes (prefill only) ---
         kv_cache_bytes = None
         if batch_type == "prefill":
-            kv_cache_bytes = {}
-            for req, n_tokens in zip(batch.requests, batch.num_tokens):
-                # Only record KV for tokens that belong to this request's prefill
-                if not req.is_prefill_complete:
-                    # Prefill not yet complete — this is a partial prefill
-                    pass
-                kv_cache_bytes[str(req.id)] = req.pd_p2p_comm_size \
-                    if req.pd_p2p_comm_size != float('inf') else 0
+            kv_cache_bytes = self._compute_stage_kv_bytes(batch_stage, replica)
 
-        # Build batch entry
+        # --- Build entry ---
         batch_entry = {
             "batch_id": batch_id,
             "type": batch_type,
-            "replica_id": replica.id,
-            "request_ids": [req.id for req in batch.requests],
-            "num_tokens": list(batch.num_tokens),
+            "replica_id": replica_id,
+            "stage_id": stage_id,
+            "request_ids": [req.id for req in batch_stage.requests],
+            "num_tokens": list(batch_stage.num_tokens),
             "kv_cache_bytes": kv_cache_bytes,
             "depends_on": depends_on,
         }
 
-        # For decode batches: record per-request KV cache sequence lengths
         if batch_type == "decode":
             batch_entry["kv_cache_seq_lens"] = [
                 req.num_processed_prefill_tokens + req.num_processed_decode_tokens
-                for req in batch.requests
+                for req in batch_stage.requests
             ]
 
         self._batches.append(batch_entry)
 
-        # Update tracking state
-        self._last_batch_per_replica[replica.id] = batch_id
+        # --- Update tracking state ---
+        self._last_entry_per_stage[(replica_id, stage_id)] = batch_id
+        self._batch_stage_entries[(batch.id, stage_id)] = batch_id
 
         if batch_type == "prefill":
-            for req in batch.requests:
+            for req in batch_stage.requests:
                 if req.is_prefill_complete or req.completed:
-                    self._request_prefill_batch[req.id] = batch_id
+                    self._request_prefill_stage_map[
+                        (req.id, stage_id)] = batch_id
+
+    # ── KV cache computation ───────────────────────────────────────────────
+
+    @staticmethod
+    def _compute_stage_kv_bytes(batch_stage, replica) -> dict[str, int]:
+        """
+        Compute per-stage KV cache bytes using correct attention dimensions.
+
+        Formula: 2 * head_dim * kv_heads_per_tp * layers_per_stage * tokens * dtype_bytes
+        """
+        dtype_str = getattr(replica, 'pd_p2p_comm_dtype', 'float16')
+        dtype_bytes = _DTYPE_BYTES.get(dtype_str, 2)
+
+        head_dim = replica.embedding_dim // replica.num_q_heads
+        kv_heads = ceil(replica.num_kv_heads / replica.num_tensor_parallel_workers)
+        layers_per_stage = replica.num_layers // replica.num_pipeline_stages
+        kv_per_token_per_layer = 2 * head_dim * kv_heads * dtype_bytes
+
+        kv_bytes = {}
+        for req, tokens in zip(batch_stage.requests, batch_stage.num_tokens):
+            kv_bytes[str(req.id)] = kv_per_token_per_layer * tokens * layers_per_stage
+        return kv_bytes
+
+    # ── Legacy method (kept for backward compatibility) ────────────────────
+
+    def record_batch(self, batch, replica) -> None:
+        """
+        Record a completed batch event (legacy, pp=1 only).
+
+        Prefer record_batch_stage() for pp>1 support.
+        """
+        if not self._enabled:
+            return
+        # Delegate to record_batch_stage with stage_id=0
+        # Build a minimal batch_stage-like object for compatibility
+        self.record_batch_stage(
+            batch=batch,
+            batch_stage=batch,  # Batch has same interface as BatchStage for our needs
+            replica=replica,
+            replica_id=replica.id,
+            stage_id=0,
+        )
+
+    # ── Save ───────────────────────────────────────────────────────────────
 
     def save(self, filename: str = "inference_trace.json") -> str:
         """
@@ -171,20 +247,27 @@ class TraceRecorder:
         model_config = {}
         if model_cfg:
             model_config = {
-                "hidden_size": getattr(model_cfg, 'hidden_size', 0),
+                "hidden_size": getattr(model_cfg, 'embedding_dim', 0),
+                "embedding_dim": getattr(model_cfg, 'embedding_dim', 0),
                 "num_layers": getattr(model_cfg, 'num_layers', 0),
                 "mlp_hidden_dim": getattr(model_cfg, 'mlp_hidden_dim', 0),
+                "num_q_heads": getattr(model_cfg, 'num_q_heads', 0),
+                "num_kv_heads": getattr(model_cfg, 'num_kv_heads', 0),
             }
-            # MoE-specific fields
             if hasattr(model_cfg, 'num_experts'):
                 model_config["num_experts"] = model_cfg.num_experts
             if hasattr(model_cfg, 'num_experts_per_tok'):
                 model_config["moe_topk"] = model_cfg.num_experts_per_tok
 
+        dtype_str = getattr(cfg, 'pd_p2p_comm_dtype', 'float16')
+
         trace = {
             "version": "1.0",
             "model": cfg.model_name,
             "model_config": model_config,
+            "hidden_size": model_config.get("embedding_dim", 0),
+            "dtype_bytes": _DTYPE_BYTES.get(dtype_str, 2),
+            "total_layers": model_config.get("num_layers", 0),
             "parallelism": {
                 "tp": cfg.tensor_parallel_size,
                 "pp": cfg.num_pipeline_stages,

@@ -46,10 +46,21 @@ class BatchStageEndEvent(BaseEvent):
         self._batch_stage.on_stage_end(self.time)
         metrics_store.on_batch_stage_end(
             self._batch_stage,
-            self.time,
+            self._time,
             self._replica_id,
             self._stage_id,
         )
+
+        # --- Per-stage trace recording for simai-flow-scheduler ---
+        if hasattr(metrics_store, 'trace_recorder'):
+            replica_scheduler = scheduler.get_replica_scheduler(self._replica_id)
+            metrics_store.trace_recorder.record_batch_stage(
+                self._batch,
+                self._batch_stage,
+                replica_scheduler.replica,
+                self._replica_id,
+                self._stage_id,
+            )
 
         next_events = [
             # 当前stage调度下一个micro-batch
