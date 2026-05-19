@@ -1,0 +1,136 @@
+"""RMLQ-style bandwidth allocator for MFS.
+
+Implements strict-priority queues with fair sharing within each queue.
+P2D flows start at low priority and promote after a configured delay.
+"""
+from dataclasses import dataclass
+
+from .base_allocator import BandwidthAllocator
+from ...static_analysis.passes.topology_loader import NetworkTopology
+from ...static_analysis.passes.mfs_context import MfsContext, MfsStage
+from ...static_analysis.passes.mfs_rli import RliInfo
+
+
+@dataclass
+class MfsAllocatorConfig:
+    num_queues: int = 4
+    p2d_initial_queue: int = 0
+    early_rli0_queue: int = 2
+    early_default_queue: int = 1
+    urgent_p2d_queue: int = 3
+    p2d_promotion_delay_us: int = 1000
+
+
+class MfsAllocator(BandwidthAllocator):
+    """RMLQ-style allocator: strict priority across queues, fair share within."""
+
+    def __init__(
+        self,
+        context: MfsContext,
+        rli_info: dict[int, RliInfo],
+        config: MfsAllocatorConfig | None = None,
+    ):
+        self.context = context
+        self.rli_info = rli_info
+        self.config = config or MfsAllocatorConfig()
+
+    def _queue_for(self, flow, current_time: int) -> int:
+        info = self.context.task_info.get(flow.task_id)
+        if info is None:
+            return 0
+
+        if info.mfs_stage == MfsStage.P2D:
+            if current_time - flow.start_time >= self.config.p2d_promotion_delay_us:
+                return self.config.urgent_p2d_queue
+            return self.config.p2d_initial_queue
+
+        if info.mfs_stage == MfsStage.EARLY:
+            rli = self.rli_info.get(flow.task_id)
+            if rli is not None and rli.base_rli == 0:
+                return self.config.early_rli0_queue
+            return self.config.early_default_queue
+
+        return 0
+
+    def allocate(
+        self,
+        active_flows: list,
+        topology: NetworkTopology,
+        current_time: int = 0,
+    ) -> dict[int, float]:
+        if not active_flows:
+            return {}
+
+        cfg = self.config
+
+        # Assign each flow to a queue
+        queue_flows: dict[int, list] = {q: [] for q in range(cfg.num_queues)}
+        for flow in active_flows:
+            q = self._queue_for(flow, current_time)
+            q = max(0, min(q, cfg.num_queues - 1))
+            queue_flows[q].append(flow)
+
+        # Build per-link remaining capacity
+        link_rem: dict[tuple[int, int], float] = {}
+        for flow in active_flows:
+            path = flow.path
+            for i in range(len(path) - 1):
+                link = (path[i], path[i + 1])
+                if link not in link_rem:
+                    link_obj = topology.get_link(link[0], link[1])
+                    link_rem[link] = link_obj.bandwidth_gbps if link_obj else 0.0
+
+        # Build per-queue per-link flow count for fair sharing
+        queue_link_count: dict[int, dict[tuple[int, int], int]] = {}
+        for q, flows in queue_flows.items():
+            counts: dict[tuple[int, int], int] = {}
+            for flow in flows:
+                path = flow.path
+                for i in range(len(path) - 1):
+                    link = (path[i], path[i + 1])
+                    counts[link] = counts.get(link, 0) + 1
+            queue_link_count[q] = counts
+
+        result: dict[int, float] = {}
+
+        # Allocate from highest queue to lowest
+        for q in range(cfg.num_queues - 1, -1, -1):
+            flows = queue_flows[q]
+            if not flows:
+                continue
+
+            link_counts = queue_link_count[q]
+
+            # Compute per-flow allocation (bottleneck across path links)
+            queue_allocs: list[tuple[object, float]] = []
+            for flow in flows:
+                min_alloc = float("inf")
+                path = flow.path
+                for i in range(len(path) - 1):
+                    link = (path[i], path[i + 1])
+                    rem = link_rem.get(link, 0.0)
+                    count = link_counts.get(link, 0)
+                    if count > 0 and rem > 0:
+                        alloc = rem / count
+                        min_alloc = min(min_alloc, alloc)
+
+                if min_alloc != float("inf") and min_alloc > 0:
+                    queue_allocs.append((flow, min_alloc))
+                else:
+                    result[flow.task_id] = 0.0
+
+            # Deduct consumed capacity after computing all fair-share values
+            for flow, bw in queue_allocs:
+                result[flow.task_id] = bw
+                path = flow.path
+                for i in range(len(path) - 1):
+                    link = (path[i], path[i + 1])
+                    if link in link_rem:
+                        link_rem[link] = max(0.0, link_rem[link] - bw)
+
+        # Ensure all flows have an entry
+        for flow in active_flows:
+            if flow.task_id not in result:
+                result[flow.task_id] = 0.0
+
+        return result

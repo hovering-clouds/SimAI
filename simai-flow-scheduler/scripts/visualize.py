@@ -26,10 +26,10 @@ from src.executor.visualizer import (
 # ── Configuration ──────────────────────────────────────────────
 
 # Output directory from run_e2e.py (must contain workload.json and execution_result.json)
-OUTPUT_DIR = "outputs/puppeteer_reproduce"
+OUTPUT_DIR = "outputs/mfs_inference_e2e"
 
 # Result file name (default: execution_result.json; for puppeteer: result_route-tte.json, etc.)
-RESULT_FILE = "result_default.json"
+RESULT_FILE = "mfs_execution_result.json"
 
 # Visualization mode: "verbose" | "compact" | "detail"
 MODE = "verbose"
