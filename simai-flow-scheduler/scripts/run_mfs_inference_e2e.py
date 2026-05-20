@@ -1,6 +1,9 @@
 """
 MFS Inference E2E — compare default policy vs MFS policy on the same trace.
 
+Supports both Phase 1 (delay-based P2D promotion) and Phase 2 (deadline-aware
+MLU promotion when the trace contains request deadline fields).
+
 Usage:
     uv run python scripts/run_mfs_inference_e2e.py
 """
@@ -38,6 +41,14 @@ def _sep(title: str):
     print("=" * 60)
     print(title)
     print("=" * 60)
+
+
+def _has_deadlines(trace):
+    """Check if the trace contains request deadline fields."""
+    for req_info in trace.get("requests", {}).values():
+        if req_info.get("deadline_us") is not None:
+            return True
+    return False
 
 
 def _run_policy(policy_name, policy, workload, topo):
@@ -89,18 +100,17 @@ def _compute_qos(trace, batch_task_map, result, workload):
 
         # Collective flow completion times
         collective_times = []
+        p2d_tid_set = set()
+        for b2, bi2 in batch_task_map.items():
+            if bi2["type"] == "kv_transfer":
+                p2d_tid_set.update(bi2["task_ids"])
         for bid, binfo in batch_task_map.items():
             if binfo["type"] in ("prefill", "decode") and req_id in binfo.get("request_ids", []):
                 for tid in binfo["task_ids"]:
-                    if tid in result.per_task and task_map[tid].is_flow():
-                        p2d_times_set = set()
-                        for b2, bi2 in batch_task_map.items():
-                            if bi2["type"] == "kv_transfer":
-                                p2d_times_set.update(bi2["task_ids"])
-                        if tid not in p2d_times_set:
-                            collective_times.append(result.per_task[tid].end_time_us)
+                    if tid in result.per_task and task_map[tid].is_flow() and tid not in p2d_tid_set:
+                        collective_times.append(result.per_task[tid].end_time_us)
 
-        qos_records.append({
+        record = {
             "request_id": req_id,
             "num_prefill_tokens": req_info["num_prefill_tokens"],
             "num_decode_tokens": req_info["num_decode_tokens"],
@@ -111,7 +121,20 @@ def _compute_qos(trace, batch_task_map, result, workload):
             "e2e_ms": round(e2e_us / 1000, 2),
             "p2d_completion_us": sorted(p2d_times) if p2d_times else [],
             "collective_completion_us": sorted(collective_times) if collective_times else [],
-        })
+        }
+
+        # Deadline metrics (Phase 2)
+        deadline_us = req_info.get("deadline_us")
+        if deadline_us is not None:
+            record["deadline_us"] = deadline_us
+            record["deadline_met"] = ttft_us <= deadline_us
+            record["deadline_miss_us"] = ttft_us - deadline_us
+            # P2D earliness: how early did P2D finish relative to deadline
+            if p2d_times:
+                last_p2d = max(p2d_times)
+                record["p2d_earliness_us"] = deadline_us - last_p2d
+
+        qos_records.append(record)
 
     return qos_records
 
@@ -131,6 +154,9 @@ num_requests = len(trace["requests"])
 
 print(f"  Model: {trace['model']}  tp={infer_tp} ep={infer_ep} pp={infer_pp}")
 print(f"  Requests: {num_requests}  Batches: {num_batches}")
+
+has_dl = _has_deadlines(trace)
+print(f"  Deadline-aware: {has_dl}")
 
 store = InferenceProfileStore(tp=infer_tp, ep=infer_ep, pp=infer_pp)
 loaded = store.load_directory(PROFILE_DIR)
@@ -175,11 +201,15 @@ print(f"  Saved: {default_result_path}")
 
 _sep("Step 4: Run MFS policy")
 
-mfs_analysis = MfsAnalyzer(topology).analyze(inference_wl, batch_task_map)
-mfs_config = MfsAllocatorConfig()
+# Pass trace to MfsAnalyzer so it can extract deadline metadata
+mfs_analysis = MfsAnalyzer(topology).analyze(inference_wl, batch_task_map, trace=trace)
+
+# Enable deadline promotion if trace has deadlines, otherwise use Phase 1 delay
+mfs_config = MfsAllocatorConfig(enable_deadline_promotion=has_dl)
 mfs_policy = MfsSchedulingPolicy(analysis=mfs_analysis, allocator_config=mfs_config)
 mfs_result = _run_policy("mfs", mfs_policy, inference_wl, topology)
 
+print(f"  Promotion mode: {'MLU (deadline-aware)' if has_dl else 'delay-based (Phase 1)'}")
 print(f"  Makespan: {mfs_result.makespan_us} us  ({mfs_result.makespan_us/1e6:.3f} s)")
 print(f"  Tasks completed: {len(mfs_result.per_task)}")
 
@@ -207,6 +237,8 @@ print(f"  Saved: {mfs_qos_path}")
 
 # Summary comparison
 comparison = {
+    "promotion_mode": "mlu" if has_dl else "delay",
+    "deadline_aware": has_dl,
     "default": {
         "makespan_us": default_result.makespan_us,
         "makespan_ms": round(default_result.makespan_us / 1000, 2),
@@ -217,7 +249,7 @@ comparison = {
     },
 }
 
-# Per-request TTFT comparison
+# Per-request TTFT comparison (with deadline metrics when available)
 req_comp = []
 for d_rec in default_qos:
     m_rec = next((r for r in mfs_qos if r["request_id"] == d_rec["request_id"]), None)
@@ -236,6 +268,19 @@ for d_rec in default_qos:
             entry["default_last_collective_us"] = d_rec["collective_completion_us"][-1]
         if m_rec["collective_completion_us"]:
             entry["mfs_last_collective_us"] = m_rec["collective_completion_us"][-1]
+
+        # Deadline metrics
+        if "deadline_us" in d_rec:
+            entry["deadline_us"] = d_rec["deadline_us"]
+            entry["default_deadline_met"] = d_rec["deadline_met"]
+            entry["mfs_deadline_met"] = m_rec["deadline_met"]
+            entry["default_deadline_miss_us"] = d_rec["deadline_miss_us"]
+            entry["mfs_deadline_miss_us"] = m_rec["deadline_miss_us"]
+        if "p2d_earliness_us" in m_rec:
+            entry["mfs_p2d_earliness_us"] = m_rec["p2d_earliness_us"]
+        if "p2d_earliness_us" in d_rec:
+            entry["default_p2d_earliness_us"] = d_rec["p2d_earliness_us"]
+
         req_comp.append(entry)
 
 comparison["per_request"] = req_comp
@@ -244,7 +289,8 @@ comp_path = os.path.join(OUTPUT_DIR, "comparison_report.json")
 with open(comp_path, "w") as f:
     json.dump(comparison, f, indent=2)
 
-print(f"\n  Default makespan: {comparison['default']['makespan_ms']} ms")
+print(f"\n  Promotion mode: {'MLU (deadline-aware)' if has_dl else 'delay-based'}")
+print(f"  Default makespan: {comparison['default']['makespan_ms']} ms")
 print(f"  MFS makespan:     {comparison['mfs']['makespan_ms']} ms")
 print(f"\n  Saved: {comp_path}")
 

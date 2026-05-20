@@ -17,6 +17,14 @@ class MfsStage(str, Enum):
 
 
 @dataclass
+class MfsRequestInfo:
+    request_id: int
+    arrival_time_us: int | None
+    ttft_slo_us: int | None
+    deadline_us: int | None
+
+
+@dataclass
 class MfsTaskInfo:
     task_id: int
     batch_id: str | None
@@ -32,6 +40,7 @@ class MfsContext:
     task_info: dict[int, MfsTaskInfo] = field(default_factory=dict)
     batch_to_tasks: dict[str, tuple[int, ...]] = field(default_factory=dict)
     request_to_tasks: dict[int, tuple[int, ...]] = field(default_factory=dict)
+    request_info: dict[int, MfsRequestInfo] = field(default_factory=dict)
 
 
 _COLLECTIVE_TYPES = frozenset({
@@ -61,6 +70,7 @@ def _classify_task(task: Task) -> tuple[MfsStage, str]:
 def build_mfs_context(
     workload: P2PWorkload,
     batch_task_map: dict,
+    trace: dict | None = None,
 ) -> MfsContext:
     """Build MFS sidecar metadata from a workload and its batch_task_map.
 
@@ -68,9 +78,12 @@ def build_mfs_context(
         workload: The P2PWorkload (output of InferenceTraceExpander).
         batch_task_map: Mapping from batch/transfer key to
             {task_ids, request_ids, type, replica_id, ...}.
+        trace: Optional raw Vidur trace dict. If provided and contains
+            deadline fields, request_info will be populated.
 
     Returns:
-        MfsContext with per-task info, batch grouping, and request grouping.
+        MfsContext with per-task info, batch grouping, request grouping,
+        and optional deadline metadata.
     """
     # Build reverse index: task_id -> (batch_id, request_ids, stage_id)
     tid_to_batch: dict[int, tuple[str, tuple[int, ...], int]] = {}
@@ -112,5 +125,16 @@ def build_mfs_context(
         for rid in info.request_ids:
             req_tasks.setdefault(rid, []).append(info.task_id)
     ctx.request_to_tasks = {rid: tuple(tids) for rid, tids in req_tasks.items()}
+
+    # Parse request deadline metadata from trace
+    if trace and "requests" in trace:
+        for rid_str, req_entry in trace["requests"].items():
+            rid = int(rid_str)
+            ctx.request_info[rid] = MfsRequestInfo(
+                request_id=rid,
+                arrival_time_us=req_entry.get("arrival_time_us"),
+                ttft_slo_us=req_entry.get("ttft_slo_us"),
+                deadline_us=req_entry.get("deadline_us"),
+            )
 
     return ctx

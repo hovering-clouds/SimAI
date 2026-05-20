@@ -28,10 +28,11 @@ class MfsAnalyzer:
         self,
         workload: P2PWorkload,
         batch_task_map: dict,
+        trace: dict | None = None,
     ) -> MfsAnalysisResult:
         route_table = BfsStrategy().compute_routes(workload, self.topology)
         execution_plan = CppReferenceSerializer().serialize(workload)
-        context = build_mfs_context(workload, batch_task_map)
+        context = build_mfs_context(workload, batch_task_map, trace=trace)
         rli_info = compute_static_rli(workload, context)
         return MfsAnalysisResult(
             route_table=route_table,

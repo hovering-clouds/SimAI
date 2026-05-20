@@ -40,16 +40,21 @@ class TraceRecorder:
         replica_config,
         output_dir: str = ".",
         enabled: bool = True,
+        ttft_slo_us: int | None = None,
     ):
         """
         Args:
             replica_config: Vidur ReplicaConfig with model, parallelism, and PD settings.
             output_dir: Directory to write trace JSON.
             enabled: Set False to disable recording.
+            ttft_slo_us: Optional TTFT SLO in microseconds. If set, each request's
+                deadline_us = arrival_time_us + ttft_slo_us. If None, deadline fields
+                are omitted (backward compatible).
         """
         self._config = replica_config
         self._output_dir = output_dir
         self._enabled = enabled
+        self._ttft_slo_us = ttft_slo_us
 
         # Accumulated data
         self._requests: dict[str, dict] = {}
@@ -73,10 +78,22 @@ class TraceRecorder:
         """Record a request when it first arrives (call from global scheduler)."""
         if not self._enabled:
             return
-        self._requests[str(request.id)] = {
+        entry = {
             "num_prefill_tokens": request.num_prefill_tokens,
             "num_decode_tokens": request.num_decode_tokens,
         }
+
+        # Add deadline metadata if SLO is configured
+        arrival_time = getattr(request, 'arrival_time', None)
+        if arrival_time is not None:
+            entry["arrival_time_us"] = int(arrival_time)
+
+        if self._ttft_slo_us is not None:
+            entry["ttft_slo_us"] = self._ttft_slo_us
+            at = entry.get("arrival_time_us", 0)
+            entry["deadline_us"] = at + self._ttft_slo_us
+
+        self._requests[str(request.id)] = entry
 
     def record_batch_stage(
         self,

@@ -6,7 +6,7 @@ from src.workload_format.schema import (
     ParallelismConfig,
 )
 from src.static_analysis.passes.mfs_context import (
-    MfsContext, MfsTaskInfo, MfsStage,
+    MfsContext, MfsTaskInfo, MfsStage, MfsRequestInfo,
     build_mfs_context,
 )
 from src.static_analysis.passes.mfs_rli import RliInfo, compute_static_rli
@@ -208,3 +208,88 @@ class TestComputeStaticRli:
         ctx = build_mfs_context(wl, btm)
         rli = compute_static_rli(wl, ctx, current_layer_by_stage={(0, 0): 5})
         assert rli[1].base_rli == 0
+
+
+# ── Deadline / MfsRequestInfo tests ───────────────────────────────────────────
+
+
+class TestDeadlineParsing:
+    """Tests for Phase 2 deadline metadata parsing."""
+
+    def test_request_info_from_trace(self):
+        """Trace with deadline fields should populate request_info."""
+        t0 = _compute_task(0)
+        wl = _make_workload([t0])
+        btm = {"b1": {"task_ids": [0], "request_ids": [5], "type": "prefill"}}
+        trace = {
+            "requests": {
+                "5": {
+                    "num_prefill_tokens": 1024,
+                    "num_decode_tokens": 64,
+                    "arrival_time_us": 100,
+                    "ttft_slo_us": 2000000,
+                    "deadline_us": 2000100,
+                },
+            },
+        }
+        ctx = build_mfs_context(wl, btm, trace=trace)
+        assert ctx.request_info[5].arrival_time_us == 100
+        assert ctx.request_info[5].ttft_slo_us == 2000000
+        assert ctx.request_info[5].deadline_us == 2000100
+
+    def test_no_trace_means_no_request_info(self):
+        """Without trace, request_info should be empty."""
+        t0 = _compute_task(0)
+        wl = _make_workload([t0])
+        btm = {"b1": {"task_ids": [0], "request_ids": [5], "type": "prefill"}}
+        ctx = build_mfs_context(wl, btm)
+        assert ctx.request_info == {}
+
+    def test_trace_without_deadline_fields(self):
+        """Trace missing deadline fields should produce None values."""
+        t0 = _compute_task(0)
+        wl = _make_workload([t0])
+        btm = {"b1": {"task_ids": [0], "request_ids": [5], "type": "prefill"}}
+        trace = {
+            "requests": {
+                "5": {
+                    "num_prefill_tokens": 1024,
+                    "num_decode_tokens": 64,
+                },
+            },
+        }
+        ctx = build_mfs_context(wl, btm, trace=trace)
+        assert ctx.request_info[5].arrival_time_us is None
+        assert ctx.request_info[5].ttft_slo_us is None
+        assert ctx.request_info[5].deadline_us is None
+
+    def test_multiple_requests_with_deadlines(self):
+        """Multiple requests should each get their own deadline info."""
+        t0 = _compute_task(0)
+        t1 = _compute_task(1, node=1)
+        wl = _make_workload([t0, t1])
+        btm = {
+            "b1": {"task_ids": [0], "request_ids": [1], "type": "prefill"},
+            "b2": {"task_ids": [1], "request_ids": [2], "type": "prefill"},
+        }
+        trace = {
+            "requests": {
+                "1": {
+                    "num_prefill_tokens": 512,
+                    "num_decode_tokens": 32,
+                    "arrival_time_us": 0,
+                    "ttft_slo_us": 1000000,
+                    "deadline_us": 1000000,
+                },
+                "2": {
+                    "num_prefill_tokens": 1024,
+                    "num_decode_tokens": 64,
+                    "arrival_time_us": 500,
+                    "ttft_slo_us": 2000000,
+                    "deadline_us": 2000500,
+                },
+            },
+        }
+        ctx = build_mfs_context(wl, btm, trace=trace)
+        assert ctx.request_info[1].deadline_us == 1000000
+        assert ctx.request_info[2].deadline_us == 2000500

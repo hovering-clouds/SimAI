@@ -2,7 +2,7 @@
 import pytest
 
 from src.static_analysis.passes.topology_loader import NetworkTopology, Link
-from src.static_analysis.passes.mfs_context import MfsContext, MfsTaskInfo, MfsStage
+from src.static_analysis.passes.mfs_context import MfsContext, MfsTaskInfo, MfsStage, MfsRequestInfo
 from src.static_analysis.passes.mfs_rli import RliInfo
 from src.executor.bandwidth_allocators.mfs_allocator import (
     MfsAllocator, MfsAllocatorConfig,
@@ -165,3 +165,130 @@ class TestMfsAllocator:
         ctx = MfsContext()
         alloc = MfsAllocator(ctx, {})
         assert alloc.allocate([], self.topo, 0) == {}
+
+
+# ── MLU promotion tests (Phase 2) ─────────────────────────────────────────────
+
+
+class TestMluPromotion:
+    """Tests for MLU-based P2D promotion."""
+
+    def test_loose_deadline_stays_low(self):
+        """P2D with loose deadline (low MLU) should stay at low priority."""
+        topo = NetworkTopology()
+        topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
+
+        ctx = _make_context([
+            MfsTaskInfo(2, None, (1,), 0, MfsStage.P2D, 0, "p2d_transfer"),
+        ])
+        ctx.request_info[1] = MfsRequestInfo(
+            request_id=1, arrival_time_us=0, ttft_slo_us=10000000,
+            deadline_us=10000000,  # very far in the future
+        )
+        rli = {2: RliInfo(2, 0, 10000)}
+        cfg = MfsAllocatorConfig(enable_deadline_promotion=True)
+        alloc = MfsAllocator(ctx, rli, cfg)
+
+        # Large remaining time, small remaining bytes -> low MLU
+        f2 = _flow(2, 0, 1, 100, start=0, path=[0, 1])
+        result = alloc.allocate([f2], topo, current_time=100)
+        # Should still be at low queue, get full bw since no contention
+        assert result[2] == 100.0
+
+    def test_tight_deadline_gets_promoted(self):
+        """P2D with tight deadline (high MLU) should be promoted to urgent."""
+        # Use 1 Gbps link so MLU values are meaningful with small data
+        topo = NetworkTopology()
+        topo.add_link(Link(0, 1, 1.0, 1.0, 0.0))
+
+        ctx = _make_context([
+            MfsTaskInfo(1, None, (), 0, MfsStage.EARLY, 0, "collective"),
+            MfsTaskInfo(2, None, (1,), 0, MfsStage.P2D, 0, "p2d_transfer"),
+        ])
+        ctx.request_info[1] = MfsRequestInfo(
+            request_id=1, arrival_time_us=0, ttft_slo_us=1000,
+            deadline_us=1000,
+        )
+        rli = {1: RliInfo(1, 0, 0), 2: RliInfo(2, 0, 10000)}
+        cfg = MfsAllocatorConfig(enable_deadline_promotion=True)
+        alloc = MfsAllocator(ctx, rli, cfg)
+
+        # P2D: 100KB remaining, 100us to deadline -> MLU = 800Kbits/(100*1e3) / 1Gbps = 8.0
+        f1 = _flow(1, 0, 1, 100, path=[0, 1])
+        f2 = _flow(2, 0, 1, 100000, start=0, path=[0, 1])
+        result = alloc.allocate([f1, f2], topo, current_time=900)
+        # P2D (urgent queue 3) > EARLY (queue 2) -> P2D gets all bandwidth
+        assert result[2] == 1.0
+        assert result[1] == 0.0
+
+    def test_past_deadline_gets_urgent(self):
+        """P2D past deadline should go to urgent queue immediately."""
+        topo = NetworkTopology()
+        topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
+
+        ctx = _make_context([
+            MfsTaskInfo(2, None, (1,), 0, MfsStage.P2D, 0, "p2d_transfer"),
+        ])
+        ctx.request_info[1] = MfsRequestInfo(
+            request_id=1, arrival_time_us=0, ttft_slo_us=100,
+            deadline_us=100,
+        )
+        rli = {2: RliInfo(2, 0, 10000)}
+        cfg = MfsAllocatorConfig(enable_deadline_promotion=True)
+        alloc = MfsAllocator(ctx, rli, cfg)
+
+        f2 = _flow(2, 0, 1, 1000, start=0, path=[0, 1])
+        result = alloc.allocate([f2], topo, current_time=200)
+        # Past deadline, still gets bandwidth (no contention)
+        assert result[2] == 100.0
+
+    def test_no_deadline_falls_back_to_delay(self):
+        """P2D without deadline should use Phase 1 delay-based heuristic."""
+        topo = NetworkTopology()
+        topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
+
+        ctx = _make_context([
+            MfsTaskInfo(2, None, (1,), 0, MfsStage.P2D, 0, "p2d_transfer"),
+        ])
+        # No request_info -> no deadline
+        rli = {2: RliInfo(2, 0, 10000)}
+        cfg = MfsAllocatorConfig(
+            enable_deadline_promotion=True,
+            p2d_promotion_delay_us=500,
+        )
+        alloc = MfsAllocator(ctx, rli, cfg)
+
+        f2 = _flow(2, 0, 1, 1000, start=0, path=[0, 1])
+
+        # Before delay: should be at low queue
+        result_before = alloc.allocate([f2], topo, current_time=100)
+        assert result_before[2] == 100.0  # full bw, no contention
+
+        # After delay: should be promoted via fallback
+        result_after = alloc.allocate([f2], topo, current_time=600)
+        assert result_after[2] == 100.0
+
+    def test_mlu_promotion_disabled_uses_delay(self):
+        """With enable_deadline_promotion=False, deadline is ignored."""
+        topo = NetworkTopology()
+        topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
+
+        ctx = _make_context([
+            MfsTaskInfo(2, None, (1,), 0, MfsStage.P2D, 0, "p2d_transfer"),
+        ])
+        ctx.request_info[1] = MfsRequestInfo(
+            request_id=1, arrival_time_us=0, ttft_slo_us=100,
+            deadline_us=100,  # tight deadline
+        )
+        rli = {2: RliInfo(2, 0, 10000)}
+        cfg = MfsAllocatorConfig(
+            enable_deadline_promotion=False,
+            p2d_promotion_delay_us=100000,  # long delay
+        )
+        alloc = MfsAllocator(ctx, rli, cfg)
+
+        f2 = _flow(2, 0, 1, 1000, start=0, path=[0, 1])
+        # Even with tight deadline, should stay at low queue (delay not reached)
+        result = alloc.allocate([f2], topo, current_time=50)
+        # No contention so still gets full bw, but the queue assignment is 0
+        assert result[2] == 100.0

@@ -19,6 +19,8 @@ class MfsAllocatorConfig:
     early_default_queue: int = 1
     urgent_p2d_queue: int = 3
     p2d_promotion_delay_us: int = 1000
+    p2d_mlu_thresholds: tuple[float, ...] = (0.5, 0.75, 0.9)
+    enable_deadline_promotion: bool = False
 
 
 class MfsAllocator(BandwidthAllocator):
@@ -34,12 +36,19 @@ class MfsAllocator(BandwidthAllocator):
         self.rli_info = rli_info
         self.config = config or MfsAllocatorConfig()
 
-    def _queue_for(self, flow, current_time: int) -> int:
+    def _queue_for(self, flow, current_time: int, topology: NetworkTopology | None = None) -> int:
         info = self.context.task_info.get(flow.task_id)
         if info is None:
             return 0
 
         if info.mfs_stage == MfsStage.P2D:
+            # Try MLU-based promotion first if deadlines are available
+            if self.config.enable_deadline_promotion:
+                deadline = self._earliest_deadline(info.request_ids)
+                if deadline is not None:
+                    return self._queue_for_mlu(flow, current_time, deadline, topology)
+
+            # Fallback: Phase 1 delay-based promotion
             if current_time - flow.start_time >= self.config.p2d_promotion_delay_us:
                 return self.config.urgent_p2d_queue
             return self.config.p2d_initial_queue
@@ -51,6 +60,58 @@ class MfsAllocator(BandwidthAllocator):
             return self.config.early_default_queue
 
         return 0
+
+    def _earliest_deadline(self, request_ids: tuple[int, ...]) -> int | None:
+        """Return the earliest deadline among the given requests, or None."""
+        deadlines = []
+        for rid in request_ids:
+            ri = self.context.request_info.get(rid)
+            if ri is not None and ri.deadline_us is not None:
+                deadlines.append(ri.deadline_us)
+        return min(deadlines) if deadlines else None
+
+    def _queue_for_mlu(
+        self,
+        flow,
+        current_time: int,
+        deadline_us: int,
+        topology: NetworkTopology | None,
+    ) -> int:
+        """Determine P2D queue using MLU (Minimal Link Utilization)."""
+        remaining_time = deadline_us - current_time
+
+        # Past deadline -> urgent
+        if remaining_time <= 0:
+            return self.config.urgent_p2d_queue
+
+        # Compute required bandwidth
+        remaining_bits = flow.remaining_bytes * 8
+        required_bw_gbps = remaining_bits / (remaining_time * 1e3) if remaining_time > 0 else float("inf")
+
+        # Estimate bottleneck bandwidth on flow path
+        bottleneck_bw = float("inf")
+        if topology is not None:
+            path = flow.path
+            for i in range(len(path) - 1):
+                link = topology.get_link(path[i], path[i + 1])
+                if link is not None:
+                    bottleneck_bw = min(bottleneck_bw, link.bandwidth_gbps)
+
+        if bottleneck_bw <= 0 or bottleneck_bw == float("inf"):
+            # Cannot estimate, keep at initial queue
+            return self.config.p2d_initial_queue
+
+        mlu = required_bw_gbps / bottleneck_bw
+
+        # Map MLU to queue based on thresholds
+        thresholds = self.config.p2d_mlu_thresholds
+        if mlu >= thresholds[-1]:
+            return self.config.urgent_p2d_queue
+        if len(thresholds) >= 2 and mlu >= thresholds[-2]:
+            return self.config.early_default_queue
+        if mlu >= thresholds[0]:
+            return self.config.early_rli0_queue
+        return self.config.p2d_initial_queue
 
     def allocate(
         self,
@@ -66,7 +127,7 @@ class MfsAllocator(BandwidthAllocator):
         # Assign each flow to a queue
         queue_flows: dict[int, list] = {q: [] for q in range(cfg.num_queues)}
         for flow in active_flows:
-            q = self._queue_for(flow, current_time)
+            q = self._queue_for(flow, current_time, topology)
             q = max(0, min(q, cfg.num_queues - 1))
             queue_flows[q].append(flow)
 

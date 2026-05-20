@@ -4,7 +4,7 @@ from .task_serializer import ExecutionPlan, TaskSerializer, CppReferenceSerializ
 from .puppeteer_tte import TTEInfo, FlowTiming
 from .routing import RouteTable, RouteStrategy, BfsStrategy, GreedyStrategy
 from .puppeteer_coordination import ResourceDependencyTable
-from .mfs_context import MfsContext, MfsTaskInfo, MfsStage, build_mfs_context
+from .mfs_context import MfsContext, MfsTaskInfo, MfsStage, MfsRequestInfo, build_mfs_context
 from .mfs_rli import RliInfo, compute_static_rli
 
 __all__ = [
@@ -21,6 +21,7 @@ __all__ = [
     "MfsContext",
     "MfsTaskInfo",
     "MfsStage",
+    "MfsRequestInfo",
     "build_mfs_context",
     "RliInfo",
     "compute_static_rli",
