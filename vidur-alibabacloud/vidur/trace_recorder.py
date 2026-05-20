@@ -47,9 +47,8 @@ class TraceRecorder:
             replica_config: Vidur ReplicaConfig with model, parallelism, and PD settings.
             output_dir: Directory to write trace JSON.
             enabled: Set False to disable recording.
-            ttft_slo_us: Optional TTFT SLO in microseconds. If set, each request's
-                deadline_us = arrival_time_us + ttft_slo_us. If None, deadline fields
-                are omitted (backward compatible).
+            ttft_slo_us: Optional TTFT SLO in microseconds. If set, written as
+                ttft_slo_us per request for deadline-aware scheduling.
         """
         self._config = replica_config
         self._output_dir = output_dir
@@ -83,15 +82,8 @@ class TraceRecorder:
             "num_decode_tokens": request.num_decode_tokens,
         }
 
-        # Add deadline metadata if SLO is configured
-        arrival_time = getattr(request, 'arrival_time', None)
-        if arrival_time is not None:
-            entry["arrival_time_us"] = int(arrival_time)
-
         if self._ttft_slo_us is not None:
             entry["ttft_slo_us"] = self._ttft_slo_us
-            at = entry.get("arrival_time_us", 0)
-            entry["deadline_us"] = at + self._ttft_slo_us
 
         self._requests[str(request.id)] = entry
 

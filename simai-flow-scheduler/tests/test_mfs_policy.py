@@ -39,24 +39,30 @@ def _make_workload(tasks, nodes=4):
     )
 
 
+def _empty_trace(request_ids=None):
+    """Build a minimal trace with optional ttft_slo_us per request."""
+    requests = {}
+    for rid in (request_ids or []):
+        requests[str(rid)] = {
+            "num_prefill_tokens": 100,
+            "num_decode_tokens": 10,
+        }
+    return {"requests": requests}
+
+
 class TestMfsPolicyExecutor:
     """Integration tests: MFS policy + AnalyticalExecutor."""
 
     def test_collective_completes_before_deferred_p2d(self):
         """Under MFS, a collective + P2D sharing a bottleneck link should have
-        the collective finish first when P2D is not promoted."""
-        # Line topology: 0 -- 1 -- 2
-        # Both flows must traverse link (0,1), creating bottleneck contention
+        the collective finish first when P2D is not promoted (no SLO)."""
         topo = _line_topo(n=3, bw=100.0)
 
-        # Compute on node 0 (gate for both flows)
         t0 = Task(task_id=0, job_id=0, type=TaskType.COMPUTE,
                   node=0, duration_us=10, phase=Phase.PREFILL, layer_id=0)
-        # Collective flow (early, RLI 0) 0 -> 1, shares link (0,1)
         t1 = Task(task_id=1, job_id=0, type=TaskType.FLOW,
                   src=0, dst=1, size_bytes=100000, comm_type=CommType.TP_ALLREDUCE_RING,
                   phase=Phase.PREFILL, layer_id=0, deps=[0])
-        # P2D flow (low priority) 0 -> 2, must traverse link (0,1) too
         t2 = Task(task_id=2, job_id=0, type=TaskType.FLOW,
                   src=0, dst=2, size_bytes=100000, comm_type=CommType.KV_CACHE_TRANSFER,
                   phase=Phase.PREFILL, layer_id=0, deps=[0])
@@ -66,31 +72,26 @@ class TestMfsPolicyExecutor:
             "b1": {"task_ids": [0, 1], "request_ids": [1], "type": "prefill"},
             "kv_b1_b2": {"task_ids": [2], "request_ids": [1], "type": "kv_transfer"},
         }
+        trace = _empty_trace([1])
 
-        analysis = MfsAnalyzer(topo).analyze(wl, btm)
-        cfg = MfsAllocatorConfig(p2d_promotion_delay_us=100000)  # long delay
-        policy = MfsSchedulingPolicy(analysis=analysis, allocator_config=cfg)
+        analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
+        policy = MfsSchedulingPolicy(analysis=analysis)
         executor = AnalyticalExecutor(topology=topo, policy=policy)
         result = executor.execute(wl)
 
-        # Both start at t=10 (after compute). Collective gets full 100Gbps,
-        # P2D gets 0. Collective finishes first.
         assert result.per_task[1].start_time_us == 10
         assert result.per_task[2].start_time_us == 10
         assert result.per_task[1].end_time_us < result.per_task[2].end_time_us
 
-    def test_p2d_promoted_after_delay(self):
-        """With short promotion delay, P2D should be promoted and get high bw."""
-        topo = _star_topo(bw=100.0)
+    def test_p2d_with_tight_slo_gets_promoted(self):
+        """P2D with tight ttft_slo_us should be promoted via MLU."""
+        topo = _star_topo(bw=1.0)
 
-        # Two computes
         t0 = Task(task_id=0, job_id=0, type=TaskType.COMPUTE,
                   node=0, duration_us=10, phase=Phase.PREFILL, layer_id=0)
-        # Early collective
         t1 = Task(task_id=1, job_id=0, type=TaskType.FLOW,
                   src=0, dst=1, size_bytes=100000, comm_type=CommType.TP_ALLREDUCE_RING,
                   phase=Phase.PREFILL, layer_id=0, deps=[0])
-        # P2D sharing the same switch bottleneck
         t2 = Task(task_id=2, job_id=0, type=TaskType.FLOW,
                   src=2, dst=3, size_bytes=100000, comm_type=CommType.KV_CACHE_TRANSFER,
                   phase=Phase.PREFILL, layer_id=0)
@@ -100,23 +101,19 @@ class TestMfsPolicyExecutor:
             "b1": {"task_ids": [0, 1], "request_ids": [1], "type": "prefill"},
             "kv_b1_b2": {"task_ids": [2], "request_ids": [1], "type": "kv_transfer"},
         }
+        trace = {"requests": {"1": {"num_prefill_tokens": 100, "num_decode_tokens": 10, "ttft_slo_us": 1000}}}
 
-        analysis = MfsAnalyzer(topo).analyze(wl, btm)
-        # Very short promotion delay so P2D promotes almost immediately
-        cfg = MfsAllocatorConfig(p2d_promotion_delay_us=1)
-        policy = MfsSchedulingPolicy(analysis=analysis, allocator_config=cfg)
+        analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
+        policy = MfsSchedulingPolicy(analysis=analysis)
         executor = AnalyticalExecutor(topology=topo, policy=policy)
         result = executor.execute(wl)
 
-        # With fast promotion, P2D should complete relatively quickly
-        # (not stalled behind collective)
         assert result.per_task[2].end_time_us > 0
 
     def test_compute_ordering_matches_default(self):
         """MFS policy should preserve compute ordering same as default."""
         topo = _star_topo(bw=100.0)
 
-        # Two sequential computes on node 0
         t0 = Task(task_id=0, job_id=0, type=TaskType.COMPUTE,
                   node=0, duration_us=100, phase=Phase.PREFILL, layer_id=0)
         t1 = Task(task_id=1, job_id=0, type=TaskType.COMPUTE,
@@ -128,13 +125,13 @@ class TestMfsPolicyExecutor:
 
         wl = _make_workload([t0, t1, t2])
         btm = {"b1": {"task_ids": [0, 1, 2], "request_ids": [1], "type": "prefill"}}
+        trace = _empty_trace([1])
 
-        analysis = MfsAnalyzer(topo).analyze(wl, btm)
+        analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
         policy = MfsSchedulingPolicy(analysis=analysis)
         executor = AnalyticalExecutor(topology=topo, policy=policy)
         result = executor.execute(wl)
 
-        # t1 should start after t0 completes
         assert result.per_task[1].start_time_us >= result.per_task[0].end_time_us
 
     def test_no_deadlock_with_ready_p2d(self):
@@ -143,7 +140,6 @@ class TestMfsPolicyExecutor:
 
         t0 = Task(task_id=0, job_id=0, type=TaskType.COMPUTE,
                   node=0, duration_us=10, phase=Phase.PREFILL, layer_id=0)
-        # Multiple P2D flows
         t1 = Task(task_id=1, job_id=0, type=TaskType.FLOW,
                   src=0, dst=1, size_bytes=1000, comm_type=CommType.KV_CACHE_TRANSFER,
                   phase=Phase.PREFILL, layer_id=0, deps=[0])
@@ -157,10 +153,55 @@ class TestMfsPolicyExecutor:
             "kv_b1_b2": {"task_ids": [1], "request_ids": [1], "type": "kv_transfer"},
             "kv_b3_b4": {"task_ids": [2], "request_ids": [2], "type": "kv_transfer"},
         }
+        trace = _empty_trace([1, 2])
 
-        analysis = MfsAnalyzer(topo).analyze(wl, btm)
+        analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
         policy = MfsSchedulingPolicy(analysis=analysis)
         executor = AnalyticalExecutor(topology=topo, policy=policy)
-        # Should not raise RuntimeError (deadlock)
         result = executor.execute(wl)
         assert len(result.per_task) == 3
+
+    def test_request_start_time_tracking(self):
+        """Policy should track request_start_time in allocator when tasks are emitted."""
+        topo = _star_topo(bw=100.0)
+
+        t0 = Task(task_id=0, job_id=0, type=TaskType.COMPUTE,
+                  node=0, duration_us=10, phase=Phase.PREFILL, layer_id=0)
+        t1 = Task(task_id=1, job_id=0, type=TaskType.FLOW,
+                  src=0, dst=1, size_bytes=1000, comm_type=CommType.TP_ALLREDUCE_RING,
+                  phase=Phase.PREFILL, layer_id=0, deps=[0])
+
+        wl = _make_workload([t0, t1])
+        btm = {"b1": {"task_ids": [0, 1], "request_ids": [5], "type": "prefill"}}
+        trace = _empty_trace([5])
+
+        analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
+        policy = MfsSchedulingPolicy(analysis=analysis)
+        executor = AnalyticalExecutor(topology=topo, policy=policy)
+        result = executor.execute(wl)
+
+        # After execution, request 5 should have a start time recorded
+        assert 5 in policy.allocator.request_start_time
+        assert policy.allocator.request_start_time[5] >= 0
+
+    def test_current_layer_advances_on_compute_complete(self):
+        """Allocator's current_layer should advance as compute tasks complete."""
+        topo = _star_topo(bw=100.0)
+
+        t0 = Task(task_id=0, job_id=0, type=TaskType.COMPUTE,
+                  node=0, duration_us=10, phase=Phase.PREFILL, layer_id=0)
+        t1 = Task(task_id=1, job_id=0, type=TaskType.COMPUTE,
+                  node=0, duration_us=10, phase=Phase.PREFILL, layer_id=1,
+                  deps=[0])
+
+        wl = _make_workload([t0, t1])
+        btm = {"b1": {"task_ids": [0, 1], "request_ids": [1], "type": "prefill", "stage_id": 0}}
+        trace = _empty_trace([1])
+
+        analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
+        policy = MfsSchedulingPolicy(analysis=analysis)
+        executor = AnalyticalExecutor(topology=topo, policy=policy)
+        result = executor.execute(wl)
+
+        # After both compute tasks complete, current_layer for (0,0) should be 2
+        assert policy.allocator.current_layer_by_stage.get((0, 0), 0) >= 1

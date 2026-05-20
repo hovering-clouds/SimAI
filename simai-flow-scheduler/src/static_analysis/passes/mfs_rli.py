@@ -1,7 +1,9 @@
-"""RLI (Relative Layer Index) metadata for MFS flow prioritization.
+"""DEPRECATED: RLI (Relative Layer Index) metadata for MFS flow prioritization.
 
-Computes static RLI for early-stage flows. Lower RLI means higher urgency.
-P2D flows get a sentinel value so they don't compete with early-stage RLI ranking.
+This module is deprecated. RLI is now computed on-demand inside MfsAllocator
+using dynamic current_layer state updated by MfsSchedulingPolicy.
+
+Kept only for reference. Do not import in new code.
 """
 from dataclasses import dataclass
 

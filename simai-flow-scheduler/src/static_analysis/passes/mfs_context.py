@@ -7,7 +7,7 @@ priority computation.
 from dataclasses import dataclass, field
 from enum import Enum
 
-from ...workload_format.schema import P2PWorkload, Task, CommType, TaskType
+from ...workload_format.schema import P2PWorkload, Task, CommType
 
 
 class MfsStage(str, Enum):
@@ -19,14 +19,13 @@ class MfsStage(str, Enum):
 @dataclass
 class MfsRequestInfo:
     request_id: int
-    arrival_time_us: int | None
     ttft_slo_us: int | None
-    deadline_us: int | None
 
 
 @dataclass
 class MfsTaskInfo:
     task_id: int
+    job_id: int
     batch_id: str | None
     request_ids: tuple[int, ...]
     stage_id: int
@@ -70,7 +69,7 @@ def _classify_task(task: Task) -> tuple[MfsStage, str]:
 def build_mfs_context(
     workload: P2PWorkload,
     batch_task_map: dict,
-    trace: dict | None = None,
+    trace: dict,
 ) -> MfsContext:
     """Build MFS sidecar metadata from a workload and its batch_task_map.
 
@@ -78,8 +77,7 @@ def build_mfs_context(
         workload: The P2PWorkload (output of InferenceTraceExpander).
         batch_task_map: Mapping from batch/transfer key to
             {task_ids, request_ids, type, replica_id, ...}.
-        trace: Optional raw Vidur trace dict. If provided and contains
-            deadline fields, request_info will be populated.
+        trace: Raw Vidur trace dict. Used to extract ttft_slo_us per request.
 
     Returns:
         MfsContext with per-task info, batch grouping, request grouping,
@@ -97,7 +95,6 @@ def build_mfs_context(
     ctx = MfsContext()
 
     # Per-task classification
-    task_map = {t.task_id: t for t in workload.tasks}
     for task in workload.tasks:
         mfs_stage, comm_role = _classify_task(task)
         bid, req_ids, stage_id = tid_to_batch.get(
@@ -105,6 +102,7 @@ def build_mfs_context(
         )
         ctx.task_info[task.task_id] = MfsTaskInfo(
             task_id=task.task_id,
+            job_id=task.job_id,
             batch_id=bid,
             request_ids=req_ids,
             stage_id=stage_id,
@@ -126,15 +124,13 @@ def build_mfs_context(
             req_tasks.setdefault(rid, []).append(info.task_id)
     ctx.request_to_tasks = {rid: tuple(tids) for rid, tids in req_tasks.items()}
 
-    # Parse request deadline metadata from trace
-    if trace and "requests" in trace:
+    # Parse request SLO metadata from trace
+    if "requests" in trace:
         for rid_str, req_entry in trace["requests"].items():
             rid = int(rid_str)
             ctx.request_info[rid] = MfsRequestInfo(
                 request_id=rid,
-                arrival_time_us=req_entry.get("arrival_time_us"),
                 ttft_slo_us=req_entry.get("ttft_slo_us"),
-                deadline_us=req_entry.get("deadline_us"),
             )
 
     return ctx

@@ -1,7 +1,8 @@
 """MFS scheduling policy — compute ordering + MFS-aware bandwidth allocation.
 
 Preserves compute ordering via ExecutionPlan, uses default routing,
-and delegates bandwidth allocation to MfsAllocator.
+and delegates bandwidth allocation to MfsAllocator. Tracks request start
+times and updates dynamic RLI state in the allocator.
 """
 from collections import defaultdict
 from typing import Optional
@@ -11,6 +12,7 @@ from ..bandwidth_allocators.mfs_allocator import MfsAllocator, MfsAllocatorConfi
 from ..runtime import ActiveFlow
 from ...static_analysis.strategies.mfs_strategy import MfsAnalysisResult
 from ...static_analysis.passes.topology_loader import NetworkTopology
+from ...static_analysis.passes.mfs_context import MfsStage
 from ...workload_format.schema import P2PWorkload, Task
 
 
@@ -42,7 +44,6 @@ class MfsSchedulingPolicy(SchedulingPolicy):
         self.compute_cursor = defaultdict(int)
         self.allocator = MfsAllocator(
             context=self._analysis.mfs_context,
-            rli_info=self._analysis.rli_info,
             config=self._allocator_config,
         )
 
@@ -78,8 +79,22 @@ class MfsSchedulingPolicy(SchedulingPolicy):
         )
 
     def on_task_emitted(self, current_time: int, task: Task) -> None:
-        pass
+        """Record request start time when the first task of a request is emitted."""
+        info = self._analysis.mfs_context.task_info.get(task.task_id)
+        if info is None:
+            return
+        for rid in info.request_ids:
+            if rid not in self.allocator.request_start_time:
+                self.allocator.request_start_time[rid] = current_time
 
     def on_task_completed(self, current_time: int, task: Task) -> None:
+        """Advance compute cursor and update dynamic layer tracking."""
         if task.is_compute():
             self.compute_cursor[task.node] += 1
+            # Update current_layer for this (job, stage)
+            info = self._analysis.mfs_context.task_info.get(task.task_id)
+            if info is not None:
+                stage_key = (task.job_id, info.stage_id)
+                prev = self.allocator.current_layer_by_stage.get(stage_key, 0)
+                if task.layer_id + 1 > prev:
+                    self.allocator.current_layer_by_stage[stage_key] = task.layer_id + 1

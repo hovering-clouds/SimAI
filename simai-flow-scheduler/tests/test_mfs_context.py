@@ -1,4 +1,4 @@
-"""Tests for MFS context metadata and RLI computation."""
+"""Tests for MFS context metadata."""
 import pytest
 
 from src.workload_format.schema import (
@@ -9,7 +9,6 @@ from src.static_analysis.passes.mfs_context import (
     MfsContext, MfsTaskInfo, MfsStage, MfsRequestInfo,
     build_mfs_context,
 )
-from src.static_analysis.passes.mfs_rli import RliInfo, compute_static_rli
 
 
 def _make_workload(tasks: list[Task]) -> P2PWorkload:
@@ -51,7 +50,7 @@ class TestBuildMfsContext:
         t1 = _flow_task(1, 0, 2, 1000, CommType.KV_CACHE_TRANSFER)
         wl = _make_workload([t0, t1])
         btm = {"kv_b1_b2": {"task_ids": [1], "request_ids": [10], "type": "kv_transfer"}}
-        ctx = build_mfs_context(wl, btm)
+        ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.P2D
         assert ctx.task_info[1].comm_role == "p2d_transfer"
 
@@ -60,7 +59,7 @@ class TestBuildMfsContext:
         t1 = _flow_task(1, 0, 1, 500, CommType.PP_SEND)
         wl = _make_workload([t1])
         btm = {"pp_b1_b2": {"task_ids": [1], "request_ids": [], "type": "pp_comm"}}
-        ctx = build_mfs_context(wl, btm)
+        ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.EARLY
         assert ctx.task_info[1].comm_role == "pp_send"
 
@@ -71,7 +70,7 @@ class TestBuildMfsContext:
             t1 = _flow_task(1, 0, 1, 500, ct)
             wl = _make_workload([t1])
             btm = {"b1": {"task_ids": [1], "request_ids": [1], "type": "prefill"}}
-            ctx = build_mfs_context(wl, btm)
+            ctx = build_mfs_context(wl, btm, trace={"requests": {}})
             assert ctx.task_info[1].mfs_stage == MfsStage.EARLY, f"Failed for {ct}"
             assert ctx.task_info[1].comm_role == "collective"
 
@@ -80,7 +79,7 @@ class TestBuildMfsContext:
         t0 = _compute_task(0, node=0)
         wl = _make_workload([t0])
         btm = {"b1": {"task_ids": [0], "request_ids": [1], "type": "prefill"}}
-        ctx = build_mfs_context(wl, btm)
+        ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[0].mfs_stage == MfsStage.BACKGROUND
         assert ctx.task_info[0].comm_role == "compute"
 
@@ -89,7 +88,7 @@ class TestBuildMfsContext:
         t1 = _flow_task(1, 0, 1, 500, CommType.UNKNOWN)
         wl = _make_workload([t1])
         btm = {}
-        ctx = build_mfs_context(wl, btm)
+        ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.BACKGROUND
         assert ctx.task_info[1].comm_role == "unknown"
 
@@ -99,7 +98,7 @@ class TestBuildMfsContext:
         t1 = _flow_task(1, 0, 1, 100)
         wl = _make_workload([t0, t1])
         btm = {"b1": {"task_ids": [0, 1], "request_ids": [1], "type": "prefill"}}
-        ctx = build_mfs_context(wl, btm)
+        ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.batch_to_tasks["b1"] == (0, 1)
 
     def test_request_to_tasks_mapping(self):
@@ -111,7 +110,7 @@ class TestBuildMfsContext:
             "b1": {"task_ids": [0], "request_ids": [5], "type": "prefill"},
             "kv_b1_b2": {"task_ids": [1], "request_ids": [5], "type": "kv_transfer"},
         }
-        ctx = build_mfs_context(wl, btm)
+        ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert set(ctx.request_to_tasks[5]) == {0, 1}
 
     def test_prefill_collective_is_early(self):
@@ -120,14 +119,14 @@ class TestBuildMfsContext:
         t1 = _flow_task(1, 0, 1, 200, CommType.TP_ALLREDUCE_RING, layer=2)
         wl = _make_workload([t0, t1])
         btm = {"b1": {"task_ids": [0, 1], "request_ids": [1], "type": "prefill"}}
-        ctx = build_mfs_context(wl, btm)
+        ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.EARLY
 
     def test_no_batch_task_map(self):
         """Tasks not in batch_task_map should get None batch_id, empty req_ids."""
         t0 = _compute_task(0)
         wl = _make_workload([t0])
-        ctx = build_mfs_context(wl, {})
+        ctx = build_mfs_context(wl, {}, trace={"requests": {}})
         assert ctx.task_info[0].batch_id is None
         assert ctx.task_info[0].request_ids == ()
 
@@ -136,88 +135,18 @@ class TestBuildMfsContext:
         t0 = _compute_task(0)
         wl = _make_workload([t0])
         btm = {"b1": {"task_ids": [0], "request_ids": [1], "type": "prefill", "stage_id": 2}}
-        ctx = build_mfs_context(wl, btm)
+        ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[0].stage_id == 2
 
 
-# ── RLI tests ─────────────────────────────────────────────────────────────────
+# ── MfsRequestInfo / SLO parsing tests ────────────────────────────────────────
 
 
-class TestComputeStaticRli:
-    """Tests for compute_static_rli."""
+class TestSloParsing:
+    """Tests for ttft_slo_us metadata parsing from trace."""
 
-    def test_flow_at_layer_0_gets_rli_0(self):
-        """Flow at layer 0 with current layer 0 gets RLI 0."""
-        t0 = _compute_task(0, node=0, layer=0)
-        t1 = _flow_task(1, 0, 1, 100, CommType.TP_ALLREDUCE_RING, layer=0)
-        wl = _make_workload([t0, t1])
-        btm = {"b1": {"task_ids": [0, 1], "request_ids": [1], "type": "prefill"}}
-        ctx = build_mfs_context(wl, btm)
-        rli = compute_static_rli(wl, ctx)
-        assert rli[1].base_rli == 0
-
-    def test_flow_at_layer_2_gets_rli_2(self):
-        """Flow at layer 2 with current layer 0 gets RLI 2."""
-        t1 = _flow_task(1, 0, 1, 100, CommType.TP_ALLREDUCE_RING, layer=2)
-        wl = _make_workload([t1])
-        btm = {"b1": {"task_ids": [1], "request_ids": [1], "type": "prefill"}}
-        ctx = build_mfs_context(wl, btm)
-        rli = compute_static_rli(wl, ctx)
-        assert rli[1].base_rli == 2
-
-    def test_p2d_gets_large_rli(self):
-        """P2D flows should get a large sentinel RLI (not outrank RLI 0)."""
-        t1 = _flow_task(1, 0, 2, 1000, CommType.KV_CACHE_TRANSFER, layer=0)
-        wl = _make_workload([t1])
-        btm = {"kv_b1_b2": {"task_ids": [1], "request_ids": [1], "type": "kv_transfer"}}
-        ctx = build_mfs_context(wl, btm)
-        rli = compute_static_rli(wl, ctx)
-        assert rli[1].base_rli > 100
-
-    def test_early_outranks_p2d(self):
-        """RLI 0 collective should outrank P2D in priority."""
-        t_early = _flow_task(1, 0, 1, 100, CommType.TP_ALLREDUCE_RING, layer=0)
-        t_p2d = _flow_task(2, 0, 2, 1000, CommType.KV_CACHE_TRANSFER, layer=0)
-        wl = _make_workload([t_early, t_p2d])
-        btm = {
-            "b1": {"task_ids": [1], "request_ids": [1], "type": "prefill"},
-            "kv_b1_b2": {"task_ids": [2], "request_ids": [1], "type": "kv_transfer"},
-        }
-        ctx = build_mfs_context(wl, btm)
-        rli = compute_static_rli(wl, ctx)
-        assert rli[1].base_rli < rli[2].base_rli
-
-    def test_rli_with_current_layer(self):
-        """RLI should decrease when current_layer advances."""
-        t1 = _flow_task(1, 0, 1, 100, CommType.TP_ALLREDUCE_RING, layer=3)
-        wl = _make_workload([t1])
-        btm = {"b1": {"task_ids": [1], "request_ids": [1], "type": "prefill"}}
-        ctx = build_mfs_context(wl, btm)
-
-        rli_0 = compute_static_rli(wl, ctx, current_layer_by_stage={(0, 0): 0})
-        rli_2 = compute_static_rli(wl, ctx, current_layer_by_stage={(0, 0): 2})
-
-        assert rli_0[1].base_rli == 3
-        assert rli_2[1].base_rli == 1
-
-    def test_rli_non_negative(self):
-        """RLI should never go below 0 (even if current_layer > target_layer)."""
-        t1 = _flow_task(1, 0, 1, 100, CommType.TP_ALLREDUCE_RING, layer=2)
-        wl = _make_workload([t1])
-        btm = {"b1": {"task_ids": [1], "request_ids": [1], "type": "prefill"}}
-        ctx = build_mfs_context(wl, btm)
-        rli = compute_static_rli(wl, ctx, current_layer_by_stage={(0, 0): 5})
-        assert rli[1].base_rli == 0
-
-
-# ── Deadline / MfsRequestInfo tests ───────────────────────────────────────────
-
-
-class TestDeadlineParsing:
-    """Tests for Phase 2 deadline metadata parsing."""
-
-    def test_request_info_from_trace(self):
-        """Trace with deadline fields should populate request_info."""
+    def test_request_info_with_slo(self):
+        """Trace with ttft_slo_us should populate request_info."""
         t0 = _compute_task(0)
         wl = _make_workload([t0])
         btm = {"b1": {"task_ids": [0], "request_ids": [5], "type": "prefill"}}
@@ -226,27 +155,15 @@ class TestDeadlineParsing:
                 "5": {
                     "num_prefill_tokens": 1024,
                     "num_decode_tokens": 64,
-                    "arrival_time_us": 100,
                     "ttft_slo_us": 2000000,
-                    "deadline_us": 2000100,
                 },
             },
         }
         ctx = build_mfs_context(wl, btm, trace=trace)
-        assert ctx.request_info[5].arrival_time_us == 100
         assert ctx.request_info[5].ttft_slo_us == 2000000
-        assert ctx.request_info[5].deadline_us == 2000100
 
-    def test_no_trace_means_no_request_info(self):
-        """Without trace, request_info should be empty."""
-        t0 = _compute_task(0)
-        wl = _make_workload([t0])
-        btm = {"b1": {"task_ids": [0], "request_ids": [5], "type": "prefill"}}
-        ctx = build_mfs_context(wl, btm)
-        assert ctx.request_info == {}
-
-    def test_trace_without_deadline_fields(self):
-        """Trace missing deadline fields should produce None values."""
+    def test_trace_without_slo(self):
+        """Trace missing ttft_slo_us should produce None."""
         t0 = _compute_task(0)
         wl = _make_workload([t0])
         btm = {"b1": {"task_ids": [0], "request_ids": [5], "type": "prefill"}}
@@ -259,12 +176,10 @@ class TestDeadlineParsing:
             },
         }
         ctx = build_mfs_context(wl, btm, trace=trace)
-        assert ctx.request_info[5].arrival_time_us is None
         assert ctx.request_info[5].ttft_slo_us is None
-        assert ctx.request_info[5].deadline_us is None
 
-    def test_multiple_requests_with_deadlines(self):
-        """Multiple requests should each get their own deadline info."""
+    def test_multiple_requests_with_slos(self):
+        """Multiple requests should each get their own SLO info."""
         t0 = _compute_task(0)
         t1 = _compute_task(1, node=1)
         wl = _make_workload([t0, t1])
@@ -277,19 +192,23 @@ class TestDeadlineParsing:
                 "1": {
                     "num_prefill_tokens": 512,
                     "num_decode_tokens": 32,
-                    "arrival_time_us": 0,
                     "ttft_slo_us": 1000000,
-                    "deadline_us": 1000000,
                 },
                 "2": {
                     "num_prefill_tokens": 1024,
                     "num_decode_tokens": 64,
-                    "arrival_time_us": 500,
                     "ttft_slo_us": 2000000,
-                    "deadline_us": 2000500,
                 },
             },
         }
         ctx = build_mfs_context(wl, btm, trace=trace)
-        assert ctx.request_info[1].deadline_us == 1000000
-        assert ctx.request_info[2].deadline_us == 2000500
+        assert ctx.request_info[1].ttft_slo_us == 1000000
+        assert ctx.request_info[2].ttft_slo_us == 2000000
+
+    def test_empty_requests_in_trace(self):
+        """Trace with empty requests dict should produce empty request_info."""
+        t0 = _compute_task(0)
+        wl = _make_workload([t0])
+        btm = {"b1": {"task_ids": [0], "request_ids": [1], "type": "prefill"}}
+        ctx = build_mfs_context(wl, btm, trace={"requests": {}})
+        assert ctx.request_info == {}
