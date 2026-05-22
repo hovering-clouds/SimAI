@@ -20,9 +20,11 @@ Usage:
 """
 
 import json
+import math
 import os
+import random
 from math import ceil
-from typing import Optional
+from typing import Callable, Optional
 
 
 _DTYPE_BYTES = {
@@ -30,6 +32,29 @@ _DTYPE_BYTES = {
     'int8': 1, 'int16': 2, 'int32': 4, 'int64': 8,
     'float64': 8,
 }
+
+
+# ── SLO Generation Config ─────────────────────────────────────────────────────
+# Edit this to configure per-request TTFT SLO generation.
+# The slo_generator callable receives a request object and returns an SLO in us.
+# Set to None to disable SLO output.
+
+SLO_MEAN_US = 2_000_000       # 2 seconds
+SLO_STD_US = 500_000           # 0.5 seconds
+SLO_MIN_US = 200_000           # floor at 200ms
+
+
+def _default_slo_generator(request) -> int:
+    """Generate a per-request TTFT SLO using a log-normal distribution."""
+    # log-normal: always positive, right-skewed, realistic for latency SLOs
+    mu = math.log(SLO_MEAN_US)
+    sigma = SLO_STD_US / SLO_MEAN_US
+    slo = random.lognormvariate(mu, sigma)
+    return max(SLO_MIN_US, int(slo))
+
+
+# Set to None to disable SLO output, or provide a custom callable.
+SLO_GENERATOR: Callable | None = _default_slo_generator
 
 
 class TraceRecorder:
@@ -41,19 +66,24 @@ class TraceRecorder:
         output_dir: str = ".",
         enabled: bool = True,
         ttft_slo_us: int | None = None,
+        slo_generator: Callable | None = None,
     ):
         """
         Args:
             replica_config: Vidur ReplicaConfig with model, parallelism, and PD settings.
             output_dir: Directory to write trace JSON.
             enabled: Set False to disable recording.
-            ttft_slo_us: Optional TTFT SLO in microseconds. If set, written as
-                ttft_slo_us per request for deadline-aware scheduling.
+            ttft_slo_us: Fixed TTFT SLO in microseconds for all requests.
+                Ignored when slo_generator is provided.
+            slo_generator: Callable(request) -> int that returns a per-request
+                TTFT SLO in microseconds. Overrides ttft_slo_us when provided.
+                Defaults to the module-level SLO_GENERATOR.
         """
         self._config = replica_config
         self._output_dir = output_dir
         self._enabled = enabled
         self._ttft_slo_us = ttft_slo_us
+        self._slo_generator = slo_generator if slo_generator is not None else SLO_GENERATOR
 
         # Accumulated data
         self._requests: dict[str, dict] = {}
@@ -82,8 +112,9 @@ class TraceRecorder:
             "num_decode_tokens": request.num_decode_tokens,
         }
 
-        if self._ttft_slo_us is not None:
-            entry["ttft_slo_us"] = self._ttft_slo_us
+        slo = self._slo_generator(request) if self._slo_generator else self._ttft_slo_us
+        if slo is not None:
+            entry["ttft_slo_us"] = int(slo)
 
         self._requests[str(request.id)] = entry
 
