@@ -437,3 +437,171 @@ class TestRedSubPriority:
         # Fair share: 50 / 50
         assert result[1] == pytest.approx(50.0)
         assert result[2] == pytest.approx(50.0)
+
+
+class TestFeasibilityDemotion:
+    """Tests for feasibility-based EARLY RLI=0 flow demotion."""
+
+    def test_infeasible_early_demoted_to_queue0(self):
+        """Infeasible EARLY RLI=0 flow gets demoted to queue 0."""
+        topo = NetworkTopology()
+        topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
+
+        # Flow 1: feasible (remaining fits within deadline)
+        # Flow 2: infeasible (remaining exceeds deadline)
+        ctx = _make_context(
+            [
+                MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.EARLY, 0, "collective"),
+                MfsTaskInfo(2, 0, None, (20,), 0, MfsStage.EARLY, 0, "collective"),
+            ],
+            [
+                MfsRequestInfo(request_id=10, ttft_slo_us=10000),
+                MfsRequestInfo(request_id=20, ttft_slo_us=100),
+            ],
+        )
+        alloc = MfsAllocator(ctx)
+        alloc.request_start_time[10] = 0
+        alloc.request_start_time[20] = 0
+        # remaining_us: request 20 needs 5000us but deadline is 100us → infeasible
+        alloc.remaining_us[10] = 5000
+        alloc.remaining_us[20] = 5000
+
+        f1 = _flow(1, 0, 1, 100, path=[0, 1])
+        f2 = _flow(2, 0, 1, 100, path=[0, 1])
+        result = alloc.allocate([f1, f2], topo, current_time=100)
+
+        # Flow 1 (feasible) goes to RED tiering, gets full bw
+        # Flow 2 (infeasible) demoted to queue 0, gets 0 bw
+        assert result[1] == 100.0
+        assert result[2] == 0.0
+
+    def test_feasible_early_normal_queue(self):
+        """Feasible EARLY RLI=0 flows get normal RED tiering."""
+        topo = NetworkTopology()
+        topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
+
+        ctx = _make_context(
+            [
+                MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.EARLY, 0, "collective"),
+                MfsTaskInfo(2, 0, None, (20,), 0, MfsStage.EARLY, 0, "collective"),
+            ],
+            [
+                MfsRequestInfo(request_id=10, ttft_slo_us=100000),
+                MfsRequestInfo(request_id=20, ttft_slo_us=100000),
+            ],
+        )
+        alloc = MfsAllocator(ctx)
+        alloc.request_start_time[10] = 0
+        alloc.request_start_time[20] = 0
+        alloc.remaining_us[10] = 5000
+        alloc.remaining_us[20] = 5000
+
+        f1 = _flow(1, 0, 1, 100, path=[0, 1])
+        f2 = _flow(2, 0, 1, 100, path=[0, 1])
+        result = alloc.allocate([f1, f2], topo, current_time=100)
+
+        # Both feasible → normal RED tiering (quantile split: one urgent, one relaxed)
+        assert result[1] + result[2] == 100.0
+
+    def test_partially_feasible_not_demoted(self):
+        """Flow with mixed feasible/infeasible requests is NOT demoted."""
+        topo = NetworkTopology()
+        topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
+
+        # Flow associated with both R10 (feasible) and R20 (infeasible)
+        ctx = _make_context(
+            [
+                MfsTaskInfo(1, 0, None, (10, 20), 0, MfsStage.EARLY, 0, "collective"),
+                MfsTaskInfo(2, 0, None, (30,), 0, MfsStage.EARLY, 0, "collective"),
+            ],
+            [
+                MfsRequestInfo(request_id=10, ttft_slo_us=100000),
+                MfsRequestInfo(request_id=20, ttft_slo_us=100),
+                MfsRequestInfo(request_id=30, ttft_slo_us=100000),
+            ],
+        )
+        alloc = MfsAllocator(ctx)
+        alloc.request_start_time[10] = 0
+        alloc.request_start_time[20] = 0
+        alloc.request_start_time[30] = 0
+        alloc.remaining_us[10] = 5000
+        alloc.remaining_us[20] = 5000
+        alloc.remaining_us[30] = 5000
+
+        f1 = _flow(1, 0, 1, 100, path=[0, 1])
+        f2 = _flow(2, 0, 1, 100, path=[0, 1])
+        result = alloc.allocate([f1, f2], topo, current_time=100)
+
+        # Flow 1 not demoted because R10 is still feasible
+        assert result[1] > 0.0
+
+    def test_all_infeasible_demoted(self):
+        """Flow with ALL requests infeasible gets demoted."""
+        topo = NetworkTopology()
+        topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
+
+        ctx = _make_context(
+            [
+                MfsTaskInfo(1, 0, None, (10, 20), 0, MfsStage.EARLY, 0, "collective"),
+                MfsTaskInfo(2, 0, None, (30,), 0, MfsStage.EARLY, 0, "collective"),
+            ],
+            [
+                MfsRequestInfo(request_id=10, ttft_slo_us=100),
+                MfsRequestInfo(request_id=20, ttft_slo_us=100),
+                MfsRequestInfo(request_id=30, ttft_slo_us=100000),
+            ],
+        )
+        alloc = MfsAllocator(ctx)
+        alloc.request_start_time[10] = 0
+        alloc.request_start_time[20] = 0
+        alloc.request_start_time[30] = 0
+        alloc.remaining_us[10] = 5000
+        alloc.remaining_us[20] = 5000
+        alloc.remaining_us[30] = 5000
+
+        f1 = _flow(1, 0, 1, 100, path=[0, 1])
+        f2 = _flow(2, 0, 1, 100, path=[0, 1])
+        result = alloc.allocate([f1, f2], topo, current_time=100)
+
+        # Flow 1 demoted (both R10, R20 infeasible)
+        assert result[1] == 0.0
+        # Flow 2 not demoted (R30 feasible)
+        assert result[2] == 100.0
+
+    def test_no_slo_never_demoted(self):
+        """Request without ttft_slo_us is never demoted."""
+        topo = NetworkTopology()
+        topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
+
+        ctx = _make_context(
+            [
+                MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.EARLY, 0, "collective"),
+            ],
+            [MfsRequestInfo(request_id=10, ttft_slo_us=None)],
+        )
+        alloc = MfsAllocator(ctx)
+        alloc.request_start_time[10] = 0
+        alloc.remaining_us[10] = 999999
+
+        f1 = _flow(1, 0, 1, 100, path=[0, 1])
+        result = alloc.allocate([f1], topo, current_time=100)
+        assert result[1] == 100.0  # not demoted
+
+    def test_feasibility_does_not_affect_p2d(self):
+        """P2D flows are not affected by feasibility check."""
+        topo = NetworkTopology()
+        topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
+
+        ctx = _make_context(
+            [
+                MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.P2D, 0, "p2d_transfer"),
+            ],
+            [MfsRequestInfo(request_id=10, ttft_slo_us=100)],
+        )
+        alloc = MfsAllocator(ctx)
+        alloc.request_start_time[10] = 0
+        alloc.remaining_us[10] = 999999
+
+        f1 = _flow(1, 0, 1, 1000, path=[0, 1])
+        result = alloc.allocate([f1], topo, current_time=100)
+        assert result[1] == 100.0  # P2D not affected by feasibility

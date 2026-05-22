@@ -188,9 +188,10 @@ For this reproduction, use a simplified split:
   implemented in `simai-flow-scheduler` using replay-time request state.
 - Paper-accurate selective pruning would remove individual requests from a
   batch, which is too expensive for the current replay-focused design.
-- Instead, Phase 4 uses a whole-batch deferral approximation inside
-  `simai-flow-scheduler`: if an already-recorded batch appears likely to miss
-  its robust deadline, delay or strongly demote the entire batch.
+- Instead, Phase 4 uses a whole-batch feasibility safeguard inside
+  `simai-flow-scheduler`: if an already-recorded batch's remaining path to TTFT
+  appears likely to miss its robust deadline, delay or strongly demote the
+  entire batch.
 - This avoids Vidur-side batch regrouping and avoids request-level pruning.
 
 ---
@@ -247,18 +248,20 @@ Covered mechanisms:
   flows
 - keep RLI/RMLQ responsible for stage/layer urgency
 
-### 3.4 Phase 4: Batch-Level Deferral in Replay
+### 3.4 Phase 4: Whole-Batch Feasibility Safeguard in Replay
 
-Use a simplified overload-control approximation in `simai-flow-scheduler`.
-Instead of implementing paper-accurate request-level pruning and batch
-regrouping, judge whether an already-recorded batch is likely to miss its SLO.
-If it is risky, defer the whole batch as a unit. RED can be reused as the robust
-batch deadline signal for this decision.
+Use a simplified overload-control safeguard in `simai-flow-scheduler`. Phase 4
+does not implement RED ordering; that is already covered by Phase 3. Instead of
+paper-accurate request-level pruning and batch regrouping, Phase 4 estimates
+whether an already-recorded batch's remaining path to TTFT is still feasible. If
+the batch is clearly risky, defer or strongly demote the whole batch as a unit.
 
 Covered mechanisms:
 
-- compute a batch-level risk/feasibility estimate in replay
+- compute a remaining-TTFT critical-path estimate in replay
 - defer or strongly demote entire risky batches
+- treat Phase 3 RED/deadline information as an input signal only, not as a new
+  ordering mechanism
 - avoid request-level pruning and avoid Vidur changes
 
 ### 3.5 Phase 5: Stage 1 KV-Cache Reuse Flow Support
@@ -277,7 +280,7 @@ Covered mechanisms:
 ### 3.6 Optional Phase 6: Feasibility Diagnostics
 
 Add a reporting-only pass that estimates bottleneck load and feasibility. This
-phase is useful for validating Phase 4 deferral decisions, but it should not be
+phase is useful for validating Phase 4 safeguard decisions, but it should not be
 required for RED, batch deferral, or Stage 1 flow execution to work.
 
 Covered mechanisms:
@@ -940,55 +943,96 @@ is easier to test.
 
 ---
 
-## 8. Phase 4 Detailed Tasks: Batch-Level Deferral in Replay
+## 8. Phase 4 Detailed Tasks: Whole-Batch Feasibility Safeguard in Replay
 
-### Task 13: Add Batch Risk Estimation
+Phase 4 is a safeguard layer only. RED-based ordering is already implemented in
+Phase 3 and should not be reimplemented here. The Phase 4 decision is binary and
+coarse-grained: when a batch's remaining path to TTFT appears infeasible under a
+conservative estimate, the replay policy may delay or demote that entire batch.
+
+### Task 13: Add Remaining-TTFT Feasibility Estimation
 
 **Files:**
 
 - Modify: `simai-flow-scheduler/src/executor/bandwidth_allocators/mfs_allocator.py`
+- Optional Modify: `simai-flow-scheduler/src/executor/policies/mfs_policy.py`
 - Test: `simai-flow-scheduler/tests/test_mfs_allocator.py`
 
 **Design:**
 
 This is a simplified replacement for paper-accurate scavenger pruning. Instead
 of pruning individual requests and regrouping batches, classify an entire
-already-recorded batch as risky when it appears unlikely to meet its robust
-batch deadline.
+already-recorded batch as risky when its remaining path to TTFT appears unlikely
+to meet its robust batch deadline.
 
-Use RED from Phase 3 as the batch deadline signal:
-
-```text
-batch_deadline_us = RED(batch)
-```
-
-Estimate batch finish conservatively using active and ready flows from that
-batch:
+Do not estimate only the currently active flow, current layer, or current stage.
+That local estimate is too optimistic for Stage 1 and Stage 2 traffic because
+the request still has downstream compute, collective communication, and final
+P2D transfer before TTFT. The estimate must be a remaining-TTFT path estimate:
 
 ```text
-estimated_comm_time_us = bottleneck_batch_bits / bottleneck_link_bw
-estimated_finish_us = current_time + estimated_comm_time_us
+estimated_ttft_finish_us =
+    current_time_us + estimated_remaining_critical_path_to_ttft_us(batch)
 ```
 
-The first implementation can ignore future compute time and focus on network
-load. This is a deliberate approximation. It is still useful because MFS's
-overload-control concern is primarily bottleneck bandwidth being wasted on
-unlikely-to-succeed work.
+Use already-available request deadline information as the threshold:
+
+```text
+request_deadline_us = request_start_time[request_id] + ttft_slo_us
+batch_deadline_us = robust deadline threshold for this batch
+```
+
+The robust threshold can be derived from the Phase 3 RED calculation state. If
+the RED helper exposes the loose-set minimum deadline (`D_Lo_min`), prefer it
+for feasibility because the original paper's pruning safeguard compares against
+the loose group target. If only RED is exposed, use RED as a conservative
+first-version substitute. This use of RED is only a deadline input for the
+safeguard; it must not introduce another RED-based sorting step in Phase 4.
+
+For the first implementation, estimate the remaining critical path from the
+expanded replay DAG:
+
+1. Identify unfinished tasks belonging to the batch/request group.
+2. Restrict to tasks that can affect TTFT, including remaining Stage 1 reuse,
+   Stage 2 collective/PP communication, prefill compute tasks, and Stage 3 P2D.
+3. Estimate each unfinished task duration:
+   - completed task: `0`
+   - running communication task: `remaining_bits / effective_link_bandwidth`
+   - pending communication task: `total_bits / effective_link_bandwidth`
+   - running compute task: remaining compute duration if available, otherwise
+     `0` as a safe first implementation
+   - pending compute task: trace-provided compute duration
+4. Compute the longest dependency path from the batch's current unfinished
+   frontier to the TTFT terminal task.
+5. Add a small configurable safety factor for communication estimates, for
+   example `effective_link_bandwidth = raw_link_bandwidth * 0.8`.
+
+If full DAG traversal is too invasive for the first patch, an acceptable
+fallback is a batch-local sequential layer estimate built from
+`batch_task_map`: sum unfinished per-layer compute and the largest estimated
+communication time required before each layer, then add final P2D time. The
+fallback must still include downstream layers and P2D, not just the current
+stage.
 
 Rules:
 
-- If `RED(batch)` is missing, do not defer that batch.
-- If `estimated_finish_us <= RED(batch)`, treat the batch as feasible.
-- If `estimated_finish_us > RED(batch)`, mark the batch as deferred/risky.
+- If the batch has no usable request deadline or robust deadline threshold, do
+  not defer that batch.
+- If `estimated_ttft_finish_us <= batch_deadline_us`, treat the batch as
+  feasible.
+- If `estimated_ttft_finish_us > batch_deadline_us`, mark the batch as risky.
 - Cache this decision only for the current allocation/admission event; recompute
   as active flows complete and request starts become known.
 
 **Acceptance:**
 
-- A synthetic batch with a tight RED deadline and large bottleneck load is
+- A synthetic Stage 1 or Stage 2 batch whose current flow is short but whose
+  downstream remaining compute/communication path exceeds the deadline is marked
+  risky.
+- A batch with the same current flow but a feasible remaining TTFT path is not
   marked risky.
-- A loose batch with the same load is not marked risky.
-- Missing SLO/RED values do not cause deferral.
+- Missing SLO/deadline values do not cause deferral.
+- Phase 4 does not change the Phase 3 RED ordering behavior.
 
 ### Task 14: Defer or Demote Entire Risky Batches
 
@@ -1001,8 +1045,8 @@ Rules:
 
 **Design:**
 
-Implement batch-level deferral without changing Vidur trace or request grouping.
-There are two acceptable levels:
+Implement safeguard enforcement without changing Vidur trace or request
+grouping. There are two acceptable levels:
 
 1. **Demotion-only approximation:** Risky batch flows are assigned to the lowest
    queue. This is safest with the current executor because it cannot deadlock.
@@ -1015,6 +1059,12 @@ There are two acceptable levels:
 Prefer starting with demotion-only. Add admission hold only if tests show the
 demotion approximation is too weak.
 
+This task should consume the risky/not-risky decision from Task 13. It should
+not sort batches by RED and should not create a second inter-request ordering
+path. Normal ordering still comes from the existing RMLQ/RLI/MLU/RED allocator
+logic; Phase 4 only overrides or delays batches that fail the feasibility
+safeguard.
+
 Deadlock guard for admission hold:
 
 - If all ready tasks belong to deferred batches, emit the least-risky deferred
@@ -1026,6 +1076,7 @@ Deadlock guard for admission hold:
 
 - Risky batch flows receive lower priority than feasible batch flows on the same
   bottleneck link.
+- Feasible batches preserve Phase 3 ordering.
 - If every ready task is risky, the policy still emits at least one batch and
   does not deadlock.
 - The replayed task DAG is unchanged.
@@ -1166,14 +1217,15 @@ class MfsFeasibilityRecord:
     bottleneck_link: tuple[int, int] | None
     total_bytes_on_bottleneck: int
     estimated_comm_time_us: int
+    estimated_remaining_ttft_us: int | None
     deadline_us: int | None
     feasible: bool | None
 ```
 
-Use this to understand overload, explain Phase 4 batch-deferral decisions, and
-debug cases where RED/MLU still miss SLOs. It is not required for Phase 3 RED,
-Phase 4 deferral, or Phase 5 Stage 1 flow execution. Do not delete tasks from
-replay.
+Use this to understand overload, explain Phase 4 safeguard decisions, and debug
+cases where RED/MLU still miss SLOs. It is not required for Phase 3 RED, Phase 4
+safeguard enforcement, or Phase 5 Stage 1 flow execution. Do not delete tasks
+from replay.
 
 ---
 
@@ -1192,7 +1244,7 @@ Required scenarios:
 - Missing deadline fields preserve Phase 1 behavior.
 - RED ranks batches from `ttft_slo_us` and reduces piggybacking by tight
   outliers in Phase 3.
-- Risky whole-batch deferral/demotion works in Phase 4.
+- Remaining-TTFT feasibility safeguard and whole-batch demotion work in Phase 4.
 - Stage 1 KV reuse metadata expands into EARLY flow tasks in Phase 5.
 
 ### 11.2 Integration Tests
@@ -1245,9 +1297,10 @@ For Phase 3:
 
 For Phase 4:
 
-- Replay should mark or treat risky batches as delayed/demoted without changing
-  Vidur trace structure.
-- Risky batch demotion should be visible in flow timing under contention.
+- Replay should identify risky batches using a remaining-TTFT estimate, not only
+  current-flow or current-stage communication time.
+- Risky batch demotion should be visible in flow timing under contention, while
+  feasible batches preserve Phase 3 ordering.
 - The policy should avoid deadlock if every ready batch is risky.
 
 For Phase 5:
@@ -1300,7 +1353,7 @@ should be reserved for fields that multiple components truly need to persist.
 9. Add MLU promotion.
 10. Add runtime RED computation in the allocator.
 11. Replace raw deadline-first early-flow ordering with RED.
-12. Add batch-level risk estimation in replay.
+12. Add remaining-TTFT feasibility estimation in replay.
 13. Add whole-batch deferral or strong demotion in replay.
 14. Add Vidur Stage 1 KV reuse metadata generation.
 15. Add Stage 1 KV reuse expansion in `InferenceTraceExpander`.
@@ -1344,8 +1397,11 @@ Phase 3 is complete when:
 
 Phase 4 is complete when:
 
-- Replay can identify risky batches from RED/SLO and bottleneck load.
+- Replay can identify risky batches from request SLO/deadline data and a
+  remaining-TTFT critical-path estimate.
 - Risky batches are delayed or strongly demoted as whole batches.
+- Phase 4 does not add another RED sorting path; RED ordering remains a Phase 3
+  mechanism.
 - No request-level pruning or Vidur batch regrouping is required.
 - The replayed task DAG remains unchanged.
 

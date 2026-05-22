@@ -46,6 +46,10 @@ class MfsSchedulingPolicy(SchedulingPolicy):
             context=self._analysis.mfs_context,
             config=self._allocator_config,
         )
+        # Initialize remaining_us from feasibility analysis
+        fi = self._analysis.feasibility_info
+        if fi:
+            self.allocator.remaining_us = dict(fi.request_path_total_us)
 
     def emit_ready_tasks(
         self,
@@ -98,3 +102,16 @@ class MfsSchedulingPolicy(SchedulingPolicy):
                 prev = self.allocator.current_layer_by_stage.get(stage_key, 0)
                 if task.layer_id + 1 > prev:
                     self.allocator.current_layer_by_stage[stage_key] = task.layer_id + 1
+
+        # Feasibility: subtract critical path task duration from remaining_us
+        fi = self._analysis.feasibility_info
+        if fi and task.task_id in fi.critical_path_tasks:
+            dur = fi.task_duration_us.get(task.task_id, 0)
+            if dur > 0:
+                info = self._analysis.mfs_context.task_info.get(task.task_id)
+                if info:
+                    for rid in info.request_ids:
+                        if (rid in fi.request_critical_tasks
+                                and task.task_id in fi.request_critical_tasks[rid]
+                                and rid in self.allocator.remaining_us):
+                            self.allocator.remaining_us[rid] -= dur

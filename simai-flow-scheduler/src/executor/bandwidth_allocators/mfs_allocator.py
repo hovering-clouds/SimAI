@@ -40,6 +40,7 @@ class MfsAllocator(BandwidthAllocator):
         # Dynamic state updated by MfsSchedulingPolicy
         self.current_layer_by_stage: dict[tuple[int, int], int] = {}
         self.request_start_time: dict[int, int] = {}
+        self.remaining_us: dict[int, int] = {}
 
     def _compute_rli(self, task_id: int) -> int:
         """Compute RLI on-demand using current dynamic layer state."""
@@ -102,6 +103,29 @@ class MfsAllocator(BandwidthAllocator):
 
         f = len(tight) / n
         return int(f * tight_min + (1 - f) * loose_min)
+
+    def _is_infeasible(self, request_ids: tuple[int, ...], current_time: int) -> bool:
+        """Check if ALL associated requests are infeasible.
+
+        A request is infeasible when current_time + remaining_us > deadline.
+        Returns False if any request is still feasible or lacks SLO data.
+        """
+        if not request_ids:
+            return False
+        any_checkable = False
+        for rid in request_ids:
+            ri = self.context.request_info.get(rid)
+            if ri is None or ri.ttft_slo_us is None:
+                return False
+            start = self.request_start_time.get(rid)
+            remaining = self.remaining_us.get(rid)
+            if start is None or remaining is None:
+                return False
+            any_checkable = True
+            deadline = start + ri.ttft_slo_us
+            if current_time + remaining <= deadline:
+                return False
+        return any_checkable
 
     def _queue_for(self, flow, current_time: int, topology: NetworkTopology | None = None) -> int | None:
         """Assign a flow to its queue index.
@@ -243,6 +267,10 @@ class MfsAllocator(BandwidthAllocator):
             flows_with_red: list[tuple] = []
             for f in rli0_flows:
                 info = self.context.task_info.get(f.task_id)
+                # Feasibility check: demote infeasible flows to queue 0
+                if info and self._is_infeasible(info.request_ids, current_time):
+                    queue_flows[0].append(f)
+                    continue
                 red = self._compute_red(info.request_ids) if info else None
                 flows_with_red.append((f, red))
 
