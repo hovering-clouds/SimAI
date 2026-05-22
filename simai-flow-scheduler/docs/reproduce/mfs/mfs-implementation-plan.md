@@ -182,9 +182,16 @@ The paper also includes robust inter-request scheduling:
 - Feasibility checks estimate whether a batch can still meet its deadline.
 - Selective pruning demotes infeasible requests into a scavenger queue.
 
-These are request/batch-level controls. In the current architecture, the true
-versions belong in Vidur. `simai-flow-scheduler` may consume RED ranks or
-scavenger labels from trace metadata, but should not reshape batches in replay.
+For this reproduction, use a simplified split:
+
+- RED ranks already-recorded batches and does not regroup requests, so it can be
+  implemented in `simai-flow-scheduler` using replay-time request state.
+- Paper-accurate selective pruning would remove individual requests from a
+  batch, which is too expensive for the current replay-focused design.
+- Instead, Phase 4 uses a whole-batch deferral approximation inside
+  `simai-flow-scheduler`: if an already-recorded batch appears likely to miss
+  its robust deadline, delay or strongly demote the entire batch.
+- This avoids Vidur-side batch regrouping and avoids request-level pruning.
 
 ---
 
@@ -212,28 +219,72 @@ Not covered:
 
 ### 3.2 Phase 2: Deadline-Aware MFS
 
-Add small Vidur trace extensions and implement deadline-aware P2D promotion.
+Phase 2 is already implemented. The final implementation uses relative request
+SLO metadata instead of absolute Vidur-side arrival/deadline timestamps, so later
+phases should build on executor-time deadline calculation.
 
 Covered mechanisms:
 
-- request arrival time
-- request TTFT budget/deadline
-- P2D-to-request deadline mapping
+- `ttft_slo_us` in Vidur request trace metadata
+- executor-side `request_start_time + ttft_slo_us` deadline calculation
+- P2D-to-request SLO mapping
 - MLU threshold based promotion
 - P2D earliness and deadline miss reporting
 
-### 3.3 Phase 3: RED and Soft Scavenger Approximation
+### 3.3 Phase 3: RED-Based Inter-Request Ordering
 
-Keep true request scheduling in Vidur. Add replay-side support for metadata
-that Vidur can emit.
+Build on the implemented Phase 2 state. Phase 2 already records relative
+`ttft_slo_us`, tracks `request_start_time` in the executor time domain, uses
+MLU for P2D, and computes RLI dynamically in the allocator. Phase 3 should add
+RED as the request/batch urgency metric for early-stage inter-request
+arbitration.
 
 Covered mechanisms:
 
-- consume batch/request priority rank from trace
-- same-RLI tie-breaking by Vidur-provided rank
-- consume scavenger labels
-- demote scavenger flows in RMLQ
-- optional feasibility analysis report
+- compute RED dynamically from `ttft_slo_us` and executor-side
+  `request_start_time`
+- use RED to replace naive deadline-first ordering among comparable early-stage
+  flows
+- keep RLI/RMLQ responsible for stage/layer urgency
+
+### 3.4 Phase 4: Batch-Level Deferral in Replay
+
+Use a simplified overload-control approximation in `simai-flow-scheduler`.
+Instead of implementing paper-accurate request-level pruning and batch
+regrouping, judge whether an already-recorded batch is likely to miss its SLO.
+If it is risky, defer the whole batch as a unit. RED can be reused as the robust
+batch deadline signal for this decision.
+
+Covered mechanisms:
+
+- compute a batch-level risk/feasibility estimate in replay
+- defer or strongly demote entire risky batches
+- avoid request-level pruning and avoid Vidur changes
+
+### 3.5 Phase 5: Stage 1 KV-Cache Reuse Flow Support
+
+Add simplified MFS Stage 1 traffic. Vidur generates synthetic KV-cache reuse
+flow metadata in the trace, and `simai-flow-scheduler` expands it into P2P flow
+tasks that run before the layer or batch that consumes the reused KV blocks.
+
+Covered mechanisms:
+
+- generate synthetic KV-cache reuse sizes in Vidur
+- add trace schema fields for Stage 1 flows
+- expand Stage 1 flows in `InferenceTraceExpander`
+- classify Stage 1 flows as MFS `EARLY` traffic with RLI-based promotion
+
+### 3.6 Optional Phase 6: Feasibility Diagnostics
+
+Add a reporting-only pass that estimates bottleneck load and feasibility. This
+phase is useful for validating Phase 4 deferral decisions, but it should not be
+required for RED, batch deferral, or Stage 1 flow execution to work.
+
+Covered mechanisms:
+
+- estimate bottleneck links and overload contributors from expanded flows
+- report feasible/infeasible request summaries
+- do not delete, split, or reschedule tasks
 
 ---
 
@@ -259,6 +310,9 @@ Covered mechanisms:
 - `src/executor/policies/mfs_policy.py`
   Scheduling policy that preserves compute ordering, uses default routing, and
   delegates MFS bandwidth allocation to `MfsAllocator`.
+
+- `src/static_analysis/passes/mfs_feasibility.py`
+  Optional Phase 6 diagnostics for bottleneck and feasibility reporting.
 
 - `scripts/run_mfs_inference_e2e.py`
   Reproduce inference E2E flow with both default and MFS policies and report
@@ -290,10 +344,16 @@ Covered mechanisms:
 - `src/workload_generator/inference_trace_expander.py`
   Phase 1 should avoid behavioral changes. If needed, only improve
   `batch_task_map` metadata so MFS context can recover `stage_id` and
-  `request_ids` reliably.
+  `request_ids` reliably. Phase 5 should extend this file to expand Stage 1
+  KV-cache reuse metadata into P2P flow tasks.
+
+- `src/workload_format/schema.py`
+  Phase 5 should add a distinct `CommType.KV_CACHE_REUSE` value for Stage 1
+  traffic. Do not reuse `KV_CACHE_TRANSFER`, which represents Stage 3 P2D.
 
 - `vidur-alibabacloud/vidur/trace_recorder.py`
-  Phase 2 only. Add request timing/deadline fields.
+  Phase 2 adds request SLO fields. Phase 5 adds optional synthetic Stage 1
+  KV-cache reuse metadata.
 
 ---
 
@@ -746,49 +806,339 @@ miss.
 
 ---
 
-## 7. Phase 3 Detailed Tasks: RED and Scavenger Approximation
+## 7. Phase 3 Detailed Tasks: RED-Based Inter-Request Ordering
 
-### Task 11: Consume Vidur-Provided Priority Metadata
+Phase 1 and Phase 2 are already implemented. Do not rewrite those plans in this
+document. Phase 2's final implementation differs from the original plan in three
+important ways:
+
+- Vidur trace records relative `ttft_slo_us`, not absolute `arrival_time_us` or
+  `deadline_us`.
+- The executor-side policy records `request_start_time` in the replay time
+  domain, and the allocator computes `deadline = request_start_time + ttft_slo_us`.
+- RLI is computed dynamically in the allocator from policy-maintained
+  `current_layer_by_stage`; `mfs_rli.py` is deprecated.
+
+Phase 3 should build on that implemented state. Do not add a static
+`RedInfo`/`MfsBatchRedInfo` object that must be passed from analysis to
+executor. Like RLI and MLU, RED should be computed where the live scheduling
+state exists: in the policy/allocator layer.
+
+### Task 11: Add Runtime RED Computation
 
 **Files:**
 
-- Modify: `simai-flow-scheduler/src/static_analysis/passes/mfs_context.py`
 - Modify: `simai-flow-scheduler/src/executor/bandwidth_allocators/mfs_allocator.py`
-- Test: `simai-flow-scheduler/tests/test_mfs_context.py`
 - Test: `simai-flow-scheduler/tests/test_mfs_allocator.py`
 
-**Trace fields to support:**
+**Design:**
 
-At batch level:
+Implement RED in the executor-side MFS allocator, not in static analysis and
+not in Vidur. RED ranks already-recorded batches and does not require request
+regrouping, so it fits the replay layer. However, its inputs depend on live
+executor-time request starts, so it should be computed dynamically from
+`MfsContext`, `request_start_time`, and the active flow set.
+
+Because Phase 2 uses relative SLO instead of absolute deadline, compute a
+request's effective replay deadline as:
+
+```text
+effective_deadline_us = request_start_time[request_id] + ttft_slo_us
+```
+
+If a request has no recorded `request_start_time` yet, skip it for RED
+calculation. If all requests in a batch are missing start times or SLOs, that
+batch has no RED value and should be treated as lowest urgency for RED-based
+ordering.
+
+Algorithm for one batch:
+
+1. Collect effective deadlines for active requests in the batch.
+2. If no request has both `request_start_time` and `ttft_slo_us`, return no RED.
+3. Sort values ascending: `d1 <= d2 <= ... <= dn`.
+4. If `n == 1`, `RED = d1`.
+5. If `n > 1`, find the largest adjacent gap:
+
+```text
+k* = argmax(d[k + 1] - d[k])
+```
+
+6. Tight set is requests up to `k*`; loose set is requests after `k*`.
+7. Let `f = len(tight_set) / n`.
+8. Let `D_T_min` be the minimum tight-set value.
+9. Let `D_Lo_min` be the minimum loose-set value. If loose set is empty, use
+   `D_T_min`.
+10. Compute:
+
+```text
+RED = f * D_T_min + (1 - f) * D_Lo_min
+```
+
+Expose this as an allocator helper such as `_compute_red(batch_id)` or
+`_flow_red_value(task_id)`. It should return a numeric value or `None`, not a
+new static analysis object.
+
+**Acceptance:**
+
+- A batch with one tight outlier and many loose requests gets a RED value closer
+  to the loose group's minimum effective deadline than to the outlier's
+  effective deadline.
+- A uniformly tight batch outranks a uniformly loose batch.
+- Missing SLOs or missing request starts do not crash allocation; unranked
+  batches are treated as lowest urgency for RED-based ordering.
+
+### Task 12: Replace Deadline-First Early-Flow Ordering with RED
+
+**Files:**
+
+- Modify: `simai-flow-scheduler/src/executor/bandwidth_allocators/mfs_allocator.py`
+- Test: `simai-flow-scheduler/tests/test_mfs_allocator.py`
+
+**Design:**
+
+RED should replace the naive deadline-first request/batch urgency metric for
+early-stage inter-request arbitration. This is stronger than a last-resort
+`task_id` tie-breaker: among early-stage flows that are eligible for service in
+the same RMLQ queue, lower RED should receive priority over lower raw deadline.
+
+RED should not replace RLI/RMLQ entirely. RLI still decides layer urgency, and
+MLU still controls P2D promotion. The replacement is:
+
+```text
+old: raw earliest deadline among request_ids
+new: RED(batch/request group)
+```
+
+Recommended arbitration for early-stage queues:
+
+```text
+RMLQ queue priority
+dynamic RLI within early-stage traffic
+RED value as the request/batch urgency metric
+task_id as deterministic final ordering
+```
+
+If the current allocator only fair-shares within one queue and has no
+deadline-first ordering, Phase 3 should add RED-aware intra-queue arbitration.
+Two acceptable approximations:
+
+- Strict sub-priority: serve lower-RED flows first within the same early queue.
+- Weighted sharing: assign higher weight to lower-RED flows within the same
+  early queue.
+
+Prefer strict sub-priority first because it matches the existing RMLQ style and
+is easier to test.
+
+**Acceptance:**
+
+- In a synthetic workload with two active early-stage batches, the batch with a
+  better RED value gets priority over a batch whose raw minimum deadline is
+  dominated by one tight outlier.
+- RED replaces raw earliest-deadline ordering where request/batch urgency is
+  needed.
+- RED does not change P2D MLU promotion.
+
+---
+
+## 8. Phase 4 Detailed Tasks: Batch-Level Deferral in Replay
+
+### Task 13: Add Batch Risk Estimation
+
+**Files:**
+
+- Modify: `simai-flow-scheduler/src/executor/bandwidth_allocators/mfs_allocator.py`
+- Test: `simai-flow-scheduler/tests/test_mfs_allocator.py`
+
+**Design:**
+
+This is a simplified replacement for paper-accurate scavenger pruning. Instead
+of pruning individual requests and regrouping batches, classify an entire
+already-recorded batch as risky when it appears unlikely to meet its robust
+batch deadline.
+
+Use RED from Phase 3 as the batch deadline signal:
+
+```text
+batch_deadline_us = RED(batch)
+```
+
+Estimate batch finish conservatively using active and ready flows from that
+batch:
+
+```text
+estimated_comm_time_us = bottleneck_batch_bits / bottleneck_link_bw
+estimated_finish_us = current_time + estimated_comm_time_us
+```
+
+The first implementation can ignore future compute time and focus on network
+load. This is a deliberate approximation. It is still useful because MFS's
+overload-control concern is primarily bottleneck bandwidth being wasted on
+unlikely-to-succeed work.
+
+Rules:
+
+- If `RED(batch)` is missing, do not defer that batch.
+- If `estimated_finish_us <= RED(batch)`, treat the batch as feasible.
+- If `estimated_finish_us > RED(batch)`, mark the batch as deferred/risky.
+- Cache this decision only for the current allocation/admission event; recompute
+  as active flows complete and request starts become known.
+
+**Acceptance:**
+
+- A synthetic batch with a tight RED deadline and large bottleneck load is
+  marked risky.
+- A loose batch with the same load is not marked risky.
+- Missing SLO/RED values do not cause deferral.
+
+### Task 14: Defer or Demote Entire Risky Batches
+
+**Files:**
+
+- Modify: `simai-flow-scheduler/src/executor/policies/mfs_policy.py`
+- Modify: `simai-flow-scheduler/src/executor/bandwidth_allocators/mfs_allocator.py`
+- Test: `simai-flow-scheduler/tests/test_mfs_policy.py`
+- Test: `simai-flow-scheduler/tests/test_mfs_allocator.py`
+
+**Design:**
+
+Implement batch-level deferral without changing Vidur trace or request grouping.
+There are two acceptable levels:
+
+1. **Demotion-only approximation:** Risky batch flows are assigned to the lowest
+   queue. This is safest with the current executor because it cannot deadlock.
+
+2. **Admission hold approximation:** `MfsSchedulingPolicy.emit_ready_tasks()`
+   temporarily does not emit ready tasks from risky batches while non-risky
+   tasks are available. This better matches "delay the whole batch", but it must
+   include a deadlock guard.
+
+Prefer starting with demotion-only. Add admission hold only if tests show the
+demotion approximation is too weak.
+
+Deadlock guard for admission hold:
+
+- If all ready tasks belong to deferred batches, emit the least-risky deferred
+  batch to keep the event loop moving.
+- Do not require executor wake-up timers in the first version.
+- Do not add request-level pruning.
+
+**Acceptance:**
+
+- Risky batch flows receive lower priority than feasible batch flows on the same
+  bottleneck link.
+- If every ready task is risky, the policy still emits at least one batch and
+  does not deadlock.
+- The replayed task DAG is unchanged.
+
+---
+
+## 9. Phase 5 Detailed Tasks: Stage 1 KV-Cache Reuse Flow Support
+
+### Task 15: Generate Synthetic Stage 1 KV Reuse Metadata in Vidur
+
+**Files:**
+
+- Modify: `vidur-alibabacloud/vidur/trace_recorder.py`
+- Optional Modify: Vidur config files to expose hit-rate/size knobs.
+
+**Design:**
+
+Add a simple synthetic model for MFS Stage 1 KV-cache reuse. This does not need
+to be a faithful cache simulator. It only needs to create plausible Stage 1
+traffic so the replay layer can study contention with Stage 2 collective traffic
+and Stage 3 P2D traffic.
+
+Recommended trace field on prefill batch or per-stage prefill batch entries:
 
 ```json
 {
-  "mfs_red_rank": 3,
-  "mfs_priority_class": "main"
+  "stage1_kv_reuse": {
+    "enabled": true,
+    "source_replica_id": 2,
+    "request_bytes": {
+      "0": 134217728,
+      "1": 67108864
+    },
+    "target_layer": 0
+  }
 }
 ```
 
-At request level:
+Simple generation model:
 
-```json
-{
-  "mfs_priority_class": "main"
-}
+- Draw or configure a KV-cache hit token length per request.
+- Convert hit length to bytes using the same KV bytes-per-token logic already
+  used for P2D KV size.
+- If no remote source is modeled, choose a deterministic pseudo source replica
+  or source rank group that differs from the prefill destination replica.
+- Start with `target_layer=0`, meaning the fetched reuse KV is needed before the
+  first prefill layer.
+
+Config knobs can be simple:
+
+- `mfs_stage1_reuse_enable`
+- `mfs_stage1_hit_ratio`
+- `mfs_stage1_max_hit_tokens`
+- `mfs_stage1_source_replica_policy`
+
+**Acceptance:**
+
+- Vidur trace can include Stage 1 KV reuse metadata without changing existing
+  traces when disabled.
+- Generated bytes are deterministic under a fixed random seed.
+- Missing Stage 1 metadata is treated as no Stage 1 traffic by replay.
+
+### Task 16: Expand Stage 1 KV Reuse Flows in simai-flow-scheduler
+
+**Files:**
+
+- Modify: `simai-flow-scheduler/src/workload_format/schema.py`
+- Modify: `simai-flow-scheduler/src/workload_generator/inference_trace_expander.py`
+- Modify: `simai-flow-scheduler/src/static_analysis/passes/mfs_context.py`
+- Test: `simai-flow-scheduler/tests/test_inference_trace_expander.py`
+- Test: `simai-flow-scheduler/tests/test_mfs_context.py`
+
+**Design:**
+
+Add a distinct communication type for Stage 1 reuse, for example:
+
+```python
+KV_CACHE_REUSE = "kv_cache_reuse"
 ```
 
-Allowed priority classes:
+Do not reuse `KV_CACHE_TRANSFER`, because the current code treats that as Stage
+3 P2D traffic.
 
-- `main`
-- `scavenger`
+Expansion behavior:
 
-Replay semantics:
+- For each request with Stage 1 reuse bytes, create P2P flow(s) from the source
+  replica/ranks to the prefill replica/stage ranks.
+- Split bytes across destination stage ranks similarly to P2D transfer.
+- Add dependencies so the first compute task of the target layer depends on the
+  Stage 1 reuse flows.
+- Record a `batch_task_map` entry such as `stage1_kv_<batch_id>`.
+- Set flow `phase=Phase.PREFILL`, `layer_id=target_layer`,
+  `comm_type=CommType.KV_CACHE_REUSE`.
 
-- Same queue and same RLI: lower `mfs_red_rank` wins tie-breaking if allocator
-  implements deterministic ordering.
-- `scavenger` flows are demoted to queue 0 unless they are hard-deadline P2D
-  already past deadline.
+MFS classification:
 
-### Task 12: Optional Feasibility Analysis Report
+- Classify `KV_CACHE_REUSE` as `MfsStage.EARLY`.
+- Set `comm_role="kv_cache_reuse"`.
+- Let dynamic RLI control promotion. If `target_layer=0`, the reuse flow starts
+  with RLI 0 and should outrank loose P2D traffic.
+
+**Acceptance:**
+
+- A trace with Stage 1 metadata expands into additional P2P flow tasks.
+- The first target-layer compute depends on the Stage 1 reuse flows.
+- `MfsContext` classifies Stage 1 reuse as `EARLY`, not P2D.
+- Existing traces without Stage 1 metadata produce unchanged workloads.
+
+---
+
+## 10. Optional Phase 6: Feasibility Diagnostics
+
+### Task 17: Optional Feasibility Analysis Report
 
 **Files:**
 
@@ -820,13 +1170,16 @@ class MfsFeasibilityRecord:
     feasible: bool | None
 ```
 
-Use this to understand overload, not to delete tasks from replay.
+Use this to understand overload, explain Phase 4 batch-deferral decisions, and
+debug cases where RED/MLU still miss SLOs. It is not required for Phase 3 RED,
+Phase 4 deferral, or Phase 5 Stage 1 flow execution. Do not delete tasks from
+replay.
 
 ---
 
-## 8. Testing Strategy
+## 11. Testing Strategy
 
-### 8.1 Unit Tests
+### 11.1 Unit Tests
 
 Add small synthetic workloads rather than relying only on large traces.
 
@@ -837,9 +1190,12 @@ Required scenarios:
 - P2D starts low and promotes after delay in Phase 1.
 - P2D promotes by MLU in Phase 2.
 - Missing deadline fields preserve Phase 1 behavior.
-- Scavenger class demotes flows in Phase 3.
+- RED ranks batches from `ttft_slo_us` and reduces piggybacking by tight
+  outliers in Phase 3.
+- Risky whole-batch deferral/demotion works in Phase 4.
+- Stage 1 KV reuse metadata expands into EARLY flow tasks in Phase 5.
 
-### 8.2 Integration Tests
+### 11.2 Integration Tests
 
 Use existing inference trace tests and scripts:
 
@@ -864,7 +1220,7 @@ cd simai-flow-scheduler
 python scripts/run_mfs_inference_e2e.py
 ```
 
-### 8.3 Expected Behavioral Checks
+### 11.3 Expected Behavioral Checks
 
 For Phase 1:
 
@@ -881,20 +1237,43 @@ For Phase 2:
 
 For Phase 3:
 
-- Replay should consume priority metadata but should not reshape the trace.
-- Scavenger demotion should be visible in flow timing under contention.
+- RED should be computed dynamically in the allocator from request SLO metadata
+  and executor-side request starts.
+- RED should replace raw deadline-first ordering for comparable early-stage
+  traffic.
+- RED should reduce piggybacking from tight outlier requests.
+
+For Phase 4:
+
+- Replay should mark or treat risky batches as delayed/demoted without changing
+  Vidur trace structure.
+- Risky batch demotion should be visible in flow timing under contention.
+- The policy should avoid deadlock if every ready batch is risky.
+
+For Phase 5:
+
+- Vidur should emit optional Stage 1 KV reuse metadata when enabled.
+- `InferenceTraceExpander` should create Stage 1 reuse flows with correct
+  dependencies.
+- MFS context should classify Stage 1 reuse as early traffic.
+
+For Optional Phase 6:
+
+- Feasibility diagnostics should report bottleneck links and request load
+  contributors without changing execution behavior.
 
 ---
 
-## 9. Non-Goals and Guardrails
+## 12. Non-Goals and Guardrails
 
 Do not implement these in `simai-flow-scheduler` unless a later design changes
 the project boundary:
 
-- request admission control
+- request-level admission control
 - batch formation changes
 - RED-driven batch construction
 - deleting or splitting requests from an already recorded batch
+- request-level scavenger pruning
 - real switch DSCP/priority queue enforcement
 - packet-level scheduling
 - real NCCL or Mooncake integration
@@ -908,7 +1287,7 @@ should be reserved for fields that multiple components truly need to persist.
 
 ---
 
-## 10. Suggested Development Order
+## 13. Suggested Development Order
 
 1. Implement `MfsContext`.
 2. Implement static RLI metadata.
@@ -919,8 +1298,13 @@ should be reserved for fields that multiple components truly need to persist.
 7. Add `run_mfs_inference_e2e.py`.
 8. Extend Vidur trace with deadline fields.
 9. Add MLU promotion.
-10. Add RED/scavenger metadata consumption.
-11. Add feasibility analysis report.
+10. Add runtime RED computation in the allocator.
+11. Replace raw deadline-first early-flow ordering with RED.
+12. Add batch-level risk estimation in replay.
+13. Add whole-batch deferral or strong demotion in replay.
+14. Add Vidur Stage 1 KV reuse metadata generation.
+15. Add Stage 1 KV reuse expansion in `InferenceTraceExpander`.
+16. Optionally add feasibility diagnostics.
 
 Commit after each independently passing phase. Suggested commit boundaries:
 
@@ -929,11 +1313,14 @@ Commit after each independently passing phase. Suggested commit boundaries:
 - `feat(mfs): add inference scheduling policy`
 - `feat(mfs): add inference e2e comparison script`
 - `feat(mfs): support deadline-aware p2d promotion`
-- `feat(mfs): consume red and scavenger metadata`
+- `feat(mfs): add runtime red ordering`
+- `feat(mfs): add batch-level deferral`
+- `feat(mfs): emit stage1 kv reuse metadata`
+- `feat(mfs): expand stage1 kv reuse flows`
 
 ---
 
-## 11. Completion Criteria
+## 14. Completion Criteria
 
 Phase 1 is complete when:
 
@@ -950,8 +1337,26 @@ Phase 2 is complete when:
 
 Phase 3 is complete when:
 
-- Replay can consume Vidur-provided RED rank and scavenger labels.
-- Scavenger flows are demoted without changing trace structure.
+- Allocator computes RED dynamically from request SLO metadata and
+  `request_start_time`.
+- RED replaces raw deadline-first ordering for comparable early-stage flows.
+- Synthetic tests show RED reduces piggybacking from tight outliers.
+
+Phase 4 is complete when:
+
+- Replay can identify risky batches from RED/SLO and bottleneck load.
+- Risky batches are delayed or strongly demoted as whole batches.
+- No request-level pruning or Vidur batch regrouping is required.
+- The replayed task DAG remains unchanged.
+
+Phase 5 is complete when:
+
+- Vidur can emit optional Stage 1 KV reuse metadata.
+- `simai-flow-scheduler` expands that metadata into `KV_CACHE_REUSE` P2P flows.
+- Stage 1 reuse flows are dependencies of their target prefill layer.
+- MFS allocator treats Stage 1 reuse as early traffic controlled by dynamic RLI.
+
+Optional Phase 6 is complete when:
+
 - Feasibility report identifies bottleneck request/load contributors without
   performing request admission in replay.
-
