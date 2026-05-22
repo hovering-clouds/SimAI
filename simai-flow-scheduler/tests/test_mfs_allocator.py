@@ -58,10 +58,7 @@ class TestMfsAllocator:
             MfsTaskInfo(1, 0, None, (), 0, MfsStage.EARLY, 0, "collective"),
             MfsTaskInfo(2, 0, None, (), 0, MfsStage.P2D, 0, "p2d_transfer"),
         ])
-        cfg = MfsAllocatorConfig(
-            early_rli0_queue=2, p2d_initial_queue=0,
-            urgent_p2d_queue=3, early_default_queue=1,
-        )
+        cfg = MfsAllocatorConfig()
         alloc = MfsAllocator(ctx, cfg)
 
         f1 = _flow(1, 0, 1, 100, path=[0, 4, 1])
@@ -80,10 +77,7 @@ class TestMfsAllocator:
             MfsTaskInfo(1, 0, None, (), 0, MfsStage.EARLY, 0, "collective"),
             MfsTaskInfo(2, 0, None, (), 0, MfsStage.P2D, 0, "p2d_transfer"),
         ])
-        cfg = MfsAllocatorConfig(
-            early_rli0_queue=2, p2d_initial_queue=0,
-            urgent_p2d_queue=3, early_default_queue=1,
-        )
+        cfg = MfsAllocatorConfig()
         alloc = MfsAllocator(ctx, cfg)
 
         f1 = _flow(1, 0, 1, 100, path=[0, 1])
@@ -94,13 +88,14 @@ class TestMfsAllocator:
         assert result[2] == 0.0
 
     def test_fair_share_within_same_queue(self):
-        """Two flows in same queue on same link: each gets half bandwidth."""
+        """Two EARLY default flows in same queue on same link: fair share."""
         topo = NetworkTopology()
         topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
 
+        # RLI > 0 → early_default_queue, no RED quantile splitting
         ctx = _make_context([
-            MfsTaskInfo(1, 0, None, (), 0, MfsStage.EARLY, 0, "collective"),
-            MfsTaskInfo(3, 0, None, (), 0, MfsStage.EARLY, 0, "collective"),
+            MfsTaskInfo(1, 0, None, (), 0, MfsStage.EARLY, 2, "collective"),
+            MfsTaskInfo(3, 0, None, (), 0, MfsStage.EARLY, 2, "collective"),
         ])
         alloc = MfsAllocator(ctx)
 
@@ -175,7 +170,7 @@ class TestMluPromotion:
         f1 = _flow(1, 0, 1, 100, path=[0, 1])
         f2 = _flow(2, 0, 1, 100000, start=0, path=[0, 1])
         result = alloc.allocate([f1, f2], topo, current_time=900)
-        # P2D (urgent queue 3) > EARLY (queue 2) -> P2D gets all bandwidth
+        # P2D (urgent queue 4) > EARLY (queue 2) -> P2D gets all bandwidth
         assert result[2] == 1.0
         assert result[1] == 0.0
 
@@ -281,3 +276,164 @@ class TestDynamicRli:
         ])
         alloc = MfsAllocator(ctx)
         assert alloc._compute_rli(2) > 100
+
+
+# ── RED tests ─────────────────────────────────────────────────────────────────
+
+
+class TestRed:
+    """Tests for RED (Robust Effective Deadline) computation."""
+
+    def test_red_single_request(self):
+        """Single request returns its own deadline."""
+        ctx = _make_context(
+            [MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.EARLY, 0, "collective")],
+            [MfsRequestInfo(request_id=10, ttft_slo_us=1000)],
+        )
+        alloc = MfsAllocator(ctx)
+        alloc.request_start_time[10] = 100
+        # deadline = 100 + 1000 = 1100
+        assert alloc._compute_red((10,)) == 1100
+
+    def test_red_uniformly_tight(self):
+        """Uniformly tight deadlines: RED close to minimum."""
+        ctx = _make_context(
+            [MfsTaskInfo(1, 0, None, (10, 11), 0, MfsStage.EARLY, 0, "collective")],
+            [
+                MfsRequestInfo(request_id=10, ttft_slo_us=1000),
+                MfsRequestInfo(request_id=11, ttft_slo_us=1010),
+            ],
+        )
+        alloc = MfsAllocator(ctx)
+        alloc.request_start_time[10] = 0
+        alloc.request_start_time[11] = 0
+        red = alloc._compute_red((10, 11))
+        # Both start at 0, deadlines 1000 and 1010, gap=10 is small
+        # Should be close to 1000
+        assert 900 <= red <= 1100
+
+    def test_red_tight_outlier_reduced(self):
+        """One tight outlier + many loose: RED pulled toward loose group."""
+        ctx = _make_context(
+            [MfsTaskInfo(1, 0, None, (10, 11, 12), 0, MfsStage.EARLY, 0, "collective")],
+            [
+                MfsRequestInfo(request_id=10, ttft_slo_us=100),    # tight outlier
+                MfsRequestInfo(request_id=11, ttft_slo_us=10000),  # loose
+                MfsRequestInfo(request_id=12, ttft_slo_us=10000),  # loose
+            ],
+        )
+        alloc = MfsAllocator(ctx)
+        alloc.request_start_time[10] = 0
+        alloc.request_start_time[11] = 0
+        alloc.request_start_time[12] = 0
+
+        red = alloc._compute_red((10, 11, 12))
+        # Deadlines: 100, 10000, 10000
+        # Largest gap is between 100 and 10000 = 9900
+        # tight set = {100}, loose set = {10000, 10000}
+        # f = 1/3, RED = (1/3)*100 + (2/3)*10000 = 6700
+        assert red == 6700
+        # RED should NOT equal the outlier's 100
+        assert red > 100
+        # RED should be closer to loose min than tight min
+        assert red > 5000
+
+    def test_red_missing_slo_returns_none(self):
+        """No SLO or no start time → None."""
+        ctx = _make_context(
+            [MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.EARLY, 0, "collective")],
+            [MfsRequestInfo(request_id=10, ttft_slo_us=None)],
+        )
+        alloc = MfsAllocator(ctx)
+        assert alloc._compute_red((10,)) is None
+
+    def test_red_no_request_info_returns_none(self):
+        """No request_info at all → None."""
+        ctx = _make_context(
+            [MfsTaskInfo(1, 0, None, (99,), 0, MfsStage.EARLY, 0, "collective")],
+        )
+        alloc = MfsAllocator(ctx)
+        assert alloc._compute_red((99,)) is None
+
+
+class TestRedSubPriority:
+    """Tests for RED quantile-based queue tiering."""
+
+    def test_lower_red_gets_priority_over_higher_red(self):
+        """Two EARLY RLI=0 flows: lower RED goes to urgent queue, gets all bandwidth."""
+        topo = NetworkTopology()
+        topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
+
+        # Flow 1: tight batch (RED = 1000)
+        ctx = _make_context(
+            [
+                MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.EARLY, 0, "collective"),
+                MfsTaskInfo(2, 0, None, (20,), 0, MfsStage.EARLY, 0, "collective"),
+            ],
+            [
+                MfsRequestInfo(request_id=10, ttft_slo_us=1000),
+                MfsRequestInfo(request_id=20, ttft_slo_us=100000),
+            ],
+        )
+        alloc = MfsAllocator(ctx)
+        alloc.request_start_time[10] = 0
+        alloc.request_start_time[20] = 0
+
+        f1 = _flow(1, 0, 1, 100, path=[0, 1])
+        f2 = _flow(2, 0, 1, 100, path=[0, 1])
+        result = alloc.allocate([f1, f2], topo, current_time=0)
+
+        # Both EARLY RLI=0, quantile split: flow 1 (RED=1000) → urgent (queue 3),
+        # flow 2 (RED=100000) → relaxed (queue 2). Urgent queue served first.
+        assert result[1] == 100.0
+        assert result[2] == 0.0
+        assert result[1] == 100.0
+        assert result[2] == 0.0
+
+    def test_red_does_not_affect_p2d_mlu(self):
+        """RED sub-priority should not change P2D MLU promotion."""
+        topo = NetworkTopology()
+        topo.add_link(Link(0, 1, 1.0, 1.0, 0.0))
+
+        ctx = _make_context(
+            [
+                MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.P2D, 0, "p2d_transfer"),
+                MfsTaskInfo(2, 0, None, (20,), 0, MfsStage.EARLY, 0, "collective"),
+            ],
+            [
+                MfsRequestInfo(request_id=10, ttft_slo_us=1000),
+                MfsRequestInfo(request_id=20, ttft_slo_us=100000),
+            ],
+        )
+        alloc = MfsAllocator(ctx)
+        alloc.request_start_time[10] = 0
+        alloc.request_start_time[20] = 0
+
+        # P2D with tight deadline (MLU high) should be promoted
+        f1 = _flow(1, 0, 1, 100000, start=0, path=[0, 1])
+        f2 = _flow(2, 0, 1, 100, path=[0, 1])
+        result = alloc.allocate([f1, f2], topo, current_time=900)
+
+        # P2D at urgent queue 4 > EARLY at queue 2/3
+        assert result[1] == 1.0
+        assert result[2] == 0.0
+
+    def test_non_early_queue_keeps_fair_share(self):
+        """P2D flows in same queue still get fair share, not RED-ordered."""
+        topo = NetworkTopology()
+        topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
+
+        # Two P2D flows without SLO → both at p2d_initial_queue
+        ctx = _make_context([
+            MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.P2D, 0, "p2d_transfer"),
+            MfsTaskInfo(2, 0, None, (20,), 0, MfsStage.P2D, 0, "p2d_transfer"),
+        ])
+        alloc = MfsAllocator(ctx)
+
+        f1 = _flow(1, 0, 1, 100, path=[0, 1])
+        f2 = _flow(2, 0, 1, 100, path=[0, 1])
+        result = alloc.allocate([f1, f2], topo, current_time=0)
+
+        # Fair share: 50 / 50
+        assert result[1] == pytest.approx(50.0)
+        assert result[2] == pytest.approx(50.0)
