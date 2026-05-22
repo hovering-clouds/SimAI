@@ -13,6 +13,16 @@ Model: 2 layers, tp=2, ep=1 (simple, no MoE)
 import pytest
 from src.workload_generator.inference_trace_expander import InferenceTraceExpander
 from src.workload_generator.inference_profile import InferenceProfileStore
+
+
+def _kv_task_ids(btm, dep_id, bid):
+    """Collect all KV transfer task_ids for dep_id → bid (aggregated across per-request entries)."""
+    prefix = f"kv_{dep_id}_to_{bid}_req_"
+    ids: list[int] = []
+    for k, v in btm.items():
+        if k.startswith(prefix):
+            ids.extend(v["task_ids"])
+    return ids
 from src.workload_format.schema import Phase, CommType, TaskType
 
 
@@ -130,18 +140,18 @@ class TestExpansionStructure:
 
     def test_batch_task_map_keys(self, result):
         _, btm = result
-        # 4 batches + 1 KV transfer entry
+        # 4 batches + per-request KV transfer entries
         assert "p0" in btm
         assert "d0" in btm
         assert "d1" in btm
         assert "d2" in btm
-        assert "kv_p0_to_d0" in btm
+        assert any(k.startswith("kv_p0_to_d0_req_") for k in btm)
 
     def test_batch_types(self, result):
         _, btm = result
         assert btm["p0"]["type"] == "prefill"
         assert btm["d0"]["type"] == "decode"
-        assert btm["kv_p0_to_d0"]["type"] == "kv_transfer"
+        assert next(v for k, v in btm.items() if k.startswith("kv_"))["type"] == "kv_transfer"
 
     def test_request_ids_preserved(self, result):
         _, btm = result
@@ -176,7 +186,8 @@ class TestPhaseAssignment:
     def test_kv_transfer_comm_type(self, result):
         workload, btm = result
         task_map = {t.task_id: t for t in workload.tasks}
-        kv_tasks = [task_map[tid] for tid in btm["kv_p0_to_d0"]["task_ids"]]
+        kv_task_ids = _kv_task_ids(btm, "p0", "d0")
+        kv_tasks = [task_map[tid] for tid in kv_task_ids]
         assert all(t.type == TaskType.FLOW for t in kv_tasks)
         assert all(t.comm_type == CommType.KV_CACHE_TRANSFER for t in kv_tasks)
 
@@ -208,7 +219,8 @@ class TestRankMapping:
     def test_kv_transfer_src_is_p_ranks_dst_is_d_ranks(self, result):
         workload, btm = result
         task_map = {t.task_id: t for t in workload.tasks}
-        kv_tasks = [task_map[tid] for tid in btm["kv_p0_to_d0"]["task_ids"]]
+        kv_task_ids = _kv_task_ids(btm, "p0", "d0")
+        kv_tasks = [task_map[tid] for tid in kv_task_ids]
         srcs = {t.src for t in kv_tasks}
         dsts = {t.dst for t in kv_tasks}
         assert srcs == {0, 1}   # P-node ranks
@@ -230,7 +242,7 @@ class TestTaskCounts:
     def test_kv_transfer_task_count(self, result):
         _, btm = result
         # 2 requests × tp=2 ranks = 4 KV flows
-        assert len(btm["kv_p0_to_d0"]["task_ids"]) == 2 * TP
+        assert len(_kv_task_ids(btm, "p0", "d0")) == 2 * TP
 
     def test_allreduce_flow_count_per_batch(self, result):
         workload, btm = result
@@ -250,7 +262,7 @@ class TestDependencies:
         workload, btm = result
         task_map = {t.task_id: t for t in workload.tasks}
 
-        kv_task_ids = set(btm["kv_p0_to_d0"]["task_ids"])
+        kv_task_ids = set(_kv_task_ids(btm, "p0", "d0"))
         # Only the very first sub-op compute tasks (layer 0, attention) should
         # directly depend on KV transfer. Find them: compute tasks whose deps
         # are all from outside d0 (i.e., from KV transfer).

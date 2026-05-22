@@ -151,7 +151,7 @@ class InferenceTraceExpander:
 
                 # ── KV transfer: prefill → decode across replicas
                 if dep_batch["type"] == "prefill" and btype == "decode":
-                    kv_tasks, kv_exits, task_id = self._expand_kv_transfer(
+                    kv_tasks, kv_exits, req_task_map, task_id = self._expand_kv_transfer(
                         request_ids=batch["request_ids"],
                         kv_cache_bytes=dep_batch.get("kv_cache_bytes") or {},
                         p_replica_id=dep_batch["replica_id"],
@@ -164,13 +164,15 @@ class InferenceTraceExpander:
                     )
                     all_flow_tasks.extend(kv_tasks)
 
-                    btm_key = f"kv_{dep_id}_to_{bid}"
-                    batch_task_map[btm_key] = {
-                        "task_ids": [t.task_id for t in kv_tasks],
-                        "type": "kv_transfer",
-                        "from_batch": dep_id,
-                        "to_batch": bid,
-                    }
+                    for req_id, tids in req_task_map.items():
+                        req_btm_key = f"kv_{dep_id}_to_{bid}_req_{req_id}"
+                        batch_task_map[req_btm_key] = {
+                            "task_ids": tids,
+                            "type": "kv_transfer",
+                            "from_batch": dep_id,
+                            "to_batch": bid,
+                            "request_ids": [req_id],
+                        }
                     for rank, tids in kv_exits.items():
                         prev_exits.setdefault(rank, []).extend(tids)
                 else:
@@ -473,12 +475,14 @@ class InferenceTraceExpander:
         Each flow carries kv_cache_bytes[req_id] / stage_size. All flows depend
         on the prefill batch's exit tasks.
 
-        Returns (tasks, exits, next_task_id) where exits maps
-        d_rank → [task_ids] for the KV transfer flows received at D-node.
+        Returns (tasks, exits, request_task_map, next_task_id) where:
+        - exits maps d_rank → [task_ids] for the KV transfer flows received at D-node.
+        - request_task_map maps req_id → [task_ids] for each request's flows.
         """
         tasks: list[FlowTask] = []
         task_id = task_id_start
         exits: dict[int, list[int]] = {}  # d_rank → [task_ids]
+        request_task_map: dict[int, list[int]] = {}
 
         p_ranks = self._stage_ranks(p_replica_id, src_stage_id)
         d_ranks = self._stage_ranks(d_replica_id, dst_stage_id)
@@ -491,6 +495,7 @@ class InferenceTraceExpander:
                 continue
 
             per_rank_bytes = max(total_kv // stage_size, 1)
+            req_tids: list[int] = []
 
             for p_rank, d_rank in zip(p_ranks, d_ranks):
                 ft = FlowTask(
@@ -508,10 +513,13 @@ class InferenceTraceExpander:
                     deps=list(prev_exits.get(p_rank, [])),
                 )
                 tasks.append(ft)
+                req_tids.append(task_id)
                 exits.setdefault(d_rank, []).append(task_id)
                 task_id += 1
 
-        return tasks, exits, task_id
+            request_task_map[req_id] = req_tids
+
+        return tasks, exits, request_task_map, task_id
 
     # ── Total layers helper ─────────────────────────────────────────────────
 

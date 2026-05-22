@@ -20,6 +20,16 @@ from src.workload_generator.inference_profile import InferenceProfileStore
 from src.workload_format.schema import Phase, CommType, TaskType
 
 
+def _kv_task_ids(btm, dep_id, bid):
+    """Collect all KV transfer task_ids for dep_id → bid (aggregated across per-request entries)."""
+    prefix = f"kv_{dep_id}_to_{bid}_req_"
+    ids: list[int] = []
+    for k, v in btm.items():
+        if k.startswith(prefix):
+            ids.extend(v["task_ids"])
+    return ids
+
+
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 TP = 2
@@ -307,23 +317,21 @@ class TestPPKVTransfer:
     def test_kv_transfer_stage0_exists(self, pp_result):
         """KV transfer from P-stage-0 to D-stage-0 should exist."""
         _, btm = pp_result
-        kv_key = "kv_p0_s0_to_d0_s0"
-        assert kv_key in btm
-        assert btm[kv_key]["type"] == "kv_transfer"
+        assert any(k.startswith("kv_p0_s0_to_d0_s0_req_") for k in btm)
+        assert next(v for k, v in btm.items() if k.startswith("kv_p0_s0_to_d0_s0_req_"))["type"] == "kv_transfer"
 
     def test_kv_transfer_stage1_exists(self, pp_result):
         """KV transfer from P-stage-1 to D-stage-1 should exist."""
         _, btm = pp_result
-        kv_key = "kv_p0_s1_to_d0_s1"
-        assert kv_key in btm
-        assert btm[kv_key]["type"] == "kv_transfer"
+        assert any(k.startswith("kv_p0_s1_to_d0_s1_req_") for k in btm)
+        assert next(v for k, v in btm.items() if k.startswith("kv_p0_s1_to_d0_s1_req_"))["type"] == "kv_transfer"
 
     def test_kv_transfer_stage0_src_dst(self, pp_result):
         """KV stage 0: P-stage-0 [0,1] → D-stage-0 [4,5]."""
         workload, btm = pp_result
         task_map = {t.task_id: t for t in workload.tasks}
-        kv_key = "kv_p0_s0_to_d0_s0"
-        kv_tasks = [task_map[tid] for tid in btm[kv_key]["task_ids"]]
+        kv_task_ids = _kv_task_ids(btm, "p0_s0", "d0_s0")
+        kv_tasks = [task_map[tid] for tid in kv_task_ids]
         srcs = {t.src for t in kv_tasks}
         dsts = {t.dst for t in kv_tasks}
         assert srcs == {0, 1}
@@ -333,8 +341,8 @@ class TestPPKVTransfer:
         """KV stage 1: P-stage-1 [2,3] → D-stage-1 [6,7]."""
         workload, btm = pp_result
         task_map = {t.task_id: t for t in workload.tasks}
-        kv_key = "kv_p0_s1_to_d0_s1"
-        kv_tasks = [task_map[tid] for tid in btm[kv_key]["task_ids"]]
+        kv_task_ids = _kv_task_ids(btm, "p0_s1", "d0_s1")
+        kv_tasks = [task_map[tid] for tid in kv_task_ids]
         srcs = {t.src for t in kv_tasks}
         dsts = {t.dst for t in kv_tasks}
         assert srcs == {2, 3}
@@ -345,8 +353,8 @@ class TestPPKVTransfer:
         KV bytes = total_kv / pp, so stage_size = tp*ep = 2.
         Total per stage: 2 reqs × 2 ranks = 4 flows."""
         _, btm = pp_result
-        assert len(btm["kv_p0_s0_to_d0_s0"]["task_ids"]) == 2 * TP
-        assert len(btm["kv_p0_s1_to_d0_s1"]["task_ids"]) == 2 * TP
+        assert len(_kv_task_ids(btm, "p0_s0", "d0_s0")) == 2 * TP
+        assert len(_kv_task_ids(btm, "p0_s1", "d0_s1")) == 2 * TP
 
 
 # ── Test: Pipeline dependency chain ────────────────────────────────────────────
@@ -390,7 +398,7 @@ class TestPPDependencies:
         """Decode stage 0 should depend on KV transfer from P-stage-0."""
         workload, btm = pp_result
         task_map = {t.task_id: t for t in workload.tasks}
-        kv_task_ids = set(btm["kv_p0_s0_to_d0_s0"]["task_ids"])
+        kv_task_ids = set(_kv_task_ids(btm, "p0_s0", "d0_s0"))
         d0_s0_ids = set(btm["d0_s0"]["task_ids"])
         first_computes = [
             tid for tid in btm["d0_s0"]["task_ids"]
@@ -409,7 +417,7 @@ class TestPPDependencies:
         and PP comm from decode stage 0."""
         workload, btm = pp_result
         task_map = {t.task_id: t for t in workload.tasks}
-        kv_task_ids = set(btm["kv_p0_s1_to_d0_s1"]["task_ids"])
+        kv_task_ids = set(_kv_task_ids(btm, "p0_s1", "d0_s1"))
         pp_task_ids = set(btm["pp_d0_s0_to_d0_s1"]["task_ids"])
         d0_s1_ids = set(btm["d0_s1"]["task_ids"])
         first_computes = [
@@ -768,10 +776,10 @@ class TestPPUnevenLayers:
         """Stage 1 KV bytes per rank > stage 0, because stage 1 has more layers."""
         workload, btm = uneven_result
         task_map = {t.task_id: t for t in workload.tasks}
-        kv_key_s0 = "kv_p0_s0_to_d0_s0"
-        kv_key_s1 = "kv_p0_s1_to_d0_s1"
-        kv_s0 = [task_map[tid] for tid in btm[kv_key_s0]["task_ids"]]
-        kv_s1 = [task_map[tid] for tid in btm[kv_key_s1]["task_ids"]]
+        kv_tids_s0 = _kv_task_ids(btm, "p0_s0", "d0_s0")
+        kv_tids_s1 = _kv_task_ids(btm, "p0_s1", "d0_s1")
+        kv_s0 = [task_map[tid] for tid in kv_tids_s0]
+        kv_s1 = [task_map[tid] for tid in kv_tids_s1]
         # All tasks for the same request within a stage have equal size
         s0_size = kv_s0[0].size_bytes if kv_s0 else 0
         s1_size = kv_s1[0].size_bytes if kv_s1 else 0
