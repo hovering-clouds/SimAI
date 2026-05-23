@@ -1,6 +1,7 @@
 """SimAI Flow Scheduler Executor."""
 from .analytical import AnalyticalExecutor
 from .policies.base_policy import SchedulingPolicy
+from .policies.cassini_policy import CassiniSchedulingPolicy
 from .policies.default_policy import DefaultSchedulingPolicy
 from .policies.puppeteer_policy import PuppeteerSchedulingPolicy
 from .bandwidth_allocators.base_allocator import BandwidthAllocator
@@ -13,6 +14,7 @@ from .visualizer import ChromeTraceCompact, ChromeTraceVerbose, ChromeTraceVisua
 __all__ = [
     "AnalyticalExecutor",
     "SchedulingPolicy",
+    "CassiniSchedulingPolicy",
     "DefaultSchedulingPolicy",
     "PuppeteerSchedulingPolicy",
     "ActiveFlow",

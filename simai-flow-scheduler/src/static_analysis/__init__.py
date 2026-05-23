@@ -60,6 +60,8 @@ from .passes.puppeteer_coordination import (
     ResourceDependencyTable,
 )
 from .strategies import (
+    CassiniAnalyzer,
+    CassiniAnalysisResult,
     DefaultAnalyzer,
     DefaultAnalysisResult,
     ExampleAnalyzer,
@@ -69,6 +71,8 @@ from .strategies import (
 )
 
 __all__ = [
+    "CassiniAnalyzer",
+    "CassiniAnalysisResult",
     "TopologyLoader",
     "NetworkTopology",
     "Link",
