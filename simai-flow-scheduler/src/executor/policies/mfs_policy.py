@@ -13,7 +13,7 @@ from ..runtime import ActiveFlow
 from ...static_analysis.strategies.mfs_strategy import MfsAnalysisResult
 from ...static_analysis.passes.topology_loader import NetworkTopology
 from ...static_analysis.passes.mfs_context import MfsStage
-from ...workload_format.schema import P2PWorkload, Task
+from ...workload_format.schema import P2PWorkload, Task, Phase
 
 
 class MfsSchedulingPolicy(SchedulingPolicy):
@@ -95,13 +95,16 @@ class MfsSchedulingPolicy(SchedulingPolicy):
         """Advance compute cursor and update dynamic layer tracking."""
         if task.is_compute():
             self.compute_cursor[task.node] += 1
-            # Update current_layer for this (job, stage)
-            info = self._analysis.mfs_context.task_info.get(task.task_id)
-            if info is not None:
-                stage_key = (task.job_id, info.stage_id)
-                prev = self.allocator.current_layer_by_stage.get(stage_key, 0)
-                if task.layer_id + 1 > prev:
-                    self.allocator.current_layer_by_stage[stage_key] = task.layer_id + 1
+            # Only advance current_layer for prefill-phase compute.
+            # Decode compute would incorrectly advance RLI for other requests'
+            # prefill EARLY flows sharing the same (job_id, stage_id).
+            if task.phase == Phase.PREFILL:
+                info = self._analysis.mfs_context.task_info.get(task.task_id)
+                if info is not None:
+                    stage_key = (task.job_id, info.stage_id)
+                    prev = self.allocator.current_layer_by_stage.get(stage_key, 0)
+                    if task.layer_id + 1 > prev:
+                        self.allocator.current_layer_by_stage[stage_key] = task.layer_id + 1
 
         # Feasibility: subtract critical path task duration from remaining_us
         fi = self._analysis.feasibility_info

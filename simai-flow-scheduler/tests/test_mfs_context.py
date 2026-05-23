@@ -138,6 +138,36 @@ class TestBuildMfsContext:
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[0].stage_id == 2
 
+    def test_decode_collective_is_background(self):
+        """Decode-phase collective flows should be BACKGROUND, not EARLY."""
+        t1 = _flow_task(1, 0, 1, 200, CommType.TP_ALLREDUCE_RING, phase=Phase.DECODE)
+        wl = _make_workload([t1])
+        btm = {"d1": {"task_ids": [1], "request_ids": [1], "type": "decode"}}
+        ctx = build_mfs_context(wl, btm, trace={"requests": {}})
+        assert ctx.task_info[1].mfs_stage == MfsStage.BACKGROUND
+        assert ctx.task_info[1].comm_role == "decode_collective"
+
+    def test_prefill_collective_is_earlier_than_decode(self):
+        """Same comm_type, different phase: prefill → EARLY, decode → BACKGROUND."""
+        t1 = _flow_task(1, 0, 1, 200, CommType.TP_ALLREDUCE_RING, phase=Phase.PREFILL)
+        t2 = _flow_task(2, 0, 1, 300, CommType.TP_ALLREDUCE_RING, phase=Phase.DECODE)
+        wl = _make_workload([t1, t2])
+        btm = {
+            "p1": {"task_ids": [1], "request_ids": [1], "type": "prefill"},
+            "d1": {"task_ids": [2], "request_ids": [1], "type": "decode"},
+        }
+        ctx = build_mfs_context(wl, btm, trace={"requests": {}})
+        assert ctx.task_info[1].mfs_stage == MfsStage.EARLY
+        assert ctx.task_info[2].mfs_stage == MfsStage.BACKGROUND
+
+    def test_decode_pp_send_still_early(self):
+        """PP_SEND in decode phase should still be EARLY (unlikely but test boundary)."""
+        t1 = _flow_task(1, 0, 1, 200, CommType.PP_SEND, phase=Phase.DECODE)
+        wl = _make_workload([t1])
+        btm = {"d1": {"task_ids": [1], "request_ids": [1], "type": "decode"}}
+        ctx = build_mfs_context(wl, btm, trace={"requests": {}})
+        assert ctx.task_info[1].mfs_stage == MfsStage.EARLY
+
 
 # ── MfsRequestInfo / SLO parsing tests ────────────────────────────────────────
 

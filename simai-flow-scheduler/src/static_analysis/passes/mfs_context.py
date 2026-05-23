@@ -7,7 +7,7 @@ priority computation.
 from dataclasses import dataclass, field
 from enum import Enum
 
-from ...workload_format.schema import P2PWorkload, Task, CommType
+from ...workload_format.schema import P2PWorkload, Task, CommType, Phase
 
 
 class MfsStage(str, Enum):
@@ -62,6 +62,9 @@ def _classify_task(task: Task) -> tuple[MfsStage, str]:
     if ct == CommType.PP_SEND or ct == CommType.PP_RECV:
         return MfsStage.EARLY, "pp_send"
     if ct in _COLLECTIVE_TYPES:
+        # Decode-phase collectives are not part of the prefill→P2D pipeline
+        if task.phase == Phase.DECODE:
+            return MfsStage.BACKGROUND, "decode_collective"
         return MfsStage.EARLY, "collective"
     return MfsStage.BACKGROUND, "unknown"
 

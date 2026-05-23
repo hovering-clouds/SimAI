@@ -311,3 +311,59 @@ class TestRemainingUsTracking:
         # Both requests' remaining_us should be fully decremented
         assert policy.allocator.remaining_us[1] <= 0
         assert policy.allocator.remaining_us[2] <= 0
+
+
+class TestDecodePhaseIsolation:
+    """Tests for decode-phase flows and compute not interfering with MFS."""
+
+    def test_decode_compute_does_not_advance_current_layer(self):
+        """Decode-phase compute should NOT advance current_layer_by_stage."""
+        topo = _star_topo(bw=100.0)
+
+        t0 = Task(task_id=0, job_id=0, type=TaskType.COMPUTE,
+                  node=0, duration_us=10, phase=Phase.PREFILL, layer_id=0)
+        t1 = Task(task_id=1, job_id=0, type=TaskType.COMPUTE,
+                  node=0, duration_us=10, phase=Phase.PREFILL, layer_id=1,
+                  deps=[0])
+        # Decode compute at layer 5 — should NOT advance current_layer
+        t2 = Task(task_id=2, job_id=0, type=TaskType.COMPUTE,
+                  node=0, duration_us=10, phase=Phase.DECODE, layer_id=5,
+                  deps=[1])
+
+        wl = _make_workload([t0, t1, t2])
+        btm = {"b1": {"task_ids": [0, 1, 2], "request_ids": [1], "type": "prefill", "stage_id": 0}}
+        trace = _empty_trace([1])
+
+        analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
+        policy = MfsSchedulingPolicy(analysis=analysis)
+        executor = AnalyticalExecutor(topology=topo, policy=policy)
+        result = executor.execute(wl)
+
+        # Only prefill compute advances: layer 0,1 → current_layer = 2
+        # Decode compute at layer 5 should be ignored
+        assert policy.allocator.current_layer_by_stage.get((0, 0), 0) == 2
+
+    def test_decode_collective_classified_as_background(self):
+        """Decode-phase collective flow should be BACKGROUND in allocator context."""
+        topo = _star_topo(bw=100.0)
+
+        t0 = Task(task_id=0, job_id=0, type=TaskType.COMPUTE,
+                  node=0, duration_us=10, phase=Phase.DECODE, layer_id=0)
+        t1 = Task(task_id=1, job_id=0, type=TaskType.FLOW,
+                  src=0, dst=1, size_bytes=1000, comm_type=CommType.TP_ALLREDUCE_RING,
+                  phase=Phase.DECODE, layer_id=0, deps=[0])
+
+        wl = _make_workload([t0, t1])
+        btm = {"d1": {"task_ids": [0, 1], "request_ids": [1], "type": "decode", "stage_id": 0}}
+        trace = _empty_trace([1])
+
+        analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
+        from src.static_analysis.passes.mfs_context import MfsStage
+        assert analysis.mfs_context.task_info[1].mfs_stage == MfsStage.BACKGROUND
+
+        policy = MfsSchedulingPolicy(analysis=analysis)
+        executor = AnalyticalExecutor(topology=topo, policy=policy)
+        result = executor.execute(wl)
+
+        # Decode collective should complete normally (queue 0 fair-share)
+        assert result.per_task[1].end_time_us > 0
