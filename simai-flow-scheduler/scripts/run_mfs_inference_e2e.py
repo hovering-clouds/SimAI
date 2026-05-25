@@ -25,8 +25,8 @@ from src.executor.bandwidth_allocators.mfs_allocator import MfsAllocatorConfig
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-INFERENCE_TRACE = "inputs/traces/inference_trace_pp1.json"
-TOPO_FILE       = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100"
+INFERENCE_TRACE = "inputs/traces/inference_trace_pp2_slo.json"
+TOPO_FILE       = "inputs/topologies/AlibabaHPN_32g_8gps_DualToR_DualPlane_200Gbps_A100"
 PROFILE_DIR     = "inputs/vidur-csv/deepseek-tp2-pp1-ep4"
 OUTPUT_DIR      = "outputs/mfs_reproduce"
 

@@ -48,6 +48,7 @@ class CommType(str, Enum):
     PP_RECV = "pp_recv"
     # Inference
     KV_CACHE_TRANSFER = "kv_cache_transfer"
+    KV_CACHE_REUSE = "kv_cache_reuse"
     # Unknown/unspecified
     UNKNOWN = "unknown"
 

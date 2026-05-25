@@ -168,6 +168,15 @@ class TestBuildMfsContext:
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.EARLY
 
+    def test_kv_cache_reuse_classified_as_early(self):
+        """KV_CACHE_REUSE flows should be MfsStage.EARLY."""
+        t1 = _flow_task(1, 4, 0, 1000, CommType.KV_CACHE_REUSE)
+        wl = _make_workload([t1])
+        btm = {"kv_reuse_p0": {"task_ids": [1], "request_ids": [1], "type": "kv_reuse"}}
+        ctx = build_mfs_context(wl, btm, trace={"requests": {}})
+        assert ctx.task_info[1].mfs_stage == MfsStage.EARLY
+        assert ctx.task_info[1].comm_role == "kv_cache_reuse"
+
 
 # ── MfsRequestInfo / SLO parsing tests ────────────────────────────────────────
 

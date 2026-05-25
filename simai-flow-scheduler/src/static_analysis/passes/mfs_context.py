@@ -59,6 +59,8 @@ def _classify_task(task: Task) -> tuple[MfsStage, str]:
     ct = task.comm_type
     if ct == CommType.KV_CACHE_TRANSFER:
         return MfsStage.P2D, "p2d_transfer"
+    if ct == CommType.KV_CACHE_REUSE:
+        return MfsStage.EARLY, "kv_cache_reuse"
     if ct == CommType.PP_SEND or ct == CommType.PP_RECV:
         return MfsStage.EARLY, "pp_send"
     if ct in _COLLECTIVE_TYPES:
