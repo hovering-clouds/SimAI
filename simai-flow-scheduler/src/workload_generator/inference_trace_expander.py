@@ -247,6 +247,7 @@ class InferenceTraceExpander:
                             request_reuse_info=batch_reuse,
                             job_id=job_id,
                             task_id_start=task_id,
+                            prev_exits=prev_exits,
                         )
                     all_flow_tasks.extend(reuse_flows)
                     for req_key, tids in req_task_map.items():
@@ -534,12 +535,14 @@ class InferenceTraceExpander:
         request_reuse_info: dict,
         job_id: int,
         task_id_start: int,
+        prev_exits: dict[int, list[int]] | None = None,
     ) -> tuple[list[FlowTask], dict[int, dict[int, list[int]]], dict[str, list[int]], int]:
         """
         Expand per-layer KV reuse flows from storage nodes to prefill ranks.
 
         Each request's reuse flows all come from the same storage node.
         Flows are per-layer so RLI can prioritize them correctly.
+        Flows depend on prev_exits for their destination rank.
 
         Args:
             storage_node_ids: Actual topology node IDs for storage nodes.
@@ -549,6 +552,7 @@ class InferenceTraceExpander:
             request_reuse_info: {req_id: {hit_ratio, storage_node_idx}}.
             job_id: Job ID for tasks.
             task_id_start: Starting task ID.
+            prev_exits: {rank: [task_ids]} — reuse flows wait for these.
 
         Returns:
             (all_flows, reuse_layer_deps, request_task_map, next_task_id)
@@ -587,7 +591,7 @@ class InferenceTraceExpander:
                         num_chunks=1,
                         phase=Phase.PREFILL,
                         layer_id=layer_id,
-                        deps=[],
+                        deps=list(prev_exits.get(rank, [])) if prev_exits else [],
                     )
                     all_flows.append(ft)
                     req_tids.append(task_id)
