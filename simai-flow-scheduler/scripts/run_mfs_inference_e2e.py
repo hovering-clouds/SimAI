@@ -68,6 +68,19 @@ def _compute_qos(trace, batch_task_map, result, workload):
 
     for req_id_str, req_info in trace["requests"].items():
         req_id = int(req_id_str)
+
+        # Request start time = earliest task start across all this request's batches
+        request_start_us = None
+        for bid, binfo in batch_task_map.items():
+            if req_id in binfo.get("request_ids", []):
+                for tid in binfo["task_ids"]:
+                    if tid in result.per_task:
+                        st = result.per_task[tid].start_time_us
+                        if request_start_us is None or st < request_start_us:
+                            request_start_us = st
+        if request_start_us is None:
+            continue
+
         decode_batches = []
         for bid, binfo in batch_task_map.items():
             if binfo["type"] == "decode" and req_id in binfo["request_ids"]:
@@ -86,7 +99,8 @@ def _compute_qos(trace, batch_task_map, result, workload):
         if not decode_batches:
             continue
 
-        ttft_us = decode_batches[0]["end_time_us"]
+        # TTFT = time from request's first task start to first decode batch completion
+        ttft_us = decode_batches[0]["end_time_us"] - request_start_us
         tbt_list = [
             decode_batches[i + 1]["end_time_us"] - decode_batches[i]["end_time_us"]
             for i in range(len(decode_batches) - 1)
@@ -122,27 +136,17 @@ def _compute_qos(trace, batch_task_map, result, workload):
             "collective_completion_us": sorted(collective_times) if collective_times else [],
         }
 
-        # Deadline metrics (relative SLO)
+        # Deadline metrics (relative to request_start_us)
         ttft_slo_us = req_info.get("ttft_slo_us")
         if ttft_slo_us is not None:
             record["ttft_slo_us"] = ttft_slo_us
-            # Find the request's first task start time as baseline
-            first_task_start = None
-            for bid, binfo in batch_task_map.items():
-                if binfo["type"] == "prefill" and req_id in binfo.get("request_ids", []):
-                    for tid in binfo["task_ids"]:
-                        if tid in result.per_task:
-                            st = result.per_task[tid].start_time_us
-                            if first_task_start is None or st < first_task_start:
-                                first_task_start = st
-            if first_task_start is not None:
-                deadline_us = first_task_start + ttft_slo_us
-                record["deadline_us"] = deadline_us
-                record["deadline_met"] = ttft_us <= deadline_us
-                record["deadline_miss_us"] = ttft_us - deadline_us
-                if p2d_times:
-                    last_p2d = max(p2d_times)
-                    record["p2d_earliness_us"] = deadline_us - last_p2d
+            deadline_us = request_start_us + ttft_slo_us
+            record["deadline_us"] = deadline_us
+            record["deadline_met"] = ttft_us <= deadline_us
+            record["deadline_miss_us"] = ttft_us - deadline_us
+            if p2d_times:
+                last_p2d = max(p2d_times)
+                record["p2d_earliness_us"] = deadline_us - last_p2d
 
         qos_records.append(record)
 
