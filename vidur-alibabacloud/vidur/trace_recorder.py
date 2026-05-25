@@ -61,9 +61,9 @@ SLO_GENERATOR: Callable | None = _default_slo_generator
 # Edit this to configure Stage 1 KV cache reuse metadata generation.
 # Set STAGE1_KV_REUSE_ENABLE = False to disable.
 
-STAGE1_KV_REUSE_ENABLE: bool = False
-STAGE1_KV_REUSE_HIT_RATIO: float = 0.0
-STAGE1_NUM_STORAGE_NODES: int = 0
+STAGE1_KV_REUSE_ENABLE: bool = True
+STAGE1_KV_REUSE_HIT_RATIO: float = 0.5
+STAGE1_NUM_STORAGE_NODES: int = 1
 
 
 class TraceRecorder:
@@ -371,6 +371,7 @@ class TraceRecorder:
                 "pd_p2p_comm_bandwidth_gbps": cfg.pd_p2p_comm_bandwidth,
             },
             "requests": self._requests,
+            "batches": self._batches,
         }
 
         # Stage 1 KV reuse top-level config
