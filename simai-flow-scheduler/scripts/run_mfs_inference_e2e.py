@@ -25,8 +25,8 @@ from src.executor.bandwidth_allocators.mfs_allocator import MfsAllocatorConfig
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-INFERENCE_TRACE = "inputs/traces/inference_trace_pp2_slo.json"
-TOPO_FILE       = "inputs/topologies/AlibabaHPN_32g_8gps_DualToR_DualPlane_200Gbps_A100"
+INFERENCE_TRACE = "inputs/traces/inference_trace_stage1_pp2.json"
+TOPO_FILE       = "inputs/topologies/AlibabaHPN_32g_8gps_DualToR_DualPlane_200Gbps_A100_stage1"
 PROFILE_DIR     = "inputs/vidur-csv/deepseek-tp2-pp1-ep4"
 OUTPUT_DIR      = "outputs/mfs_reproduce"
 
@@ -177,7 +177,10 @@ loaded = store.load_directory(PROFILE_DIR)
 print(f"  Loaded {loaded} profiles")
 
 expander = InferenceTraceExpander(store, tp=infer_tp, ep=infer_ep, pp=infer_pp)
-inference_wl, batch_task_map = expander.expand(trace, job_id=0)
+storage_node_ids = [172]  # storage node in the stage1 topology
+inference_wl, batch_task_map = expander.expand(
+    trace, job_id=0, storage_node_ids=storage_node_ids,
+)
 print(f"  Tasks: {len(inference_wl.tasks)}  "
       f"(compute={len(inference_wl.get_compute_tasks())}, "
       f"flow={len(inference_wl.get_flow_tasks())})")

@@ -197,3 +197,17 @@ if ct == CommType.KV_CACHE_REUSE:
 | **Phase 5** | **Stage 1 KV Reuse** | **新增 reuse flow 类型，集成到完整 MFS 流程** |
 
 Stage 1 reuse flow 作为 EARLY traffic 自然融入 Phase 1-4 构建的调度框架，无需修改 allocator 或 policy 的核心逻辑。唯一的框架修改是 `_expand_batch()` 接受 `reuse_layer_deps` 参数用于依赖注入。
+
+---
+
+## 已知问题（待修复）
+
+### Prefill compute 时长未按 hit_ratio 缩放
+
+**问题：** KV cache reuse flow 只负责从 storage node 拉取可复用 KV 数据到 prefill rank，但 prefill compute task 的 `duration_us`（来自 profile store）仍然是计算全部 token 的 KV cache 的时长。这意味着 `hit_ratio=0.5` 时，reuse flow 拉取了 50% 的 KV，但 prefill compute 仍然计算了 100% 的 KV，导致仿真中的 prefill 阶段偏慢。
+
+**影响：** 偏保守——实际执行中 attention 部分的 K/V projection 可以减少 `hit_ratio` 比例的计算量。TTFT 仿真值可能略高于真实值。
+
+**修复方案：** 在 `expand()` 中，当 prefill batch 关联了 KV reuse 且有 hit_ratio 时，按有效 seq_len = `original_seq × (1 - max_hit_ratio)` 查询 profile store 获取缩放后的 compute 时长。Profile store 已支持不同 seq_len 的查询，接口 `get_profile_for_batch(btype, bs, seq)` 可直接复用。
+
+**优先级：** 低（不影响调度正确性，只影响 prefill 时长精度）

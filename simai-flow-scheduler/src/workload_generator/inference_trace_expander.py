@@ -88,6 +88,7 @@ class InferenceTraceExpander:
         self,
         trace: dict,
         job_id: int = 0,
+        storage_node_ids: list[int] | None = None,
     ) -> tuple[P2PWorkload, dict]:
         """
         Expand trace into P2PWorkload + batch_task_map.
@@ -95,6 +96,8 @@ class InferenceTraceExpander:
         Args:
             trace: Parsed trace dict (from JSON).
             job_id: Job ID to assign to all generated tasks.
+            storage_node_ids: Explicit storage node topology IDs for KV reuse.
+                When provided, overrides auto-computation from trace metadata.
 
         Returns:
             (P2PWorkload, batch_task_map) where batch_task_map maps
@@ -112,15 +115,21 @@ class InferenceTraceExpander:
         total_layers = self._get_total_layers(trace)
 
         # ── Stage 1 KV reuse setup ───────────────────────────────────────────
-        storage_node_ids: list[int] = []
+        resolved_storage_node_ids: list[int] = []
         request_reuse_info: dict[int, dict] = {}
         reuse_cfg = trace.get("stage1_kv_reuse")
         if reuse_cfg and reuse_cfg.get("num_storage_nodes", 0) > 0:
-            num_storage = reuse_cfg["num_storage_nodes"]
-            # Storage nodes come after all GPU nodes across all replicas
-            num_replicas = len({b["replica_id"] for b in trace["batches"]})
-            total_gpus = self._world_size() * num_replicas
-            storage_node_ids = list(range(total_gpus, total_gpus + num_storage))
+            if storage_node_ids is not None:
+                resolved_storage_node_ids = list(storage_node_ids)
+            else:
+                num_storage = reuse_cfg["num_storage_nodes"]
+                if self._assigned_nodes is not None:
+                    total_gpus = max(self._assigned_nodes) + 1
+                else:
+                    num_replicas = len({b["replica_id"] for b in trace["batches"]})
+                    total_gpus = self._world_size() * num_replicas
+                resolved_storage_node_ids = list(
+                    range(total_gpus, total_gpus + num_storage))
             # Extract per-request reuse info from trace requests
             for req_key, req_meta in trace.get("requests", {}).items():
                 hit_ratio = req_meta.get("kv_reuse_hit_ratio")
@@ -231,7 +240,7 @@ class InferenceTraceExpander:
                     kv_bytes = batch.get("kv_cache_bytes") or {}
                     reuse_flows, reuse_layer_deps, req_task_map, task_id = \
                         self._expand_kv_reuse(
-                            storage_node_ids=storage_node_ids,
+                            storage_node_ids=resolved_storage_node_ids,
                             dest_ranks=dest_ranks,
                             kv_cache_bytes=kv_bytes,
                             stage_layer_ids=stage_layer_ids,
