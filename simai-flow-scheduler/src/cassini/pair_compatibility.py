@@ -166,17 +166,26 @@ def _optimize_two(
     """Exhaustive grid search for exactly two jobs.
 
     Fixes job 0 at 0° and searches the full rotation space of job 1.
+    When the best non-zero shift provides negligible improvement over no
+    shift (compatibility delta < 0.02), prefers shift 0 — the delay cost
+    of a useless shift always hurts makespan.
     """
     samples = _pre_sample(circles)
     angles = _search_angles(step_deg)
-    best_score = -float("inf")
+    score_zero = compute_score(circles, [0, 0], link_capacity, samples=samples)
+    best_score = score_zero
     best_s1 = 0
 
     for s1 in angles:
         score = compute_score(circles, [0, s1], link_capacity, samples=samples)
-        if score > best_score:
+        if score > best_score + 1e-9:
             best_score = score
             best_s1 = s1
+
+    # When the improvement is negligible the delay is pure waste.
+    if best_score - score_zero < 0.02:
+        best_s1 = 0
+        best_score = score_zero
 
     return CompatibilityResult(
         score=best_score,
@@ -198,10 +207,15 @@ def _optimize_multi(
 
     At each round, fix all shifts except one and grid-search the free
     axis.  Repeat until convergence or max_iter.
+
+    When the best non-zero shifts provide negligible improvement over all
+    zeros (compatibility delta < 0.02), resets to zero — the delay cost
+    of useless shifts always hurts makespan.
     """
     n = len(circles)
     samples = _pre_sample(circles)
     angles = _search_angles(step_deg)
+    score_zero = compute_score(circles, [0] * n, link_capacity, samples=samples)
     best_shifts = [0] * n
 
     for _ in range(max_iter):
@@ -222,7 +236,7 @@ def _optimize_multi(
                 score = compute_score(
                     circles, candidate, link_capacity, samples=samples
                 )
-                if score > best_local:
+                if score > best_local + 1e-9:
                     best_local = score
                     best_s = s
 
@@ -234,6 +248,10 @@ def _optimize_multi(
             break
 
     final_score = compute_score(circles, best_shifts, link_capacity, samples=samples)
+    if final_score - score_zero < 0.02:
+        best_shifts = [0] * n
+        final_score = score_zero
+
     return CompatibilityResult(
         score=final_score,
         time_shifts_us={

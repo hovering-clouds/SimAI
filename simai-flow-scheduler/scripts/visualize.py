@@ -26,10 +26,10 @@ from src.executor.visualizer import (
 # ── Configuration ──────────────────────────────────────────────
 
 # Output directory from run_e2e.py (must contain workload.json and execution_result.json)
-OUTPUT_DIR = "outputs/A100-gpt_7B_ws1_pp1-world_size1-tp1-pp1-ep1-gbs1-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-True.txt"
+OUTPUT_DIR = "outputs/cassini_experiments"
 
 # Result file name (default: execution_result.json; for puppeteer: result_route-tte.json, etc.)
-RESULT_FILE = "execution_result.json"
+RESULT_FILE = "result_cassini-puppeteer.json"
 
 # Visualization mode: "verbose" | "compact" | "detail"
 MODE = "detail"
