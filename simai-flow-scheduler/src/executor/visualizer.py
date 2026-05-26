@@ -58,7 +58,7 @@ def _task_description(task: Task, tag: str = "") -> str:
         return f"{phase}{suffix} L{task.layer_id}"
     else:
         comm = _abbrev_comm(task.comm_type)
-        return f"{comm} {task.src}->{task.dst}"
+        return f"{comm} {task.src}->{task.dst} L{task.layer_id}"
 
 
 # ── 基类 ──
@@ -104,6 +104,18 @@ class ChromeTraceVisualizer(ABC):
     def _tid_for_comm(self, node_id: int) -> int:
         return node_id * 2 + 2
 
+    @staticmethod
+    def _flow_lane_node_id(task: Task) -> int:
+        """Determine which node ID to use for a flow's visual lane.
+
+        KV cache reuse flows all share the same storage node as src, so
+        using dst spreads them across per-rank lanes instead of stacking
+        all 488 flows on one lane.
+        """
+        if task.comm_type == CommType.KV_CACHE_REUSE:
+            return task.dst if task.dst is not None else 0
+        return task.src if task.src is not None else 0
+
     def _iteration_tag(self, iteration: int) -> str:
         if iteration < 0:
             return "pre"
@@ -125,7 +137,7 @@ class ChromeTraceVisualizer(ABC):
             if task.is_compute():
                 tid = self._tid_for_compute(timing.node)
             else:
-                tid = self._tid_for_comm(task.src if task.src is not None else 0)
+                tid = self._tid_for_comm(self._flow_lane_node_id(task))
 
             if pid not in seen_pids:
                 seen_pids.add(pid)
@@ -138,7 +150,7 @@ class ChromeTraceVisualizer(ABC):
             key = (pid, tid)
             if key not in seen_tids:
                 seen_tids.add(key)
-                node_id = timing.node if task.is_compute() else (task.src or 0)
+                node_id = timing.node if task.is_compute() else self._flow_lane_node_id(task)
                 track = "Compute" if task.is_compute() else "Comm"
                 events.append({
                     "name": "thread_name", "ph": "M",
@@ -199,7 +211,7 @@ class ChromeTraceVisualizer(ABC):
             "ts": timing.start_time_us,
             "dur": timing.end_time_us - timing.start_time_us,
             "pid": task.job_id,
-            "tid": self._tid_for_comm(task.src if task.src is not None else 0),
+            "tid": self._tid_for_comm(self._flow_lane_node_id(task)),
             "args": {
                 "task_id": task.task_id,
                 "src": task.src,
