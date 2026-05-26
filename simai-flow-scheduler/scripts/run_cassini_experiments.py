@@ -152,87 +152,6 @@ def _contiguous_gpus(job_configs):
     return assignments
 
 
-def _build_demo_workload():
-    """Build a synthetic 2-job workload designed to show Cassini's benefit.
-
-    Topology: 4 GPUs in a line, 10 Gbps links, shared middle link (1,2).
-
-        GPU0 --- GPU1 --- GPU2 --- GPU3
-
-    Two jobs with periodic communication bursts on the shared middle link.
-    Without Cassini both flows collide and get 5 Gbps each.  Cassini shifts
-    one job by half a period so flows alternate at full 10 Gbps.
-    """
-    from src.workload_format.schema import (
-        CommType, Job, Meta, P2PWorkload, ParallelismConfig,
-        Phase, Task, TaskType,
-    )
-    from src.static_analysis.passes.topology_loader import Link, NetworkTopology
-
-    # ---- Topology: 4 GPUs in a line ----
-    topo = NetworkTopology()
-    topo.total_nodes = 4
-    topo.gpu_count = 4
-    topo.gpu_nodes = [0, 1, 2, 3]
-    topo.switch_nodes = []
-    topo.node_types = {i: "gpu" for i in range(4)}
-    for s, d in [(0, 1), (1, 0), (1, 2), (2, 1), (2, 3), (3, 2)]:
-        topo.add_link(Link(src=s, dst=d, bandwidth_gbps=10.0,
-                           latency_us=1.0, error_rate=0.0))
-
-    # ---- 2 jobs, 1 iteration (use --num-iters for multi-iteration) ----
-    COMPUTE_US = 50_000    # 50ms
-    FLOW_BYTES = 250_000_000  # 200ms at 10 Gbps (400ms at 5 Gbps)
-    NUM_ITERS = 1
-
-    # Job 0: GPUs [0, 2], flow 0→2  (path: 0→1→2, shares link (1,2))
-    # Job 1: GPUs [1, 3], flow 1→3  (path: 1→2→3, shares link (1,2))
-    job_specs = [
-        (0, [0, 2], 0, 2),
-        (1, [1, 3], 1, 3),
-    ]
-
-    tasks = []
-    tid = 0
-    for jid, gpus, src_gpu, dst_gpu in job_specs:
-        prev_c0, prev_c1 = None, None
-        for it in range(NUM_ITERS):
-            deps_c0 = [prev_c1.task_id] if prev_c1 is not None else []
-            c0 = Task(task_id=tid, job_id=jid, type=TaskType.COMPUTE,
-                      node=gpus[0], duration_us=COMPUTE_US, iteration=it,
-                      phase=Phase.FORWARD, layer_id=it, item_id=tid,
-                      deps=deps_c0)
-            tid += 1; tasks.append(c0)
-            prev_c0 = c0
-
-            fid = tid
-            f0 = Task(task_id=tid, job_id=jid, type=TaskType.FLOW,
-                      src=src_gpu, dst=dst_gpu, size_bytes=FLOW_BYTES,
-                      iteration=it, phase=Phase.FORWARD, layer_id=it,
-                      item_id=tid, deps=[c0.task_id],
-                      comm_type=CommType.TP_ALLREDUCE_RING)
-            tid += 1; tasks.append(f0)
-
-            deps_c1 = [fid]
-            if prev_c1 is not None:
-                deps_c1.append(prev_c1.task_id)
-            c1 = Task(task_id=tid, job_id=jid, type=TaskType.COMPUTE,
-                      node=gpus[1], duration_us=COMPUTE_US, iteration=it,
-                      phase=Phase.FORWARD, layer_id=it, item_id=tid,
-                      deps=deps_c1)
-            tid += 1; tasks.append(c1)
-            prev_c1 = c1
-
-    workload = P2PWorkload(
-        version="1.0", meta=Meta(num_jobs=2, num_nodes=4),
-        jobs=[Job(job_id=jid, name=f"job_{jid}", assigned_nodes=gpus,
-                   parallelism=ParallelismConfig(tp=2))
-              for jid, gpus, _, _ in job_specs],
-        tasks=tasks,
-    )
-    return workload, topo
-
-
 def build_workload(aicb_files, topology, num_jobs, dp, interleave=False):
     """Build a P2PWorkload from one or more AICB files.
 
@@ -456,9 +375,6 @@ def main():
                         help="Cross-domain GPU assignment so jobs share spine links")
     parser.add_argument("--k-paths", type=int, default=4)
     parser.add_argument("--step-deg", type=int, default=5)
-    parser.add_argument("--demo", action="store_true",
-                        help="Use synthetic 2-job workload (ignores --aicb) to "
-                             "demonstrate Cassini time-shift benefit")
     parser.add_argument("--no-compat", action="store_true",
                         help="Skip pairwise compatibility analysis")
     parser.add_argument("--trace", choices=["verbose", "compact"], default=None)
@@ -468,54 +384,37 @@ def main():
 
     # ---- Topology ----
     print("=" * 60 + "\nCassini Experiments\n" + "=" * 60)
+    print(f"Topology: {args.topo}")
+    topology = TopologyLoader().load(args.topo)
+    print(f"  Nodes: {topology.total_nodes} (GPUs: {topology.gpu_count}, "
+          f"Switches: {topology.switch_count})")
 
-    if args.demo:
-        workload, topology = _build_demo_workload()
-        if args.num_iters > 1:
-            workload = replicate_iterations(workload, args.num_iters)
-        print("Topology: synthetic 4-GPU line (10 Gbps links)")
-        print(f"  Nodes: {topology.total_nodes} (GPUs: {topology.gpu_count})")
-        print("\nBuilding workload...")
-        print(f"  Demo: 2 jobs, shared bottleneck link (1,2)")
-        print(f"  Total tasks: {len(workload.tasks)} "
-              f"(compute: {len(workload.get_compute_tasks())}, "
-              f"flow: {len(workload.get_flow_tasks())})")
-        print(f"  Jobs: {len(workload.jobs)}")
-        if workload.jobs:
-            j0 = workload.jobs[0]
-            n_flows = len([t for t in workload.tasks if t.job_id == 0 and t.is_flow()])
-            print(f"  Per-job: {len(j0.assigned_nodes)} GPUs, {n_flows} flows")
+    # ---- Workload ----
+    print("\nBuilding workload...")
+    workload = build_workload(args.aicb, topology, args.num_jobs, args.dp, args.interleave)
+
+    if args.num_iters > 1:
+        workload = replicate_iterations(workload, args.num_iters)
+        print(f"  Replicated to {args.num_iters} iterations per job")
+
+    tag = "interleaved" if args.interleave else "contiguous"
+    n_files = len(args.aicb)
+    if n_files > 1:
+        print(f"  Multi-model ({tag}): {n_files} AICB files")
     else:
-        print(f"Topology: {args.topo}")
-        topology = TopologyLoader().load(args.topo)
-        print(f"  Nodes: {topology.total_nodes} (GPUs: {topology.gpu_count}, "
-              f"Switches: {topology.switch_count})")
+        print(f"  Same AICB × {args.num_jobs} jobs ({tag})")
 
-        print("\nBuilding workload...")
-        workload = build_workload(args.aicb, topology, args.num_jobs, args.dp, args.interleave)
-
-        if args.num_iters > 1:
-            workload = replicate_iterations(workload, args.num_iters)
-            print(f"  Replicated to {args.num_iters} iterations per job")
-
-        tag = "interleaved" if args.interleave else "contiguous"
-        n_files = len(args.aicb)
-        if n_files > 1:
-            print(f"  Multi-model ({tag}): {n_files} AICB files")
-        else:
-            print(f"  Same AICB × {args.num_jobs} jobs ({tag})")
-
-        print(f"  Total tasks: {len(workload.tasks)} "
-              f"(compute: {len(workload.get_compute_tasks())}, "
-              f"flow: {len(workload.get_flow_tasks())})")
-        print(f"  Jobs: {len(workload.jobs)}")
-        if workload.jobs:
-            j0 = workload.jobs[0]
-            print(f"  Per-job parallelism: tp={j0.parallelism.tp}, dp={j0.parallelism.dp}, "
-                  f"pp={j0.parallelism.pp}, ep={j0.parallelism.ep} "
-                  f"({len(j0.assigned_nodes)} GPUs)")
-        if args.dp > 1:
-            print(f"  DP override: {args.dp}")
+    print(f"  Total tasks: {len(workload.tasks)} "
+          f"(compute: {len(workload.get_compute_tasks())}, "
+          f"flow: {len(workload.get_flow_tasks())})")
+    print(f"  Jobs: {len(workload.jobs)}")
+    if workload.jobs:
+        j0 = workload.jobs[0]
+        print(f"  Per-job parallelism: tp={j0.parallelism.tp}, dp={j0.parallelism.dp}, "
+              f"pp={j0.parallelism.pp}, ep={j0.parallelism.ep} "
+              f"({len(j0.assigned_nodes)} GPUs)")
+    if args.dp > 1:
+        print(f"  DP override: {args.dp}")
 
     WorkloadWriter().write(workload, os.path.join(args.output, "workload.json"))
 
@@ -567,3 +466,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
