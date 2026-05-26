@@ -34,6 +34,7 @@ sys.path.insert(0, project_root)
 os.chdir(project_root)
 
 from src.workload_format.schema import Job, ParallelismConfig
+from src.workload_format.writer import WorkloadWriter
 from src.workload_generator.aicb_parser import AicbParser
 from src.workload_generator.workload_builder import WorkloadBuilder
 from src.workload_generator.job_merger import JobMerger
@@ -246,9 +247,9 @@ def build_single_job_workload(aicb_file, job_id=0, gpu_offset=0, comm_algo="ring
     header, items = parser.parse(aicb_file)
     total_gpus = header.all_gpus
     tp = header.tp
-    dp = total_gpus // tp
     pp = header.pp
     ep = header.ep
+    dp = total_gpus // (tp * pp * ep)
 
     assigned = list(range(gpu_offset, gpu_offset + total_gpus))
     job = Job(
@@ -305,9 +306,9 @@ def build_multi_job_same_aicb(aicb_file, topology, num_jobs, comm_algo="ring"):
     header, items = parser.parse(aicb_file)
     total_gpus = header.all_gpus
     tp = header.tp
-    dp = total_gpus // tp
     pp = header.pp
     ep = header.ep
+    dp = total_gpus // (tp * pp * ep)
 
     workloads = []
     for jid in range(num_jobs):
@@ -343,8 +344,6 @@ def build_multi_job_same_aicb(aicb_file, topology, num_jobs, comm_algo="ring"):
 
 def print_compatibility_report(workload, topology, step_deg=5):
     """Print pairwise job compatibility scores from Cassini analysis."""
-    from src.cassini.pair_compatibility import compute_pairwise_compatibility
-
     cassini = CassiniAnalyzer(topology, step_deg=step_deg)
     analysis = cassini.analyze(workload)
 
@@ -379,18 +378,23 @@ def print_compatibility_report(workload, topology, step_deg=5):
             # Run pairwise analysis on first shared link
             link = next(iter(shared_links))
             from src.cassini.circle_abstraction import CircleAbstraction
-            from src.cassini.pair_compatibility import compute_compatibility_score
+            from src.cassini.pair_compatibility import optimize_link_compatibility
 
             circle1 = CircleAbstraction.from_pattern(
-                patterns[j1], link, 0, step_deg,
+                patterns[j1], link,
             )
             circle2 = CircleAbstraction.from_pattern(
-                patterns[j2], link, 0, step_deg,
+                patterns[j2], link,
             )
-            if circle1.radius == 0 or circle2.radius == 0:
+            if max(circle1.bw_demand.values()) == 0.0 or max(circle2.bw_demand.values()) == 0.0:
                 print(f" | {'no_comm':>10s}", end="")
                 continue
-            score = compute_compatibility_score(circle1, circle2, step_deg)
+            result = optimize_link_compatibility(
+                {0: circle1, 1: circle2},
+                link_capacities[link],
+                step_deg=step_deg,
+            )
+            score = result.score
             print(f" | {score:>9.3f}", end="")
         print()
     print("-" * (8 + 14 * len(job_ids)))
@@ -423,7 +427,7 @@ Examples:
     )
     parser.add_argument(
         "--topo",
-        default="inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100",
+        default="inputs/topologies/Spectrum-X_16g_8gps_400Gbps_H100",
         help="Topology file (default: AlibabaHPN 16-GPU)",
     )
     parser.add_argument(
@@ -501,6 +505,11 @@ Examples:
           f"(compute: {len(workload.get_compute_tasks())}, "
           f"flow: {len(workload.get_flow_tasks())})")
     print(f"  Jobs: {len(workload.jobs)}")
+
+    # Save workload for visualization
+    workload_path = os.path.join(args.output, "workload.json")
+    WorkloadWriter().write(workload, workload_path)
+    print(f"  Workload saved to: {workload_path}")
 
     # ---- Compatibility analysis (paper Experiment 4) ----
     if not args.no_compat and len(workload.jobs) > 1:
