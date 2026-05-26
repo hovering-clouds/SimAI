@@ -221,7 +221,10 @@ class MfsAllocator(BandwidthAllocator):
                 link = (path[i], path[i + 1])
                 rem = link_rem.get(link, 0.0)
                 count = link_counts.get(link, 0)
-                if count > 0 and rem > 0:
+                if count > 0:
+                    if rem <= 0:
+                        min_alloc = 0.0
+                        break
                     alloc = rem / count
                     min_alloc = min(min_alloc, alloc)
 
