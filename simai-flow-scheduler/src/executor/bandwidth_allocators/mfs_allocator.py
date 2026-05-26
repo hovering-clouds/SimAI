@@ -54,7 +54,7 @@ class MfsAllocator(BandwidthAllocator):
             return _BG_SENTINEL_RLI
 
         # EARLY: RLI = max(target_layer - current_layer, 0)
-        stage_key = (info.job_id, info.stage_id)
+        stage_key = (info.replica_id, info.stage_id)
         current = self.current_layer_by_stage.get(stage_key, 0)
         return max(info.target_layer - current, 0)
 

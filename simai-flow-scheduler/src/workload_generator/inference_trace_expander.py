@@ -256,6 +256,8 @@ class InferenceTraceExpander:
                             "task_ids": tids,
                             "type": "kv_reuse",
                             "request_ids": [int(req_key)],
+                            "stage_id": stage_id,
+                            "replica_id": replica_id,
                         }
 
             batch_tasks, exits, task_id = self._expand_batch(

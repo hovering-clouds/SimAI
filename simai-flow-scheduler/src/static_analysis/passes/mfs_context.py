@@ -32,6 +32,7 @@ class MfsTaskInfo:
     mfs_stage: MfsStage
     target_layer: int
     comm_role: str
+    replica_id: int = 0
 
 
 @dataclass
@@ -88,22 +89,23 @@ def build_mfs_context(
         MfsContext with per-task info, batch grouping, request grouping,
         and optional deadline metadata.
     """
-    # Build reverse index: task_id -> (batch_id, request_ids, stage_id)
-    tid_to_batch: dict[int, tuple[str, tuple[int, ...], int]] = {}
+    # Build reverse index: task_id -> (batch_id, request_ids, stage_id, replica_id)
+    tid_to_batch: dict[int, tuple[str, tuple[int, ...], int, int]] = {}
     for bid, binfo in batch_task_map.items():
         task_ids = binfo.get("task_ids", [])
         req_ids = tuple(binfo.get("request_ids", []))
         stage_id = binfo.get("stage_id", 0)
+        replica_id = binfo.get("replica_id", 0)
         for tid in task_ids:
-            tid_to_batch[tid] = (bid, req_ids, stage_id)
+            tid_to_batch[tid] = (bid, req_ids, stage_id, replica_id)
 
     ctx = MfsContext()
 
     # Per-task classification
     for task in workload.tasks:
         mfs_stage, comm_role = _classify_task(task)
-        bid, req_ids, stage_id = tid_to_batch.get(
-            task.task_id, (None, (), 0),
+        bid, req_ids, stage_id, replica_id = tid_to_batch.get(
+            task.task_id, (None, (), 0, 0),
         )
         ctx.task_info[task.task_id] = MfsTaskInfo(
             task_id=task.task_id,
@@ -114,6 +116,7 @@ def build_mfs_context(
             mfs_stage=mfs_stage,
             target_layer=task.layer_id,
             comm_role=comm_role,
+            replica_id=replica_id,
         )
 
     # Batch grouping
