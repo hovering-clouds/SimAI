@@ -25,13 +25,11 @@ class MfsRequestInfo:
 @dataclass
 class MfsTaskInfo:
     task_id: int
-    job_id: int
     batch_id: str | None
     request_ids: tuple[int, ...]
     stage_id: int
     mfs_stage: MfsStage
     target_layer: int
-    comm_role: str
     replica_id: int = 0
 
 
@@ -54,22 +52,21 @@ _COLLECTIVE_TYPES = frozenset({
 })
 
 
-def _classify_task(task: Task) -> tuple[MfsStage, str]:
+def _classify_task(task: Task) -> MfsStage:
     if task.is_compute():
-        return MfsStage.BACKGROUND, "compute"
+        return MfsStage.BACKGROUND
     ct = task.comm_type
     if ct == CommType.KV_CACHE_TRANSFER:
-        return MfsStage.P2D, "p2d_transfer"
+        return MfsStage.P2D
     if ct == CommType.KV_CACHE_REUSE:
-        return MfsStage.EARLY, "kv_cache_reuse"
+        return MfsStage.EARLY
     if ct == CommType.PP_SEND or ct == CommType.PP_RECV:
-        return MfsStage.EARLY, "pp_send"
+        return MfsStage.EARLY
     if ct in _COLLECTIVE_TYPES:
-        # Decode-phase collectives are not part of the prefill→P2D pipeline
         if task.phase == Phase.DECODE:
-            return MfsStage.BACKGROUND, "decode_collective"
-        return MfsStage.EARLY, "collective"
-    return MfsStage.BACKGROUND, "unknown"
+            return MfsStage.BACKGROUND
+        return MfsStage.EARLY
+    return MfsStage.BACKGROUND
 
 
 def build_mfs_context(
@@ -102,20 +99,18 @@ def build_mfs_context(
 
     # Per-task classification
     for task in workload.tasks:
-        mfs_stage, comm_role = _classify_task(task)
+        mfs_stage = _classify_task(task)
         bid, req_ids, stage_id, replica_id = tid_to_batch.get(
             task.task_id, (None, (), 0, 0),
         )
         ctx.task_info[task.task_id] = MfsTaskInfo(
             task_id=task.task_id,
-            job_id=task.job_id,
             batch_id=bid,
             request_ids=req_ids,
             stage_id=stage_id,
+            replica_id=replica_id,
             mfs_stage=mfs_stage,
             target_layer=task.layer_id,
-            comm_role=comm_role,
-            replica_id=replica_id,
         )
 
     # Batch grouping

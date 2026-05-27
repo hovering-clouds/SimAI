@@ -57,9 +57,9 @@ def _make_context_with_request(rid, tasks_with_stages):
     ctx = MfsContext()
     for tid, stage, req_ids in tasks_with_stages:
         ctx.task_info[tid] = MfsTaskInfo(
-            task_id=tid, job_id=0, batch_id=None,
+            task_id=tid, batch_id=None,
             request_ids=req_ids, stage_id=0,
-            mfs_stage=stage, target_layer=0, comm_role="test",
+            replica_id=0, mfs_stage=stage, target_layer=0,
         )
     # Build request_to_tasks
     req_tasks: dict[int, list[int]] = {}

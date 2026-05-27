@@ -6,7 +6,7 @@ from src.workload_format.schema import (
     ParallelismConfig, BatchTaskInfo, BatchEntryType,
 )
 from src.static_analysis.passes.mfs_context import (
-    MfsContext, MfsTaskInfo, MfsStage, MfsRequestInfo,
+    MfsContext, MfsStage, MfsRequestInfo,
     build_mfs_context,
 )
 
@@ -56,7 +56,6 @@ class TestBuildMfsContext:
         )]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.P2D
-        assert ctx.task_info[1].comm_role == "p2d_transfer"
 
     def test_pp_send_classified_as_early(self):
         """PP_SEND flows should be MfsStage.EARLY."""
@@ -69,7 +68,6 @@ class TestBuildMfsContext:
         )]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.EARLY
-        assert ctx.task_info[1].comm_role == "pp_send"
 
     def test_collective_classified_as_early(self):
         """TP/EP collective flows should be MfsStage.EARLY."""
@@ -84,7 +82,6 @@ class TestBuildMfsContext:
             )]
             ctx = build_mfs_context(wl, btm, trace={"requests": {}})
             assert ctx.task_info[1].mfs_stage == MfsStage.EARLY, f"Failed for {ct}"
-            assert ctx.task_info[1].comm_role == "collective"
 
     def test_compute_classified_as_background(self):
         """Compute tasks should be MfsStage.BACKGROUND."""
@@ -97,7 +94,6 @@ class TestBuildMfsContext:
         )]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[0].mfs_stage == MfsStage.BACKGROUND
-        assert ctx.task_info[0].comm_role == "compute"
 
     def test_unknown_flow_classified_as_background(self):
         """CommType.UNKNOWN flows should be MfsStage.BACKGROUND."""
@@ -106,7 +102,6 @@ class TestBuildMfsContext:
         btm = []
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.BACKGROUND
-        assert ctx.task_info[1].comm_role == "unknown"
 
     def test_batch_to_tasks_mapping(self):
         """batch_to_tasks should map batch IDs to their task tuples."""
@@ -185,7 +180,6 @@ class TestBuildMfsContext:
         )]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.BACKGROUND
-        assert ctx.task_info[1].comm_role == "decode_collective"
 
     def test_prefill_collective_is_earlier_than_decode(self):
         """Same comm_type, different phase: prefill → EARLY, decode → BACKGROUND."""
@@ -231,7 +225,6 @@ class TestBuildMfsContext:
         )]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.EARLY
-        assert ctx.task_info[1].comm_role == "kv_cache_reuse"
 
 
 # ── MfsRequestInfo / SLO parsing tests ────────────────────────────────────────

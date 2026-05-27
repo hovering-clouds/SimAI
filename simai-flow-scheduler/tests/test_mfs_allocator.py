@@ -55,8 +55,8 @@ class TestMfsAllocator:
     def test_high_queue_gets_full_bandwidth(self):
         """Flow in high-priority queue gets full link, low queue gets zero."""
         ctx = _make_context([
-            MfsTaskInfo(1, 0, None, (), 0, MfsStage.EARLY, 0, "collective"),
-            MfsTaskInfo(2, 0, None, (), 0, MfsStage.P2D, 0, "p2d_transfer"),
+            MfsTaskInfo(task_id=1, batch_id=None, request_ids=(), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
+            MfsTaskInfo(task_id=2, batch_id=None, request_ids=(), stage_id=0, mfs_stage=MfsStage.P2D, target_layer=0),
         ])
         cfg = MfsAllocatorConfig()
         alloc = MfsAllocator(ctx, cfg)
@@ -74,8 +74,8 @@ class TestMfsAllocator:
         topo.add_link(Link(0, 1, 50.0, 1.0, 0.0))
 
         ctx = _make_context([
-            MfsTaskInfo(1, 0, None, (), 0, MfsStage.EARLY, 0, "collective"),
-            MfsTaskInfo(2, 0, None, (), 0, MfsStage.P2D, 0, "p2d_transfer"),
+            MfsTaskInfo(task_id=1, batch_id=None, request_ids=(), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
+            MfsTaskInfo(task_id=2, batch_id=None, request_ids=(), stage_id=0, mfs_stage=MfsStage.P2D, target_layer=0),
         ])
         cfg = MfsAllocatorConfig()
         alloc = MfsAllocator(ctx, cfg)
@@ -94,8 +94,8 @@ class TestMfsAllocator:
 
         # RLI > 0 → early_default_queue, no RED quantile splitting
         ctx = _make_context([
-            MfsTaskInfo(1, 0, None, (), 0, MfsStage.EARLY, 2, "collective"),
-            MfsTaskInfo(3, 0, None, (), 0, MfsStage.EARLY, 2, "collective"),
+            MfsTaskInfo(task_id=1, batch_id=None, request_ids=(), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=2),
+            MfsTaskInfo(task_id=3, batch_id=None, request_ids=(), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=2),
         ])
         alloc = MfsAllocator(ctx)
 
@@ -114,7 +114,7 @@ class TestMfsAllocator:
         topo.add_link(Link(4, 3, 200.0, 1.0, 0.0))
 
         ctx = _make_context([
-            MfsTaskInfo(1, 0, None, (), 0, MfsStage.EARLY, 0, "collective"),
+            MfsTaskInfo(task_id=1, batch_id=None, request_ids=(), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
         ])
         alloc = MfsAllocator(ctx)
 
@@ -141,7 +141,7 @@ class TestMluPromotion:
         topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
 
         ctx = _make_context(
-            [MfsTaskInfo(2, 0, None, (1,), 0, MfsStage.P2D, 0, "p2d_transfer")],
+            [MfsTaskInfo(task_id=2, batch_id=None, request_ids=(1,), stage_id=0, mfs_stage=MfsStage.P2D, target_layer=0)],
             [MfsRequestInfo(request_id=1, ttft_slo_us=10000000)],
         )
         alloc = MfsAllocator(ctx)
@@ -158,8 +158,8 @@ class TestMluPromotion:
 
         ctx = _make_context(
             [
-                MfsTaskInfo(1, 0, None, (), 0, MfsStage.EARLY, 0, "collective"),
-                MfsTaskInfo(2, 0, None, (1,), 0, MfsStage.P2D, 0, "p2d_transfer"),
+                MfsTaskInfo(task_id=1, batch_id=None, request_ids=(), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
+                MfsTaskInfo(task_id=2, batch_id=None, request_ids=(1,), stage_id=0, mfs_stage=MfsStage.P2D, target_layer=0),
             ],
             [MfsRequestInfo(request_id=1, ttft_slo_us=1000)],
         )
@@ -180,7 +180,7 @@ class TestMluPromotion:
         topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
 
         ctx = _make_context(
-            [MfsTaskInfo(2, 0, None, (1,), 0, MfsStage.P2D, 0, "p2d_transfer")],
+            [MfsTaskInfo(task_id=2, batch_id=None, request_ids=(1,), stage_id=0, mfs_stage=MfsStage.P2D, target_layer=0)],
             [MfsRequestInfo(request_id=1, ttft_slo_us=100)],
         )
         alloc = MfsAllocator(ctx)
@@ -196,7 +196,7 @@ class TestMluPromotion:
         topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
 
         ctx = _make_context(
-            [MfsTaskInfo(2, 0, None, (1,), 0, MfsStage.P2D, 0, "p2d_transfer")],
+            [MfsTaskInfo(task_id=2, batch_id=None, request_ids=(1,), stage_id=0, mfs_stage=MfsStage.P2D, target_layer=0)],
             # No SLO set
             [MfsRequestInfo(request_id=1, ttft_slo_us=None)],
         )
@@ -212,7 +212,7 @@ class TestMluPromotion:
         topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
 
         ctx = _make_context(
-            [MfsTaskInfo(2, 0, None, (1,), 0, MfsStage.P2D, 0, "p2d_transfer")],
+            [MfsTaskInfo(task_id=2, batch_id=None, request_ids=(1,), stage_id=0, mfs_stage=MfsStage.P2D, target_layer=0)],
         )
         alloc = MfsAllocator(ctx)
 
@@ -233,7 +233,7 @@ class TestDynamicRli:
         topo.add_link(Link(0, 1, 100.0, 1.0, 0.0))
 
         ctx = _make_context([
-            MfsTaskInfo(1, 0, None, (), 0, MfsStage.EARLY, 0, "collective"),
+            MfsTaskInfo(task_id=1, batch_id=None, request_ids=(), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
         ])
         alloc = MfsAllocator(ctx)
         # current_layer defaults to 0, target_layer is 0 -> RLI = 0
@@ -245,7 +245,7 @@ class TestDynamicRli:
     def test_rli_advances_with_current_layer(self):
         """RLI should decrease as current_layer advances."""
         ctx = _make_context([
-            MfsTaskInfo(1, 0, None, (), 0, MfsStage.EARLY, 3, "collective"),
+            MfsTaskInfo(task_id=1, batch_id=None, request_ids=(), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=3),
         ])
         alloc = MfsAllocator(ctx)
 
@@ -263,7 +263,7 @@ class TestDynamicRli:
     def test_rli_non_negative(self):
         """RLI should never go below 0."""
         ctx = _make_context([
-            MfsTaskInfo(1, 0, None, (), 0, MfsStage.EARLY, 2, "collective"),
+            MfsTaskInfo(task_id=1, batch_id=None, request_ids=(), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=2),
         ])
         alloc = MfsAllocator(ctx)
         alloc.current_layer_by_stage[(0, 0)] = 5
@@ -272,7 +272,7 @@ class TestDynamicRli:
     def test_p2d_gets_sentinel_rli(self):
         """P2D flows should get large sentinel RLI."""
         ctx = _make_context([
-            MfsTaskInfo(2, 0, None, (1,), 0, MfsStage.P2D, 0, "p2d_transfer"),
+            MfsTaskInfo(task_id=2, batch_id=None, request_ids=(1,), stage_id=0, mfs_stage=MfsStage.P2D, target_layer=0),
         ])
         alloc = MfsAllocator(ctx)
         assert alloc._compute_rli(2) > 100
@@ -287,7 +287,7 @@ class TestRed:
     def test_red_single_request(self):
         """Single request returns its own deadline."""
         ctx = _make_context(
-            [MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.EARLY, 0, "collective")],
+            [MfsTaskInfo(task_id=1, batch_id=None, request_ids=(10,), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0)],
             [MfsRequestInfo(request_id=10, ttft_slo_us=1000)],
         )
         alloc = MfsAllocator(ctx)
@@ -298,7 +298,7 @@ class TestRed:
     def test_red_uniformly_tight(self):
         """Uniformly tight deadlines: RED close to minimum."""
         ctx = _make_context(
-            [MfsTaskInfo(1, 0, None, (10, 11), 0, MfsStage.EARLY, 0, "collective")],
+            [MfsTaskInfo(task_id=1, batch_id=None, request_ids=(10, 11), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0)],
             [
                 MfsRequestInfo(request_id=10, ttft_slo_us=1000),
                 MfsRequestInfo(request_id=11, ttft_slo_us=1010),
@@ -315,7 +315,7 @@ class TestRed:
     def test_red_tight_outlier_reduced(self):
         """One tight outlier + many loose: RED pulled toward loose group."""
         ctx = _make_context(
-            [MfsTaskInfo(1, 0, None, (10, 11, 12), 0, MfsStage.EARLY, 0, "collective")],
+            [MfsTaskInfo(task_id=1, batch_id=None, request_ids=(10, 11, 12), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0)],
             [
                 MfsRequestInfo(request_id=10, ttft_slo_us=100),    # tight outlier
                 MfsRequestInfo(request_id=11, ttft_slo_us=10000),  # loose
@@ -341,7 +341,7 @@ class TestRed:
     def test_red_missing_slo_returns_none(self):
         """No SLO or no start time → None."""
         ctx = _make_context(
-            [MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.EARLY, 0, "collective")],
+            [MfsTaskInfo(task_id=1, batch_id=None, request_ids=(10,), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0)],
             [MfsRequestInfo(request_id=10, ttft_slo_us=None)],
         )
         alloc = MfsAllocator(ctx)
@@ -350,7 +350,7 @@ class TestRed:
     def test_red_no_request_info_returns_none(self):
         """No request_info at all → None."""
         ctx = _make_context(
-            [MfsTaskInfo(1, 0, None, (99,), 0, MfsStage.EARLY, 0, "collective")],
+            [MfsTaskInfo(task_id=1, batch_id=None, request_ids=(99,), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0)],
         )
         alloc = MfsAllocator(ctx)
         assert alloc._compute_red((99,)) is None
@@ -367,8 +367,8 @@ class TestRedSubPriority:
         # Flow 1: tight batch (RED = 1000)
         ctx = _make_context(
             [
-                MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.EARLY, 0, "collective"),
-                MfsTaskInfo(2, 0, None, (20,), 0, MfsStage.EARLY, 0, "collective"),
+                MfsTaskInfo(task_id=1, batch_id=None, request_ids=(10,), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
+                MfsTaskInfo(task_id=2, batch_id=None, request_ids=(20,), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
             ],
             [
                 MfsRequestInfo(request_id=10, ttft_slo_us=1000),
@@ -397,8 +397,8 @@ class TestRedSubPriority:
 
         ctx = _make_context(
             [
-                MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.P2D, 0, "p2d_transfer"),
-                MfsTaskInfo(2, 0, None, (20,), 0, MfsStage.EARLY, 0, "collective"),
+                MfsTaskInfo(task_id=1, batch_id=None, request_ids=(10,), stage_id=0, mfs_stage=MfsStage.P2D, target_layer=0),
+                MfsTaskInfo(task_id=2, batch_id=None, request_ids=(20,), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
             ],
             [
                 MfsRequestInfo(request_id=10, ttft_slo_us=1000),
@@ -425,8 +425,8 @@ class TestRedSubPriority:
 
         # Two P2D flows without SLO → both at p2d_initial_queue
         ctx = _make_context([
-            MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.P2D, 0, "p2d_transfer"),
-            MfsTaskInfo(2, 0, None, (20,), 0, MfsStage.P2D, 0, "p2d_transfer"),
+            MfsTaskInfo(task_id=1, batch_id=None, request_ids=(10,), stage_id=0, mfs_stage=MfsStage.P2D, target_layer=0),
+            MfsTaskInfo(task_id=2, batch_id=None, request_ids=(20,), stage_id=0, mfs_stage=MfsStage.P2D, target_layer=0),
         ])
         alloc = MfsAllocator(ctx)
 
@@ -451,8 +451,8 @@ class TestFeasibilityDemotion:
         # Flow 2: infeasible (remaining exceeds deadline)
         ctx = _make_context(
             [
-                MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.EARLY, 0, "collective"),
-                MfsTaskInfo(2, 0, None, (20,), 0, MfsStage.EARLY, 0, "collective"),
+                MfsTaskInfo(task_id=1, batch_id=None, request_ids=(10,), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
+                MfsTaskInfo(task_id=2, batch_id=None, request_ids=(20,), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
             ],
             [
                 MfsRequestInfo(request_id=10, ttft_slo_us=10000),
@@ -482,8 +482,8 @@ class TestFeasibilityDemotion:
 
         ctx = _make_context(
             [
-                MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.EARLY, 0, "collective"),
-                MfsTaskInfo(2, 0, None, (20,), 0, MfsStage.EARLY, 0, "collective"),
+                MfsTaskInfo(task_id=1, batch_id=None, request_ids=(10,), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
+                MfsTaskInfo(task_id=2, batch_id=None, request_ids=(20,), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
             ],
             [
                 MfsRequestInfo(request_id=10, ttft_slo_us=100000),
@@ -511,8 +511,8 @@ class TestFeasibilityDemotion:
         # Flow associated with both R10 (feasible) and R20 (infeasible)
         ctx = _make_context(
             [
-                MfsTaskInfo(1, 0, None, (10, 20), 0, MfsStage.EARLY, 0, "collective"),
-                MfsTaskInfo(2, 0, None, (30,), 0, MfsStage.EARLY, 0, "collective"),
+                MfsTaskInfo(task_id=1, batch_id=None, request_ids=(10, 20), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
+                MfsTaskInfo(task_id=2, batch_id=None, request_ids=(30,), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
             ],
             [
                 MfsRequestInfo(request_id=10, ttft_slo_us=100000),
@@ -542,8 +542,8 @@ class TestFeasibilityDemotion:
 
         ctx = _make_context(
             [
-                MfsTaskInfo(1, 0, None, (10, 20), 0, MfsStage.EARLY, 0, "collective"),
-                MfsTaskInfo(2, 0, None, (30,), 0, MfsStage.EARLY, 0, "collective"),
+                MfsTaskInfo(task_id=1, batch_id=None, request_ids=(10, 20), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
+                MfsTaskInfo(task_id=2, batch_id=None, request_ids=(30,), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
             ],
             [
                 MfsRequestInfo(request_id=10, ttft_slo_us=100),
@@ -575,7 +575,7 @@ class TestFeasibilityDemotion:
 
         ctx = _make_context(
             [
-                MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.EARLY, 0, "collective"),
+                MfsTaskInfo(task_id=1, batch_id=None, request_ids=(10,), stage_id=0, mfs_stage=MfsStage.EARLY, target_layer=0),
             ],
             [MfsRequestInfo(request_id=10, ttft_slo_us=None)],
         )
@@ -594,7 +594,7 @@ class TestFeasibilityDemotion:
 
         ctx = _make_context(
             [
-                MfsTaskInfo(1, 0, None, (10,), 0, MfsStage.P2D, 0, "p2d_transfer"),
+                MfsTaskInfo(task_id=1, batch_id=None, request_ids=(10,), stage_id=0, mfs_stage=MfsStage.P2D, target_layer=0),
             ],
             [MfsRequestInfo(request_id=10, ttft_slo_us=100)],
         )
