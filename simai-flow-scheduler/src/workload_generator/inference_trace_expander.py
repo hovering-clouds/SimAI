@@ -26,7 +26,8 @@ from pathlib import Path
 from typing import Optional
 
 from ..workload_format.schema import (
-    P2PWorkload, Job, Meta, Task, Phase, CommType, TaskType, ParallelismConfig,
+    P2PWorkload, Job, Meta, Task, Phase, CommType, TaskType,
+    ParallelismConfig, BatchTaskInfo, BatchEntryType,
 )
 from .collective_expander import FlowTask, AllReduceExpander, AlltoAllExpander
 from .inference_profile import InferenceProfileStore, LayerProfile
@@ -89,9 +90,9 @@ class InferenceTraceExpander:
         trace: dict,
         job_id: int = 0,
         storage_node_ids: list[int] | None = None,
-    ) -> tuple[P2PWorkload, dict]:
+    ) -> tuple[P2PWorkload, list[BatchTaskInfo]]:
         """
-        Expand trace into P2PWorkload + batch_task_map.
+        Expand trace into P2PWorkload + batch_task_info list.
 
         Args:
             trace: Parsed trace dict (from JSON).
@@ -100,12 +101,12 @@ class InferenceTraceExpander:
                 When provided, overrides auto-computation from trace metadata.
 
         Returns:
-            (P2PWorkload, batch_task_map) where batch_task_map maps
-            batch_id → { task_ids, request_ids, type, replica_id }.
+            (P2PWorkload, batch_task_info) where batch_task_info is a list of
+            BatchTaskInfo entries, one per trace batch or sub-operation.
         """
         all_flow_tasks: list[FlowTask] = []
         task_id = 0
-        batch_task_map: dict = {}
+        batch_task_info: list[BatchTaskInfo] = []
 
         # batch_id → {rank: [task_ids]} — "exit" tasks of each batch
         # (the tasks that the next batch's first tasks should depend on)
@@ -168,12 +169,14 @@ class InferenceTraceExpander:
                     )
                     all_flow_tasks.extend(pp_tasks)
                     btm_key = f"pp_{dep_id}_to_{bid}"
-                    batch_task_map[btm_key] = {
-                        "task_ids": [t.task_id for t in pp_tasks],
-                        "type": "pp_comm",
-                        "from_stage": dep_stage_id,
-                        "to_stage": stage_id,
-                    }
+                    batch_task_info.append(BatchTaskInfo(
+                        batch_id=btm_key,
+                        task_ids=[t.task_id for t in pp_tasks],
+                        entry_type=BatchEntryType.PP_COMM,
+                        replica_id=replica_id,
+                        stage_id=stage_id,
+                        request_ids=[],
+                    ))
                     for rank, tids in pp_exits.items():
                         prev_exits.setdefault(rank, []).extend(tids)
                     continue
@@ -195,13 +198,14 @@ class InferenceTraceExpander:
 
                     for req_id, tids in req_task_map.items():
                         req_btm_key = f"kv_{dep_id}_to_{bid}_req_{req_id}"
-                        batch_task_map[req_btm_key] = {
-                            "task_ids": tids,
-                            "type": "kv_transfer",
-                            "from_batch": dep_id,
-                            "to_batch": bid,
-                            "request_ids": [req_id],
-                        }
+                        batch_task_info.append(BatchTaskInfo(
+                            batch_id=req_btm_key,
+                            task_ids=tids,
+                            entry_type=BatchEntryType.KV_TRANSFER,
+                            replica_id=replica_id,
+                            stage_id=stage_id,
+                            request_ids=[req_id],
+                        ))
                     for rank, tids in kv_exits.items():
                         prev_exits.setdefault(rank, []).extend(tids)
                 else:
@@ -252,13 +256,14 @@ class InferenceTraceExpander:
                     all_flow_tasks.extend(reuse_flows)
                     for req_key, tids in req_task_map.items():
                         req_btm_key = f"kv_reuse_{bid}_req_{req_key}"
-                        batch_task_map[req_btm_key] = {
-                            "task_ids": tids,
-                            "type": "kv_reuse",
-                            "request_ids": [int(req_key)],
-                            "stage_id": stage_id,
-                            "replica_id": replica_id,
-                        }
+                        batch_task_info.append(BatchTaskInfo(
+                            batch_id=req_btm_key,
+                            task_ids=tids,
+                            entry_type=BatchEntryType.KV_REUSE,
+                            replica_id=replica_id,
+                            stage_id=stage_id,
+                            request_ids=[int(req_key)],
+                        ))
 
             batch_tasks, exits, task_id = self._expand_batch(
                 batch=batch,
@@ -273,12 +278,14 @@ class InferenceTraceExpander:
             all_flow_tasks.extend(batch_tasks)
             batch_exits[bid] = exits
 
-            batch_task_map[bid] = {
-                "task_ids": [t.task_id for t in batch_tasks],
-                "request_ids": batch["request_ids"],
-                "type": btype,
-                "replica_id": replica_id,
-            }
+            batch_task_info.append(BatchTaskInfo(
+                batch_id=bid,
+                task_ids=[t.task_id for t in batch_tasks],
+                entry_type=BatchEntryType(btype),
+                replica_id=replica_id,
+                stage_id=stage_id,
+                request_ids=batch["request_ids"],
+            ))
 
         # ── Build P2PWorkload ─────────────────────────────────────────────
         all_ranks: set[int] = set()
@@ -295,7 +302,7 @@ class InferenceTraceExpander:
             )],
             tasks=[ft.to_task() for ft in all_flow_tasks],
         )
-        return workload, batch_task_map
+        return workload, batch_task_info
 
     @staticmethod
     def load_trace(path: str) -> dict:

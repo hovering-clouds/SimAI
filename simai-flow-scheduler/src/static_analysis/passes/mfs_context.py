@@ -7,7 +7,7 @@ priority computation.
 from dataclasses import dataclass, field
 from enum import Enum
 
-from ...workload_format.schema import P2PWorkload, Task, CommType, Phase
+from ...workload_format.schema import P2PWorkload, Task, CommType, Phase, BatchTaskInfo
 
 
 class MfsStage(str, Enum):
@@ -74,15 +74,16 @@ def _classify_task(task: Task) -> tuple[MfsStage, str]:
 
 def build_mfs_context(
     workload: P2PWorkload,
-    batch_task_map: dict,
+    batch_task_info: list[BatchTaskInfo],
     trace: dict,
 ) -> MfsContext:
-    """Build MFS sidecar metadata from a workload and its batch_task_map.
+    """Build MFS sidecar metadata from a workload and its batch_task_info.
+
+    All BatchTaskInfo fields are required — no silent defaults.
 
     Args:
         workload: The P2PWorkload (output of InferenceTraceExpander).
-        batch_task_map: Mapping from batch/transfer key to
-            {task_ids, request_ids, type, replica_id, ...}.
+        batch_task_info: List of BatchTaskInfo entries.
         trace: Raw Vidur trace dict. Used to extract ttft_slo_us per request.
 
     Returns:
@@ -91,13 +92,11 @@ def build_mfs_context(
     """
     # Build reverse index: task_id -> (batch_id, request_ids, stage_id, replica_id)
     tid_to_batch: dict[int, tuple[str, tuple[int, ...], int, int]] = {}
-    for bid, binfo in batch_task_map.items():
-        task_ids = binfo.get("task_ids", [])
-        req_ids = tuple(binfo.get("request_ids", []))
-        stage_id = binfo.get("stage_id", 0)
-        replica_id = binfo.get("replica_id", 0)
+    for info in batch_task_info:
+        task_ids = info.task_ids
+        req_ids = tuple(info.request_ids)
         for tid in task_ids:
-            tid_to_batch[tid] = (bid, req_ids, stage_id, replica_id)
+            tid_to_batch[tid] = (info.batch_id, req_ids, info.stage_id, info.replica_id)
 
     ctx = MfsContext()
 
@@ -120,10 +119,10 @@ def build_mfs_context(
         )
 
     # Batch grouping
-    for bid, binfo in batch_task_map.items():
-        task_ids = binfo.get("task_ids", [])
+    for info in batch_task_info:
+        task_ids = info.task_ids
         if task_ids:
-            ctx.batch_to_tasks[bid] = tuple(task_ids)
+            ctx.batch_to_tasks[info.batch_id] = tuple(task_ids)
 
     # Request grouping: collect all tasks that belong to each request
     req_tasks: dict[int, list[int]] = {}

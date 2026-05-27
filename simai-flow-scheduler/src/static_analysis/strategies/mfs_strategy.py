@@ -9,7 +9,7 @@ from ..passes.topology_loader import NetworkTopology
 from ..passes.task_serializer import CppReferenceSerializer, ExecutionPlan
 from ..passes.mfs_context import MfsContext, build_mfs_context
 from ..passes.mfs_feasibility import FeasibilityInfo, build_feasibility_info
-from ...workload_format.schema import P2PWorkload
+from ...workload_format.schema import P2PWorkload, BatchTaskInfo
 
 
 @dataclass
@@ -27,12 +27,12 @@ class MfsAnalyzer:
     def analyze(
         self,
         workload: P2PWorkload,
-        batch_task_map: dict,
+        batch_task_info: list[BatchTaskInfo],
         trace: dict,
     ) -> MfsAnalysisResult:
         route_table = BfsStrategy().compute_routes(workload, self.topology)
         execution_plan = CppReferenceSerializer().serialize(workload)
-        context = build_mfs_context(workload, batch_task_map, trace=trace)
+        context = build_mfs_context(workload, batch_task_info, trace=trace)
         feasibility_info = build_feasibility_info(
             workload, context, route_table, self.topology,
         )

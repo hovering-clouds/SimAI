@@ -3,7 +3,7 @@ import pytest
 
 from src.workload_format.schema import (
     P2PWorkload, Meta, Job, Task, Phase, CommType, TaskType,
-    ParallelismConfig,
+    ParallelismConfig, BatchTaskInfo, BatchEntryType,
 )
 from src.static_analysis.passes.mfs_context import (
     MfsContext, MfsTaskInfo, MfsStage, MfsRequestInfo,
@@ -49,7 +49,11 @@ class TestBuildMfsContext:
         t0 = _compute_task(0, node=0)
         t1 = _flow_task(1, 0, 2, 1000, CommType.KV_CACHE_TRANSFER)
         wl = _make_workload([t0, t1])
-        btm = {"kv_b1_b2": {"task_ids": [1], "request_ids": [10], "type": "kv_transfer"}}
+        btm = [BatchTaskInfo(
+            batch_id="kv_b1_b2", task_ids=[1],
+            entry_type=BatchEntryType.KV_TRANSFER,
+            replica_id=0, stage_id=0, request_ids=[10],
+        )]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.P2D
         assert ctx.task_info[1].comm_role == "p2d_transfer"
@@ -58,7 +62,11 @@ class TestBuildMfsContext:
         """PP_SEND flows should be MfsStage.EARLY."""
         t1 = _flow_task(1, 0, 1, 500, CommType.PP_SEND)
         wl = _make_workload([t1])
-        btm = {"pp_b1_b2": {"task_ids": [1], "request_ids": [], "type": "pp_comm"}}
+        btm = [BatchTaskInfo(
+            batch_id="pp_b1_b2", task_ids=[1],
+            entry_type=BatchEntryType.PP_COMM,
+            replica_id=0, stage_id=0, request_ids=[],
+        )]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.EARLY
         assert ctx.task_info[1].comm_role == "pp_send"
@@ -69,7 +77,11 @@ class TestBuildMfsContext:
                     CommType.TP_REDUCESCATTER_RING]:
             t1 = _flow_task(1, 0, 1, 500, ct)
             wl = _make_workload([t1])
-            btm = {"b1": {"task_ids": [1], "request_ids": [1], "type": "prefill"}}
+            btm = [BatchTaskInfo(
+                batch_id="b1", task_ids=[1],
+                entry_type=BatchEntryType.PREFILL,
+                replica_id=0, stage_id=0, request_ids=[1],
+            )]
             ctx = build_mfs_context(wl, btm, trace={"requests": {}})
             assert ctx.task_info[1].mfs_stage == MfsStage.EARLY, f"Failed for {ct}"
             assert ctx.task_info[1].comm_role == "collective"
@@ -78,7 +90,11 @@ class TestBuildMfsContext:
         """Compute tasks should be MfsStage.BACKGROUND."""
         t0 = _compute_task(0, node=0)
         wl = _make_workload([t0])
-        btm = {"b1": {"task_ids": [0], "request_ids": [1], "type": "prefill"}}
+        btm = [BatchTaskInfo(
+            batch_id="b1", task_ids=[0],
+            entry_type=BatchEntryType.PREFILL,
+            replica_id=0, stage_id=0, request_ids=[1],
+        )]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[0].mfs_stage == MfsStage.BACKGROUND
         assert ctx.task_info[0].comm_role == "compute"
@@ -87,7 +103,7 @@ class TestBuildMfsContext:
         """CommType.UNKNOWN flows should be MfsStage.BACKGROUND."""
         t1 = _flow_task(1, 0, 1, 500, CommType.UNKNOWN)
         wl = _make_workload([t1])
-        btm = {}
+        btm = []
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.BACKGROUND
         assert ctx.task_info[1].comm_role == "unknown"
@@ -97,7 +113,11 @@ class TestBuildMfsContext:
         t0 = _compute_task(0)
         t1 = _flow_task(1, 0, 1, 100)
         wl = _make_workload([t0, t1])
-        btm = {"b1": {"task_ids": [0, 1], "request_ids": [1], "type": "prefill"}}
+        btm = [BatchTaskInfo(
+            batch_id="b1", task_ids=[0, 1],
+            entry_type=BatchEntryType.PREFILL,
+            replica_id=0, stage_id=0, request_ids=[1],
+        )]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.batch_to_tasks["b1"] == (0, 1)
 
@@ -106,10 +126,18 @@ class TestBuildMfsContext:
         t0 = _compute_task(0)
         t1 = _flow_task(1, 0, 2, 1000, CommType.KV_CACHE_TRANSFER)
         wl = _make_workload([t0, t1])
-        btm = {
-            "b1": {"task_ids": [0], "request_ids": [5], "type": "prefill"},
-            "kv_b1_b2": {"task_ids": [1], "request_ids": [5], "type": "kv_transfer"},
-        }
+        btm = [
+            BatchTaskInfo(
+                batch_id="b1", task_ids=[0],
+                entry_type=BatchEntryType.PREFILL,
+                replica_id=0, stage_id=0, request_ids=[5],
+            ),
+            BatchTaskInfo(
+                batch_id="kv_b1_b2", task_ids=[1],
+                entry_type=BatchEntryType.KV_TRANSFER,
+                replica_id=0, stage_id=0, request_ids=[5],
+            ),
+        ]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert set(ctx.request_to_tasks[5]) == {0, 1}
 
@@ -118,7 +146,11 @@ class TestBuildMfsContext:
         t0 = _compute_task(0, node=0, layer=2)
         t1 = _flow_task(1, 0, 1, 200, CommType.TP_ALLREDUCE_RING, layer=2)
         wl = _make_workload([t0, t1])
-        btm = {"b1": {"task_ids": [0, 1], "request_ids": [1], "type": "prefill"}}
+        btm = [BatchTaskInfo(
+            batch_id="b1", task_ids=[0, 1],
+            entry_type=BatchEntryType.PREFILL,
+            replica_id=0, stage_id=0, request_ids=[1],
+        )]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.EARLY
 
@@ -126,7 +158,7 @@ class TestBuildMfsContext:
         """Tasks not in batch_task_map should get None batch_id, empty req_ids."""
         t0 = _compute_task(0)
         wl = _make_workload([t0])
-        ctx = build_mfs_context(wl, {}, trace={"requests": {}})
+        ctx = build_mfs_context(wl, [], trace={"requests": {}})
         assert ctx.task_info[0].batch_id is None
         assert ctx.task_info[0].request_ids == ()
 
@@ -134,7 +166,11 @@ class TestBuildMfsContext:
         """stage_id should come from batch_task_map when present."""
         t0 = _compute_task(0)
         wl = _make_workload([t0])
-        btm = {"b1": {"task_ids": [0], "request_ids": [1], "type": "prefill", "stage_id": 2}}
+        btm = [BatchTaskInfo(
+            batch_id="b1", task_ids=[0],
+            entry_type=BatchEntryType.PREFILL,
+            replica_id=0, stage_id=2, request_ids=[1],
+        )]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[0].stage_id == 2
 
@@ -142,7 +178,11 @@ class TestBuildMfsContext:
         """Decode-phase collective flows should be BACKGROUND, not EARLY."""
         t1 = _flow_task(1, 0, 1, 200, CommType.TP_ALLREDUCE_RING, phase=Phase.DECODE)
         wl = _make_workload([t1])
-        btm = {"d1": {"task_ids": [1], "request_ids": [1], "type": "decode"}}
+        btm = [BatchTaskInfo(
+            batch_id="d1", task_ids=[1],
+            entry_type=BatchEntryType.DECODE,
+            replica_id=0, stage_id=0, request_ids=[1],
+        )]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.BACKGROUND
         assert ctx.task_info[1].comm_role == "decode_collective"
@@ -152,10 +192,18 @@ class TestBuildMfsContext:
         t1 = _flow_task(1, 0, 1, 200, CommType.TP_ALLREDUCE_RING, phase=Phase.PREFILL)
         t2 = _flow_task(2, 0, 1, 300, CommType.TP_ALLREDUCE_RING, phase=Phase.DECODE)
         wl = _make_workload([t1, t2])
-        btm = {
-            "p1": {"task_ids": [1], "request_ids": [1], "type": "prefill"},
-            "d1": {"task_ids": [2], "request_ids": [1], "type": "decode"},
-        }
+        btm = [
+            BatchTaskInfo(
+                batch_id="p1", task_ids=[1],
+                entry_type=BatchEntryType.PREFILL,
+                replica_id=0, stage_id=0, request_ids=[1],
+            ),
+            BatchTaskInfo(
+                batch_id="d1", task_ids=[2],
+                entry_type=BatchEntryType.DECODE,
+                replica_id=0, stage_id=0, request_ids=[1],
+            ),
+        ]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.EARLY
         assert ctx.task_info[2].mfs_stage == MfsStage.BACKGROUND
@@ -164,7 +212,11 @@ class TestBuildMfsContext:
         """PP_SEND in decode phase should still be EARLY (unlikely but test boundary)."""
         t1 = _flow_task(1, 0, 1, 200, CommType.PP_SEND, phase=Phase.DECODE)
         wl = _make_workload([t1])
-        btm = {"d1": {"task_ids": [1], "request_ids": [1], "type": "decode"}}
+        btm = [BatchTaskInfo(
+            batch_id="d1", task_ids=[1],
+            entry_type=BatchEntryType.DECODE,
+            replica_id=0, stage_id=0, request_ids=[1],
+        )]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.EARLY
 
@@ -172,7 +224,11 @@ class TestBuildMfsContext:
         """KV_CACHE_REUSE flows should be MfsStage.EARLY."""
         t1 = _flow_task(1, 4, 0, 1000, CommType.KV_CACHE_REUSE)
         wl = _make_workload([t1])
-        btm = {"kv_reuse_p0": {"task_ids": [1], "request_ids": [1], "type": "kv_reuse"}}
+        btm = [BatchTaskInfo(
+            batch_id="kv_reuse_p0", task_ids=[1],
+            entry_type=BatchEntryType.KV_REUSE,
+            replica_id=0, stage_id=0, request_ids=[1],
+        )]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.task_info[1].mfs_stage == MfsStage.EARLY
         assert ctx.task_info[1].comm_role == "kv_cache_reuse"
@@ -188,7 +244,11 @@ class TestSloParsing:
         """Trace with ttft_slo_us should populate request_info."""
         t0 = _compute_task(0)
         wl = _make_workload([t0])
-        btm = {"b1": {"task_ids": [0], "request_ids": [5], "type": "prefill"}}
+        btm = [BatchTaskInfo(
+            batch_id="b1", task_ids=[0],
+            entry_type=BatchEntryType.PREFILL,
+            replica_id=0, stage_id=0, request_ids=[5],
+        )]
         trace = {
             "requests": {
                 "5": {
@@ -205,7 +265,11 @@ class TestSloParsing:
         """Trace missing ttft_slo_us should produce None."""
         t0 = _compute_task(0)
         wl = _make_workload([t0])
-        btm = {"b1": {"task_ids": [0], "request_ids": [5], "type": "prefill"}}
+        btm = [BatchTaskInfo(
+            batch_id="b1", task_ids=[0],
+            entry_type=BatchEntryType.PREFILL,
+            replica_id=0, stage_id=0, request_ids=[5],
+        )]
         trace = {
             "requests": {
                 "5": {
@@ -222,10 +286,18 @@ class TestSloParsing:
         t0 = _compute_task(0)
         t1 = _compute_task(1, node=1)
         wl = _make_workload([t0, t1])
-        btm = {
-            "b1": {"task_ids": [0], "request_ids": [1], "type": "prefill"},
-            "b2": {"task_ids": [1], "request_ids": [2], "type": "prefill"},
-        }
+        btm = [
+            BatchTaskInfo(
+                batch_id="b1", task_ids=[0],
+                entry_type=BatchEntryType.PREFILL,
+                replica_id=0, stage_id=0, request_ids=[1],
+            ),
+            BatchTaskInfo(
+                batch_id="b2", task_ids=[1],
+                entry_type=BatchEntryType.PREFILL,
+                replica_id=0, stage_id=0, request_ids=[2],
+            ),
+        ]
         trace = {
             "requests": {
                 "1": {
@@ -248,6 +320,10 @@ class TestSloParsing:
         """Trace with empty requests dict should produce empty request_info."""
         t0 = _compute_task(0)
         wl = _make_workload([t0])
-        btm = {"b1": {"task_ids": [0], "request_ids": [1], "type": "prefill"}}
+        btm = [BatchTaskInfo(
+            batch_id="b1", task_ids=[0],
+            entry_type=BatchEntryType.PREFILL,
+            replica_id=0, stage_id=0, request_ids=[1],
+        )]
         ctx = build_mfs_context(wl, btm, trace={"requests": {}})
         assert ctx.request_info == {}

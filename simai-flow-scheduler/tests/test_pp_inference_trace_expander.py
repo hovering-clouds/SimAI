@@ -17,7 +17,7 @@ Trace has:
 import pytest
 from src.workload_generator.inference_trace_expander import InferenceTraceExpander
 from src.workload_generator.inference_profile import InferenceProfileStore
-from src.workload_format.schema import Phase, CommType, TaskType
+from src.workload_format.schema import Phase, CommType, TaskType, BatchEntryType
 
 
 def _kv_task_ids(btm, dep_id, bid):
@@ -26,7 +26,7 @@ def _kv_task_ids(btm, dep_id, bid):
     ids: list[int] = []
     for k, v in btm.items():
         if k.startswith(prefix):
-            ids.extend(v["task_ids"])
+            ids.extend(v.task_ids)
     return ids
 
 
@@ -152,7 +152,9 @@ def pp_expander(store):
 
 @pytest.fixture
 def pp_result(pp_expander):
-    return pp_expander.expand(PP_TRACE, job_id=0)
+    wl, btm_list = pp_expander.expand(PP_TRACE, job_id=0)
+    btm = {e.batch_id: e for e in btm_list}
+    return wl, btm
 
 
 # ── Test: Rank mapping ─────────────────────────────────────────────────────────
@@ -165,7 +167,7 @@ class TestPPRankMapping:
         task_map = {t.task_id: t for t in workload.tasks}
         nodes = {
             task_map[tid].node
-            for tid in btm["p0_s0"]["task_ids"]
+            for tid in btm["p0_s0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         }
         assert nodes == {0, 1}
@@ -176,7 +178,7 @@ class TestPPRankMapping:
         task_map = {t.task_id: t for t in workload.tasks}
         nodes = {
             task_map[tid].node
-            for tid in btm["p0_s1"]["task_ids"]
+            for tid in btm["p0_s1"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         }
         assert nodes == {2, 3}
@@ -187,7 +189,7 @@ class TestPPRankMapping:
         task_map = {t.task_id: t for t in workload.tasks}
         nodes = {
             task_map[tid].node
-            for tid in btm["d0_s0"]["task_ids"]
+            for tid in btm["d0_s0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         }
         assert nodes == {4, 5}
@@ -198,7 +200,7 @@ class TestPPRankMapping:
         task_map = {t.task_id: t for t in workload.tasks}
         nodes = {
             task_map[tid].node
-            for tid in btm["d0_s1"]["task_ids"]
+            for tid in btm["d0_s1"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         }
         assert nodes == {6, 7}
@@ -214,7 +216,7 @@ class TestPPLayerFiltering:
         task_map = {t.task_id: t for t in workload.tasks}
         layers = {
             task_map[tid].layer_id
-            for tid in btm["p0_s0"]["task_ids"]
+            for tid in btm["p0_s0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         }
         assert layers == {0, 1}
@@ -225,7 +227,7 @@ class TestPPLayerFiltering:
         task_map = {t.task_id: t for t in workload.tasks}
         layers = {
             task_map[tid].layer_id
-            for tid in btm["p0_s1"]["task_ids"]
+            for tid in btm["p0_s1"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         }
         assert layers == {2, 3}
@@ -235,7 +237,7 @@ class TestPPLayerFiltering:
         workload, btm = pp_result
         task_map = {t.task_id: t for t in workload.tasks}
         compute_count = sum(
-            1 for tid in btm["p0_s0"]["task_ids"]
+            1 for tid in btm["p0_s0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         )
         assert compute_count == LAYERS_PER_STAGE * 2 * TP
@@ -245,7 +247,7 @@ class TestPPLayerFiltering:
         workload, btm = pp_result
         task_map = {t.task_id: t for t in workload.tasks}
         compute_count = sum(
-            1 for tid in btm["p0_s1"]["task_ids"]
+            1 for tid in btm["p0_s1"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         )
         assert compute_count == LAYERS_PER_STAGE * 2 * TP
@@ -260,23 +262,21 @@ class TestPPCommunication:
         _, btm = pp_result
         pp_key = "pp_p0_s0_to_p0_s1"
         assert pp_key in btm
-        assert btm[pp_key]["type"] == "pp_comm"
-        assert btm[pp_key]["from_stage"] == 0
-        assert btm[pp_key]["to_stage"] == 1
+        assert btm[pp_key].entry_type == BatchEntryType.PP_COMM
 
     def test_pp_comm_exists_for_decode(self, pp_result):
         """There should be a pp_comm entry for d0_s0 → d0_s1."""
         _, btm = pp_result
         pp_key = "pp_d0_s0_to_d0_s1"
         assert pp_key in btm
-        assert btm[pp_key]["type"] == "pp_comm"
+        assert btm[pp_key].entry_type == BatchEntryType.PP_COMM
 
     def test_pp_comm_prefill_src_dst_ranks(self, pp_result):
         """PP comm: stage 0 ranks [0,1] → stage 1 ranks [2,3]."""
         workload, btm = pp_result
         task_map = {t.task_id: t for t in workload.tasks}
         pp_key = "pp_p0_s0_to_p0_s1"
-        pp_tasks = [task_map[tid] for tid in btm[pp_key]["task_ids"]]
+        pp_tasks = [task_map[tid] for tid in btm[pp_key].task_ids]
         srcs = {t.src for t in pp_tasks}
         dsts = {t.dst for t in pp_tasks}
         assert srcs == {0, 1}
@@ -287,7 +287,7 @@ class TestPPCommunication:
         workload, btm = pp_result
         task_map = {t.task_id: t for t in workload.tasks}
         pp_key = "pp_d0_s0_to_d0_s1"
-        pp_tasks = [task_map[tid] for tid in btm[pp_key]["task_ids"]]
+        pp_tasks = [task_map[tid] for tid in btm[pp_key].task_ids]
         srcs = {t.src for t in pp_tasks}
         dsts = {t.dst for t in pp_tasks}
         assert srcs == {4, 5}
@@ -298,7 +298,7 @@ class TestPPCommunication:
         workload, btm = pp_result
         task_map = {t.task_id: t for t in workload.tasks}
         pp_key = "pp_p0_s0_to_p0_s1"
-        pp_tasks = [task_map[tid] for tid in btm[pp_key]["task_ids"]]
+        pp_tasks = [task_map[tid] for tid in btm[pp_key].task_ids]
         for t in pp_tasks:
             assert t.type == TaskType.FLOW
             assert t.comm_type == CommType.PP_SEND
@@ -307,7 +307,7 @@ class TestPPCommunication:
         """PP comm: tp*ep = 2 flows per stage transition."""
         _, btm = pp_result
         pp_key = "pp_p0_s0_to_p0_s1"
-        assert len(btm[pp_key]["task_ids"]) == TP * EP
+        assert len(btm[pp_key].task_ids) == TP * EP
 
 
 # ── Test: Per-stage KV transfer ────────────────────────────────────────────────
@@ -318,13 +318,13 @@ class TestPPKVTransfer:
         """KV transfer from P-stage-0 to D-stage-0 should exist."""
         _, btm = pp_result
         assert any(k.startswith("kv_p0_s0_to_d0_s0_req_") for k in btm)
-        assert next(v for k, v in btm.items() if k.startswith("kv_p0_s0_to_d0_s0_req_"))["type"] == "kv_transfer"
+        assert next(v.entry_type for v in btm.values() if v.batch_id.startswith("kv_p0_s0_to_d0_s0_req_")) == BatchEntryType.KV_TRANSFER
 
     def test_kv_transfer_stage1_exists(self, pp_result):
         """KV transfer from P-stage-1 to D-stage-1 should exist."""
         _, btm = pp_result
         assert any(k.startswith("kv_p0_s1_to_d0_s1_req_") for k in btm)
-        assert next(v for k, v in btm.items() if k.startswith("kv_p0_s1_to_d0_s1_req_"))["type"] == "kv_transfer"
+        assert next(v.entry_type for v in btm.values() if v.batch_id.startswith("kv_p0_s1_to_d0_s1_req_")) == BatchEntryType.KV_TRANSFER
 
     def test_kv_transfer_stage0_src_dst(self, pp_result):
         """KV stage 0: P-stage-0 [0,1] → D-stage-0 [4,5]."""
@@ -365,9 +365,9 @@ class TestPPDependencies:
         """First prefill stage has no predecessor tasks."""
         workload, btm = pp_result
         task_map = {t.task_id: t for t in workload.tasks}
-        p0_s0_ids = set(btm["p0_s0"]["task_ids"])
+        p0_s0_ids = set(btm["p0_s0"].task_ids)
         first_computes = [
-            tid for tid in btm["p0_s0"]["task_ids"]
+            tid for tid in btm["p0_s0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
             and not any(dep in p0_s0_ids for dep in task_map[tid].deps)
         ]
@@ -379,11 +379,11 @@ class TestPPDependencies:
         """Prefill stage 1 compute tasks should depend on PP comm from stage 0."""
         workload, btm = pp_result
         task_map = {t.task_id: t for t in workload.tasks}
-        pp_task_ids = set(btm["pp_p0_s0_to_p0_s1"]["task_ids"])
+        pp_task_ids = set(btm["pp_p0_s0_to_p0_s1"].task_ids)
         # First compute tasks of p0_s1
-        p0_s1_ids = set(btm["p0_s1"]["task_ids"])
+        p0_s1_ids = set(btm["p0_s1"].task_ids)
         first_computes = [
-            tid for tid in btm["p0_s1"]["task_ids"]
+            tid for tid in btm["p0_s1"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
             and not any(dep in p0_s1_ids for dep in task_map[tid].deps)
         ]
@@ -399,9 +399,9 @@ class TestPPDependencies:
         workload, btm = pp_result
         task_map = {t.task_id: t for t in workload.tasks}
         kv_task_ids = set(_kv_task_ids(btm, "p0_s0", "d0_s0"))
-        d0_s0_ids = set(btm["d0_s0"]["task_ids"])
+        d0_s0_ids = set(btm["d0_s0"].task_ids)
         first_computes = [
-            tid for tid in btm["d0_s0"]["task_ids"]
+            tid for tid in btm["d0_s0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
             and not any(dep in d0_s0_ids for dep in task_map[tid].deps)
         ]
@@ -418,10 +418,10 @@ class TestPPDependencies:
         workload, btm = pp_result
         task_map = {t.task_id: t for t in workload.tasks}
         kv_task_ids = set(_kv_task_ids(btm, "p0_s1", "d0_s1"))
-        pp_task_ids = set(btm["pp_d0_s0_to_d0_s1"]["task_ids"])
-        d0_s1_ids = set(btm["d0_s1"]["task_ids"])
+        pp_task_ids = set(btm["pp_d0_s0_to_d0_s1"].task_ids)
+        d0_s1_ids = set(btm["d0_s1"].task_ids)
         first_computes = [
-            tid for tid in btm["d0_s1"]["task_ids"]
+            tid for tid in btm["d0_s1"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
             and not any(dep in d0_s1_ids for dep in task_map[tid].deps)
         ]
@@ -456,13 +456,14 @@ class TestPPWithAssignedNodes:
             store, tp=TP, ep=EP, pp=PP,
             assigned_nodes=list(range(100, 108)),
         )
-        workload, btm = expander.expand(PP_TRACE, job_id=0)
+        workload, btm_list = expander.expand(PP_TRACE, job_id=0)
+        btm = {e.batch_id: e for e in btm_list}
         task_map = {t.task_id: t for t in workload.tasks}
 
         # Stage 0 of replica 0 → [100, 101]
         nodes_s0 = {
             task_map[tid].node
-            for tid in btm["p0_s0"]["task_ids"]
+            for tid in btm["p0_s0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         }
         assert nodes_s0 == {100, 101}
@@ -470,7 +471,7 @@ class TestPPWithAssignedNodes:
         # Stage 1 of replica 0 → [102, 103]
         nodes_s1 = {
             task_map[tid].node
-            for tid in btm["p0_s1"]["task_ids"]
+            for tid in btm["p0_s1"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         }
         assert nodes_s1 == {102, 103}
@@ -478,7 +479,7 @@ class TestPPWithAssignedNodes:
         # Stage 0 of replica 1 → [104, 105]
         nodes_d_s0 = {
             task_map[tid].node
-            for tid in btm["d0_s0"]["task_ids"]
+            for tid in btm["d0_s0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         }
         assert nodes_d_s0 == {104, 105}
@@ -489,11 +490,12 @@ class TestPPWithAssignedNodes:
             store, tp=TP, ep=EP, pp=PP,
             assigned_nodes=list(range(100, 108)),
         )
-        workload, btm = expander.expand(PP_TRACE, job_id=0)
+        workload, btm_list = expander.expand(PP_TRACE, job_id=0)
+        btm = {e.batch_id: e for e in btm_list}
         task_map = {t.task_id: t for t in workload.tasks}
 
         pp_key = "pp_p0_s0_to_p0_s1"
-        pp_tasks = [task_map[tid] for tid in btm[pp_key]["task_ids"]]
+        pp_tasks = [task_map[tid] for tid in btm[pp_key].task_ids]
         srcs = {t.src for t in pp_tasks}
         dsts = {t.dst for t in pp_tasks}
         assert srcs == {100, 101}
@@ -576,16 +578,17 @@ class TestPPPipelineOverlap:
                 },
             ],
         }
-        return expander.expand(trace, job_id=0)
+        wl, btm_list = expander.expand(trace, job_id=0)
+        return wl, {e.batch_id: e for e in btm_list}
 
     def test_mb1_stage0_depends_on_mb0_stage0(self, overlap_result):
         """MB1 stage 0 should depend on MB0 stage 0 (same-stage sequential)."""
         workload, btm = overlap_result
         task_map = {t.task_id: t for t in workload.tasks}
-        p0_s0_ids = set(btm["p0_s0"]["task_ids"])
-        p1_s0_ids = set(btm["p1_s0"]["task_ids"])
+        p0_s0_ids = set(btm["p0_s0"].task_ids)
+        p1_s0_ids = set(btm["p1_s0"].task_ids)
         first_computes = [
-            tid for tid in btm["p1_s0"]["task_ids"]
+            tid for tid in btm["p1_s0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
             and not any(dep in p1_s0_ids for dep in task_map[tid].deps)
         ]
@@ -602,13 +605,13 @@ class TestPPPipelineOverlap:
         - PP comm from MB1 stage 0 (cross-stage dep)"""
         workload, btm = overlap_result
         task_map = {t.task_id: t for t in workload.tasks}
-        p0_s1_ids = set(btm["p0_s1"]["task_ids"])
+        p0_s1_ids = set(btm["p0_s1"].task_ids)
         pp_key = "pp_p1_s0_to_p1_s1"
-        pp_task_ids = set(btm[pp_key]["task_ids"])
-        p1_s1_ids = set(btm["p1_s1"]["task_ids"])
+        pp_task_ids = set(btm[pp_key].task_ids)
+        p1_s1_ids = set(btm["p1_s1"].task_ids)
 
         first_computes = [
-            tid for tid in btm["p1_s1"]["task_ids"]
+            tid for tid in btm["p1_s1"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
             and not any(dep in p1_s1_ids for dep in task_map[tid].deps)
         ]
@@ -731,7 +734,8 @@ class TestPPUnevenLayers:
     @pytest.fixture
     def uneven_result(self, uneven_store):
         expander = InferenceTraceExpander(uneven_store, tp=TP, ep=EP, pp=PP)
-        return expander.expand(self.UNEVEN_TRACE, job_id=0)
+        wl, btm_list = expander.expand(self.UNEVEN_TRACE, job_id=0)
+        return wl, {e.batch_id: e for e in btm_list}
 
     def test_stage0_gets_first_two_layers(self, uneven_result):
         """Stage 0: layers 0, 1. Should NOT have layers 2, 3, 4."""
@@ -739,7 +743,7 @@ class TestPPUnevenLayers:
         task_map = {t.task_id: t for t in workload.tasks}
         layers = {
             task_map[tid].layer_id
-            for tid in btm["p0_s0"]["task_ids"]
+            for tid in btm["p0_s0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         }
         assert layers == {0, 1}
@@ -750,7 +754,7 @@ class TestPPUnevenLayers:
         task_map = {t.task_id: t for t in workload.tasks}
         layers = {
             task_map[tid].layer_id
-            for tid in btm["p0_s1"]["task_ids"]
+            for tid in btm["p0_s1"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         }
         assert layers == {2, 3, 4}
@@ -760,11 +764,11 @@ class TestPPUnevenLayers:
         workload, btm = uneven_result
         task_map = {t.task_id: t for t in workload.tasks}
         s0_compute = sum(
-            1 for tid in btm["p0_s0"]["task_ids"]
+            1 for tid in btm["p0_s0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         )
         s1_compute = sum(
-            1 for tid in btm["p0_s1"]["task_ids"]
+            1 for tid in btm["p0_s1"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         )
         # Stage 0: 2 layers × 2 sub-ops × 2 ranks = 8

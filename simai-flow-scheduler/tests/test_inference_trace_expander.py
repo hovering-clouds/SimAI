@@ -21,7 +21,7 @@ def _kv_task_ids(btm, dep_id, bid):
     ids: list[int] = []
     for k, v in btm.items():
         if k.startswith(prefix):
-            ids.extend(v["task_ids"])
+            ids.extend(v.task_ids)
     return ids
 
 
@@ -29,13 +29,13 @@ def _kv_reuse_task_ids(btm, bid):
     """Collect all KV reuse task IDs for bid (aggregated across per-request entries)."""
     prefix = f"kv_reuse_{bid}_req_"
     ids: list[int] = []
-    for k, v in btm.items():
-        if k.startswith(prefix):
-            ids.extend(v["task_ids"])
+    for batch_id, entry in btm.items():
+        if batch_id.startswith(prefix):
+            ids.extend(entry.task_ids)
     return ids
 
 
-from src.workload_format.schema import Phase, CommType, TaskType
+from src.workload_format.schema import Phase, CommType, TaskType, BatchEntryType
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -138,7 +138,9 @@ def expander(store):
 
 @pytest.fixture
 def result(expander):
-    return expander.expand(TRACE, job_id=0)
+    wl, btm_list = expander.expand(TRACE, job_id=0)
+    btm = {e.batch_id: e for e in btm_list}
+    return wl, btm
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -161,14 +163,14 @@ class TestExpansionStructure:
 
     def test_batch_types(self, result):
         _, btm = result
-        assert btm["p0"]["type"] == "prefill"
-        assert btm["d0"]["type"] == "decode"
-        assert next(v for k, v in btm.items() if k.startswith("kv_"))["type"] == "kv_transfer"
+        assert btm["p0"].entry_type == BatchEntryType.PREFILL
+        assert btm["d0"].entry_type == BatchEntryType.DECODE
+        assert next(v.entry_type for v in btm.values() if v.batch_id.startswith("kv_")) == BatchEntryType.KV_TRANSFER
 
     def test_request_ids_preserved(self, result):
         _, btm = result
-        assert btm["p0"]["request_ids"] == [0, 1]
-        assert btm["d2"]["request_ids"] == [0]
+        assert btm["p0"].request_ids == [0, 1]
+        assert btm["d2"].request_ids == [0]
 
     def test_task_ids_unique(self, result):
         workload, _ = result
@@ -186,13 +188,13 @@ class TestPhaseAssignment:
     def test_prefill_tasks_have_prefill_phase(self, result):
         workload, btm = result
         task_map = {t.task_id: t for t in workload.tasks}
-        for tid in btm["p0"]["task_ids"]:
+        for tid in btm["p0"].task_ids:
             assert task_map[tid].phase == Phase.PREFILL
 
     def test_decode_tasks_have_decode_phase(self, result):
         workload, btm = result
         task_map = {t.task_id: t for t in workload.tasks}
-        for tid in btm["d0"]["task_ids"]:
+        for tid in btm["d0"].task_ids:
             assert task_map[tid].phase == Phase.DECODE
 
     def test_kv_transfer_comm_type(self, result):
@@ -212,7 +214,7 @@ class TestRankMapping:
         # Replica 0 with tp=2, ep=1 → ranks [0, 1]
         p0_nodes = {
             task_map[tid].node
-            for tid in btm["p0"]["task_ids"]
+            for tid in btm["p0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         }
         assert p0_nodes == {0, 1}
@@ -223,7 +225,7 @@ class TestRankMapping:
         # Replica 1 with tp=2, ep=1 → ranks [2, 3]
         d0_nodes = {
             task_map[tid].node
-            for tid in btm["d0"]["task_ids"]
+            for tid in btm["d0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         }
         assert d0_nodes == {2, 3}
@@ -246,7 +248,7 @@ class TestTaskCounts:
         task_map = {t.task_id: t for t in workload.tasks}
         # 2 layers × 2 sub-ops (attention + mlp) × 2 ranks = 8 compute tasks
         compute_count = sum(
-            1 for tid in btm["p0"]["task_ids"]
+            1 for tid in btm["p0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         )
         assert compute_count == NUM_LAYERS * 2 * TP
@@ -262,7 +264,7 @@ class TestTaskCounts:
         # tp=2, ep=1: AllReduce ring for 2 ranks = 2*(2-1)*2 = 4 flows per sub-op
         # 2 layers × 2 sub-ops × 4 flows = 16 flow tasks
         flow_count = sum(
-            1 for tid in btm["p0"]["task_ids"]
+            1 for tid in btm["p0"].task_ids
             if task_map[tid].type == TaskType.FLOW
         )
         assert flow_count == NUM_LAYERS * 2 * TP * 2 * (TP - 1)
@@ -278,9 +280,9 @@ class TestDependencies:
         # Only the very first sub-op compute tasks (layer 0, attention) should
         # directly depend on KV transfer. Find them: compute tasks whose deps
         # are all from outside d0 (i.e., from KV transfer).
-        d0_task_ids = set(btm["d0"]["task_ids"])
+        d0_task_ids = set(btm["d0"].task_ids)
         first_computes = [
-            tid for tid in btm["d0"]["task_ids"]
+            tid for tid in btm["d0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
             and not any(dep in d0_task_ids for dep in task_map[tid].deps)
         ]
@@ -296,11 +298,11 @@ class TestDependencies:
         workload, btm = result
         task_map = {t.task_id: t for t in workload.tasks}
 
-        d0_task_ids = set(btm["d0"]["task_ids"])
-        d1_task_ids = set(btm["d1"]["task_ids"])
+        d0_task_ids = set(btm["d0"].task_ids)
+        d1_task_ids = set(btm["d1"].task_ids)
         # First sub-op compute tasks of d1 should depend on d0's exit tasks
         first_computes = [
-            tid for tid in btm["d1"]["task_ids"]
+            tid for tid in btm["d1"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
             and not any(dep in d1_task_ids for dep in task_map[tid].deps)
         ]
@@ -315,9 +317,9 @@ class TestDependencies:
         workload, btm = result
         task_map = {t.task_id: t for t in workload.tasks}
 
-        p0_task_ids = set(btm["p0"]["task_ids"])
+        p0_task_ids = set(btm["p0"].task_ids)
         first_computes = [
-            tid for tid in btm["p0"]["task_ids"]
+            tid for tid in btm["p0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
             and not any(dep in p0_task_ids for dep in task_map[tid].deps)
         ]
@@ -330,11 +332,11 @@ class TestDependencies:
         task_map = {t.task_id: t for t in workload.tasks}
 
         compute_ids = {
-            tid for tid in btm["p0"]["task_ids"]
+            tid for tid in btm["p0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
         }
         flow_ids = [
-            tid for tid in btm["p0"]["task_ids"]
+            tid for tid in btm["p0"].task_ids
             if task_map[tid].type == TaskType.FLOW
         ]
         for tid in flow_ids:
@@ -380,11 +382,12 @@ class TestMoEExpansion:
             ],
         }
 
-        workload, btm = expander.expand(trace)
+        workload, btm_list = expander.expand(trace)
+        btm = {e.batch_id: e for e in btm_list}
         task_map = {t.task_id: t for t in workload.tasks}
 
         flow_tasks = [
-            task_map[tid] for tid in btm["p0"]["task_ids"]
+            task_map[tid] for tid in btm["p0"].task_ids
             if task_map[tid].type == TaskType.FLOW
         ]
         comm_types = {t.comm_type for t in flow_tasks}
@@ -443,7 +446,9 @@ TRACE_WITH_REUSE = {
 @pytest.fixture
 def reuse_result(store):
     exp = InferenceTraceExpander(store, tp=TP, ep=EP)
-    return exp.expand(TRACE_WITH_REUSE, job_id=0)
+    wl, btm_list = exp.expand(TRACE_WITH_REUSE, job_id=0)
+    btm = {e.batch_id: e for e in btm_list}
+    return wl, btm
 
 
 class TestStage1KvReuseFlows:
@@ -460,7 +465,8 @@ class TestStage1KvReuseFlows:
     def test_stage1_no_reuse_no_flows(self, store):
         """No stage1 metadata → no reuse flows."""
         exp = InferenceTraceExpander(store, tp=TP, ep=EP)
-        workload, btm = exp.expand(TRACE, job_id=0)
+        workload, btm_list = exp.expand(TRACE, job_id=0)
+        btm = {e.batch_id: e for e in btm_list}
         assert not any(k.startswith("kv_reuse_") for k in btm)
 
     def test_stage1_comm_type(self, reuse_result):
@@ -535,9 +541,9 @@ class TestStage1KvReuseFlows:
         reuse_tids = set(_kv_reuse_task_ids(btm, "p0"))
         # Find first compute tasks for p0 at layer 0 (attention = first sub-op)
         # These are the compute tasks whose deps include reuse flows but no other p0 tasks
-        p0_task_ids = set(btm["p0"]["task_ids"])
+        p0_task_ids = set(btm["p0"].task_ids)
         layer0_first_computes = [
-            tid for tid in btm["p0"]["task_ids"]
+            tid for tid in btm["p0"].task_ids
             if task_map[tid].type == TaskType.COMPUTE
             and task_map[tid].layer_id == 0
             and not any(dep in p0_task_ids for dep in task_map[tid].deps)
@@ -557,13 +563,13 @@ class TestStage1KvReuseFlows:
         req1_key = "kv_reuse_p0_req_1"
         assert req0_key in btm
         assert req1_key in btm
-        assert btm[req0_key]["type"] == "kv_reuse"
-        assert btm[req1_key]["type"] == "kv_reuse"
-        assert btm[req0_key]["request_ids"] == [0]
-        assert btm[req1_key]["request_ids"] == [1]
+        assert btm[req0_key].entry_type == BatchEntryType.KV_REUSE
+        assert btm[req1_key].entry_type == BatchEntryType.KV_REUSE
+        assert btm[req0_key].request_ids == [0]
+        assert btm[req1_key].request_ids == [1]
         # Each request should have NUM_LAYERS * TP flow IDs
-        assert len(btm[req0_key]["task_ids"]) == NUM_LAYERS * TP
-        assert len(btm[req1_key]["task_ids"]) == NUM_LAYERS * TP
+        assert len(btm[req0_key].task_ids) == NUM_LAYERS * TP
+        assert len(btm[req1_key].task_ids) == NUM_LAYERS * TP
 
     def test_stage1_reuse_flows_no_deps(self, reuse_result):
         """All reuse flows should have no dependencies (data already on storage node)."""

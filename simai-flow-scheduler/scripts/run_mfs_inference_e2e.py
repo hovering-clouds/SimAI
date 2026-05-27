@@ -18,6 +18,7 @@ from src.static_analysis.passes.topology_loader import TopologyLoader
 from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
 from src.static_analysis.strategies.mfs_strategy import MfsAnalyzer
 from src.workload_format.writer import WorkloadWriter
+from src.workload_format.schema import BatchEntryType
 from src.executor.analytical import AnalyticalExecutor
 from src.executor.policies.default_policy import DefaultSchedulingPolicy
 from src.executor.policies.mfs_policy import MfsSchedulingPolicy
@@ -25,8 +26,8 @@ from src.executor.bandwidth_allocators.mfs_allocator import MfsAllocatorConfig
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-INFERENCE_TRACE = "inputs/traces/inference_trace_stage1_pp2.json"
-TOPO_FILE       = "inputs/topologies/AlibabaHPN_32g_8gps_DualToR_DualPlane_200Gbps_A100_stage1"
+INFERENCE_TRACE = "inputs/traces/inference_trace_stage1_pp1.json"
+TOPO_FILE       = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100_stage1"
 PROFILE_DIR     = "inputs/vidur-csv/deepseek-tp2-pp1-ep4"
 OUTPUT_DIR      = "outputs/mfs_reproduce"
 
@@ -55,25 +56,25 @@ def _run_policy(policy_name, policy, workload, topo):
     return result
 
 
-def _compute_qos(trace, batch_task_map, result, workload):
+def _compute_qos(trace, batch_task_info, result, workload):
     """Compute per-request QoS metrics from execution result."""
     task_map = {t.task_id: t for t in workload.tasks}
     qos_records = []
 
     # Pre-build P2D task set for filtering collective flows
     p2d_tid_set = set()
-    for bid, binfo in batch_task_map.items():
-        if binfo["type"] == "kv_transfer":
-            p2d_tid_set.update(binfo["task_ids"])
+    for info in batch_task_info:
+        if info.entry_type == BatchEntryType.KV_TRANSFER:
+            p2d_tid_set.update(info.task_ids)
 
     for req_id_str, req_info in trace["requests"].items():
         req_id = int(req_id_str)
 
         # Request start time = earliest task start across all this request's batches
         request_start_us = None
-        for bid, binfo in batch_task_map.items():
-            if req_id in binfo.get("request_ids", []):
-                for tid in binfo["task_ids"]:
+        for info in batch_task_info:
+            if req_id in info.request_ids:
+                for tid in info.task_ids:
                     if tid in result.per_task:
                         st = result.per_task[tid].start_time_us
                         if request_start_us is None or st < request_start_us:
@@ -82,16 +83,16 @@ def _compute_qos(trace, batch_task_map, result, workload):
             continue
 
         decode_batches = []
-        for bid, binfo in batch_task_map.items():
-            if binfo["type"] == "decode" and req_id in binfo["request_ids"]:
+        for info in batch_task_info:
+            if info.entry_type == BatchEntryType.DECODE and req_id in info.request_ids:
                 end_times = [
                     result.per_task[tid].end_time_us
-                    for tid in binfo["task_ids"]
+                    for tid in info.task_ids
                     if tid in result.per_task
                 ]
                 if end_times:
                     decode_batches.append({
-                        "batch_id": bid,
+                        "batch_id": info.batch_id,
                         "end_time_us": max(end_times),
                     })
 
@@ -109,17 +110,17 @@ def _compute_qos(trace, batch_task_map, result, workload):
 
         # P2D flow completion times
         p2d_times = []
-        for bid, binfo in batch_task_map.items():
-            if binfo["type"] == "kv_transfer" and req_id in binfo.get("request_ids", []):
-                for tid in binfo["task_ids"]:
+        for info in batch_task_info:
+            if info.entry_type == BatchEntryType.KV_TRANSFER and req_id in info.request_ids:
+                for tid in info.task_ids:
                     if tid in result.per_task:
                         p2d_times.append(result.per_task[tid].end_time_us)
 
         # Collective flow completion times
         collective_times = []
-        for bid, binfo in batch_task_map.items():
-            if binfo["type"] in ("prefill", "decode") and req_id in binfo.get("request_ids", []):
-                for tid in binfo["task_ids"]:
+        for info in batch_task_info:
+            if info.entry_type in (BatchEntryType.PREFILL, BatchEntryType.DECODE) and req_id in info.request_ids:
+                for tid in info.task_ids:
                     if tid in result.per_task and task_map[tid].is_flow() and tid not in p2d_tid_set:
                         collective_times.append(result.per_task[tid].end_time_us)
 
@@ -177,8 +178,8 @@ loaded = store.load_directory(PROFILE_DIR)
 print(f"  Loaded {loaded} profiles")
 
 expander = InferenceTraceExpander(store, tp=infer_tp, ep=infer_ep, pp=infer_pp)
-storage_node_ids = [172]  # storage node in the stage1 topology
-inference_wl, batch_task_map = expander.expand(
+storage_node_ids = [154]  # storage node in the 16g stage1 topology
+inference_wl, batch_task_info = expander.expand(
     trace, job_id=0, storage_node_ids=storage_node_ids,
 )
 print(f"  Tasks: {len(inference_wl.tasks)}  "
@@ -218,7 +219,7 @@ print(f"  Saved: {default_result_path}")
 
 _sep("Step 4: Run MFS policy")
 
-mfs_analysis = MfsAnalyzer(topology).analyze(inference_wl, batch_task_map, trace=trace)
+mfs_analysis = MfsAnalyzer(topology).analyze(inference_wl, batch_task_info, trace=trace)
 mfs_config = MfsAllocatorConfig()
 mfs_policy = MfsSchedulingPolicy(analysis=mfs_analysis, allocator_config=mfs_config)
 mfs_result = _run_policy("mfs", mfs_policy, inference_wl, topology)
@@ -235,8 +236,8 @@ print(f"  Saved: {mfs_result_path}")
 
 _sep("Step 5: Comparison report")
 
-default_qos = _compute_qos(trace, batch_task_map, default_result, inference_wl)
-mfs_qos = _compute_qos(trace, batch_task_map, mfs_result, inference_wl)
+default_qos = _compute_qos(trace, batch_task_info, default_result, inference_wl)
+mfs_qos = _compute_qos(trace, batch_task_info, mfs_result, inference_wl)
 
 default_qos_path = os.path.join(OUTPUT_DIR, "default_qos_report.json")
 with open(default_qos_path, "w") as f:
