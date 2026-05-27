@@ -31,9 +31,10 @@ from src.executor.policies.default_policy import DefaultSchedulingPolicy
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-INFERENCE_TRACE = "inputs/traces/inference_trace.json"
-TOPO_FILE       = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100"
+INFERENCE_TRACE = "inputs/traces/inference_trace_stage1_pp1.json"
+TOPO_FILE       = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100_stage1"
 PROFILE_DIR     = "inputs/vidur-csv/deepseek-tp2-pp1-ep4"
+STORAGE_NODE_IDS = [154]
 OUTPUT_DIR      = "outputs/inference_e2e"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -67,7 +68,7 @@ loaded = store.load_directory(PROFILE_DIR)
 print(f"  Loaded {loaded} profiles")
 
 expander = InferenceTraceExpander(store, tp=infer_tp, ep=infer_ep, pp=infer_pp)
-inference_wl, batch_task_info = expander.expand(trace, job_id=0)
+inference_wl, batch_task_info = expander.expand(trace, job_id=0, storage_node_ids=STORAGE_NODE_IDS)
 print(f"  Tasks: {len(inference_wl.tasks)}  "
       f"(compute={len(inference_wl.get_compute_tasks())}, "
       f"flow={len(inference_wl.get_flow_tasks())})")

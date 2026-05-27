@@ -29,7 +29,7 @@ from src.executor.visualizer import (
 OUTPUT_DIR = "outputs/mfs_reproduce"
 
 # Result file name (default: execution_result.json; for puppeteer: result_route-tte.json, etc.)
-RESULT_FILE = "default_execution_result.json"
+RESULT_FILE = "mfs_execution_result.json"
 
 # Visualization mode: "verbose" | "compact" | "detail"
 MODE = "verbose"
@@ -41,7 +41,7 @@ SHOW_ARROWS = False
 DETAIL_TIME_RANGE = (5625400, 5903810)
 
 # Output file path (None = auto-generate from mode name)
-OUTPUT_FILE = "default_execution_timeline_verbose.json"
+OUTPUT_FILE = "mfs_execution_timeline_verbose.json"
 
 # ───────────────────────────────────────────────────────────────
 

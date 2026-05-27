@@ -39,6 +39,7 @@ class MfsContext:
     batch_to_tasks: dict[str, tuple[int, ...]] = field(default_factory=dict)
     request_to_tasks: dict[int, tuple[int, ...]] = field(default_factory=dict)
     request_info: dict[int, MfsRequestInfo] = field(default_factory=dict)
+    num_layers: int = 0
 
 
 _COLLECTIVE_TYPES = frozenset({
@@ -134,5 +135,10 @@ def build_mfs_context(
                 request_id=rid,
                 ttft_slo_us=req_entry.get("ttft_slo_us"),
             )
+
+    # Extract total_layers from trace metadata
+    ctx.num_layers = trace.get("total_layers", 0)
+    if ctx.num_layers == 0 and "model_config" in trace:
+        ctx.num_layers = trace["model_config"].get("num_layers", 0)
 
     return ctx

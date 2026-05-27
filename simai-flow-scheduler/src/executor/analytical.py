@@ -209,20 +209,25 @@ class AnalyticalExecutor:
         end_times[task_id] = event.time
         task = task_map[task_id]
 
-        # 1. 释放下游依赖
+        # 1. 通知策略（推进 cursor + current_layer）
+        #    必须在释放下游依赖之前调用，这样带宽重分配时 current_layer 已更新
+        self.policy.on_task_completed(event.time, task)
+
+        # 2. 释放下游依赖（触发带宽重分配）
         self._release_dependents(
             task_id, task_map, dep_count, dependents, event.time, ready_pool,
             start_times, active_flows, push_event,
         )
-
-        # 2. 通知策略（默认策略在此推进 compute_cursor）
-        self.policy.on_task_completed(event.time, task)
 
         # 3. drain ready pool（cursor 已推进，下一个 compute 可能可准入）
         self._drain_ready_pool(
             event.time, ready_pool, task_map,
             start_times, active_flows, push_event,
         )
+
+        # 4. 重新分配带宽（current_layer 可能已推进，需重新评估 active flow 的 RLI）
+        if active_flows:
+            self._reallocate_bandwidth(event.time, active_flows, push_event)
 
     def _handle_flow_completion(
         self, event, task_map, active_flows, end_times,

@@ -12,7 +12,6 @@ from ..bandwidth_allocators.mfs_allocator import MfsAllocator, MfsAllocatorConfi
 from ..runtime import ActiveFlow
 from ...static_analysis.strategies.mfs_strategy import MfsAnalysisResult
 from ...static_analysis.passes.topology_loader import NetworkTopology
-from ...static_analysis.passes.mfs_context import MfsStage
 from ...workload_format.schema import P2PWorkload, Task, Phase
 
 
@@ -50,6 +49,7 @@ class MfsSchedulingPolicy(SchedulingPolicy):
         fi = self._analysis.feasibility_info
         if fi:
             self.allocator.remaining_us = dict(fi.request_path_total_us)
+        self.total_layers = self._analysis.mfs_context.num_layers
 
     def emit_ready_tasks(
         self,
@@ -83,27 +83,13 @@ class MfsSchedulingPolicy(SchedulingPolicy):
         )
 
     def on_task_emitted(self, current_time: int, task: Task) -> None:
-        """Record request start time when the first task of a request is emitted.
-
-        Also detect batch boundaries: when a new batch's EARLY flows are emitted
-        while current_layer still tracks the previous batch, reset current_layer
-        to 0 so RLI reflects this batch's progress.
-        """
+        """Record request start time when the first task of a request is emitted."""
         info = self._analysis.mfs_context.task_info.get(task.task_id)
         if info is None:
             return
         for rid in info.request_ids:
             if rid not in self.allocator.request_start_time:
                 self.allocator.request_start_time[rid] = current_time
-
-        # Batch boundary detection: any EARLY flow with target_layer below
-        # current_layer implies the previous batch's compute has finished
-        # and a new batch is starting. Reset current_layer so RLI reflects
-        # this batch's progress.
-        if (info.mfs_stage == MfsStage.EARLY
-                and info.target_layer < self.allocator.current_layer_by_stage.get(
-                    (info.replica_id, info.stage_id), 0)):
-            self.allocator.current_layer_by_stage[(info.replica_id, info.stage_id)] = 0
 
     def on_task_completed(self, current_time: int, task: Task) -> None:
         """Advance compute cursor and update dynamic layer tracking."""
@@ -117,7 +103,10 @@ class MfsSchedulingPolicy(SchedulingPolicy):
                 if info is not None:
                     stage_key = (info.replica_id, info.stage_id)
                     prev = self.allocator.current_layer_by_stage.get(stage_key, 0)
-                    if task.layer_id + 1 > prev:
+                    if task.layer_id + 1 >= self.total_layers:
+                        # Last layer: wrap to 0 so next batch's flows get correct RLI
+                        self.allocator.current_layer_by_stage[stage_key] = 0
+                    elif task.layer_id + 1 > prev:
                         self.allocator.current_layer_by_stage[stage_key] = task.layer_id + 1
 
         # Feasibility: subtract critical path task duration from remaining_us

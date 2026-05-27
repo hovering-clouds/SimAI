@@ -39,8 +39,9 @@ from src.executor.policies.default_policy import DefaultSchedulingPolicy
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 TRAINING_AICB   = "inputs/aicb-workload/gpt175b-a100.txt"
-TOPO_FILE       = "inputs/topologies/AlibabaHPN_32g_8gps_DualToR_DualPlane_200Gbps_A100"
-INFERENCE_TRACE = "inputs/traces/inference_trace.json"
+TOPO_FILE       = "inputs/topologies/AlibabaHPN_32g_8gps_DualToR_DualPlane_200Gbps_A100_stage1"
+INFERENCE_TRACE = "inputs/traces/inference_trace_stage1_pp1.json"
+STORAGE_NODE_IDS = [172]
 OUTPUT_DIR      = "outputs/mixed_e2e"
 
 # Profile directory: all matching CSV files will be auto-loaded
@@ -114,7 +115,7 @@ expander = InferenceTraceExpander(
     store, tp=infer_tp, ep=infer_ep, pp=infer_pp,
     assigned_nodes=INFER_NODES,
 )
-inference_wl, batch_task_info = expander.expand(trace, job_id=1)
+inference_wl, batch_task_info = expander.expand(trace, job_id=1, storage_node_ids=STORAGE_NODE_IDS)
 print(f"  Tasks: {len(inference_wl.tasks)}  "
       f"(compute={len(inference_wl.get_compute_tasks())}, "
       f"flow={len(inference_wl.get_flow_tasks())})")
