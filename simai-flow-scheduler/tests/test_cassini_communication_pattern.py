@@ -35,6 +35,10 @@ def _make_2node_topo(bw_gbps=100.0):
     return topo
 
 
+# Default 2-node topology shared across tests
+_DEFAULT_TOPO = _make_2node_topo()
+
+
 def _make_route_table(paths):
     """Build a BfsRouteTable pre-populated with (src,dst)→path entries."""
     topo = _make_2node_topo()
@@ -94,24 +98,6 @@ class TestPathToLinks:
 
 
 # ---------------------------------------------------------------------------
-# _flow_bandwidth_gbps
-# ---------------------------------------------------------------------------
-
-
-class TestFlowBandwidthGbps:
-    def test_1GB_over_1s(self):
-        # 1 GB = 8e9 bits, 1s = 1e6 us, bw = 8 Gbps
-        bw = _flow_bandwidth_gbps(size_bytes=1_000_000_000, duration_us=1_000_000)
-        assert bw == 8.0
-
-    def test_zero_size(self):
-        assert _flow_bandwidth_gbps(0, 1000) == 0.0
-
-    def test_zero_duration(self):
-        assert _flow_bandwidth_gbps(1000, 0) == 0.0
-
-
-# ---------------------------------------------------------------------------
 # extract_communication_patterns
 # ---------------------------------------------------------------------------
 
@@ -131,7 +117,7 @@ class TestExtractPatterns:
         cpi = _make_critical_path(timing, makespan_us=100_000)
         rt = _make_route_table({(0, 1): [0, 1]})
 
-        patterns = extract_communication_patterns(wl, cpi, rt)
+        patterns = extract_communication_patterns(wl, cpi, rt, _DEFAULT_TOPO)
         assert 0 in patterns
         p = patterns[0]
         assert isinstance(p, CommunicationPattern)
@@ -158,7 +144,7 @@ class TestExtractPatterns:
         cpi = _make_critical_path(timing, makespan_us=100_000)
         rt = _make_route_table({(0, 1): [0, 1]})
 
-        patterns = extract_communication_patterns(wl, cpi, rt)
+        patterns = extract_communication_patterns(wl, cpi, rt, _DEFAULT_TOPO)
         assert 0 in patterns
         demands = patterns[0].link_demands[(0, 1)]
         # Both flows contribute to the same angle buckets
@@ -172,7 +158,7 @@ class TestExtractPatterns:
         wl = _wl([c0])
         cpi = _make_critical_path({}, makespan_us=100)
         rt = _make_route_table({})
-        patterns = extract_communication_patterns(wl, cpi, rt)
+        patterns = extract_communication_patterns(wl, cpi, rt, _DEFAULT_TOPO)
         assert len(patterns) == 0
 
     def test_zero_size_flow_excluded(self):
@@ -185,7 +171,7 @@ class TestExtractPatterns:
         timing = {1: _timing(0, 1000, task_id=1)}
         cpi = _make_critical_path(timing, makespan_us=1000)
         rt = _make_route_table({(0, 1): [0, 1]})
-        patterns = extract_communication_patterns(wl, cpi, rt)
+        patterns = extract_communication_patterns(wl, cpi, rt, _DEFAULT_TOPO)
         assert len(patterns) == 0
 
     def test_flow_without_timing_skipped(self):
@@ -197,7 +183,7 @@ class TestExtractPatterns:
         wl = _wl([flow])
         cpi = _make_critical_path({}, makespan_us=1000)  # no timing for task 1
         rt = _make_route_table({(0, 1): [0, 1]})
-        patterns = extract_communication_patterns(wl, cpi, rt)
+        patterns = extract_communication_patterns(wl, cpi, rt, _DEFAULT_TOPO)
         assert len(patterns) == 0
 
     def test_flow_without_route_skipped(self):
@@ -210,7 +196,7 @@ class TestExtractPatterns:
         timing = {1: _timing(0, 100_000, task_id=1)}
         cpi = _make_critical_path(timing, makespan_us=100_000)
         rt = _make_route_table({})  # no route for (0,1)
-        patterns = extract_communication_patterns(wl, cpi, rt)
+        patterns = extract_communication_patterns(wl, cpi, rt, _DEFAULT_TOPO)
         assert len(patterns) == 0
 
     def test_multi_link_path(self):
@@ -224,7 +210,7 @@ class TestExtractPatterns:
         cpi = _make_critical_path(timing, makespan_us=100_000)
         # Path: 0 → 1 → 2 (two hops)
         rt = _make_route_table({(0, 2): [0, 1, 2]})
-        patterns = extract_communication_patterns(wl, cpi, rt)
+        patterns = extract_communication_patterns(wl, cpi, rt, _DEFAULT_TOPO)
         assert 0 in patterns
         p = patterns[0]
         assert (0, 1) in p.link_demands
@@ -247,7 +233,7 @@ class TestExtractPatterns:
         }
         cpi = _make_critical_path(timing, makespan_us=150_000)
         rt = _make_route_table({(0, 1): [0, 1]})
-        patterns = extract_communication_patterns(wl, cpi, rt)
+        patterns = extract_communication_patterns(wl, cpi, rt, _DEFAULT_TOPO)
         assert len(patterns) == 2
         assert 0 in patterns
         assert 1 in patterns
@@ -263,7 +249,7 @@ class TestExtractPatterns:
         timing = {1: _timing(0, 2000, task_id=1)}
         cpi = _make_critical_path(timing, makespan_us=2000)
         rt = _make_route_table({(0, 1): [0, 1]})
-        patterns = extract_communication_patterns(wl, cpi, rt)
+        patterns = extract_communication_patterns(wl, cpi, rt, _DEFAULT_TOPO)
         if patterns:  # may or may not pattern if iteration estimate is 0
             p = patterns[0]
             if (0, 1) in p.link_demands:

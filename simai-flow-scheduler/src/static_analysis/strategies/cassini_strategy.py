@@ -70,7 +70,7 @@ class CassiniAnalyzer:
         if route_table is None:
             route_table = BfsStrategy().compute_routes(workload, self.topology)
         critical_path = analyze_critical_path(workload, route_table, self.topology)
-        patterns = extract_communication_patterns(workload, critical_path, route_table)
+        patterns = extract_communication_patterns(workload, critical_path, route_table, self.topology)
 
         time_shifts = self._compute_time_shifts(patterns, route_table, workload)
 

@@ -238,6 +238,7 @@ def test_cassini_policy_delays_task_by_time_shift():
     patterns = extract_communication_patterns(
         workload, default.critical_path if hasattr(default, 'critical_path') else analyze_critical_path(workload, default.route_table, topo),
         default.route_table,
+        topo,
     )
 
     # Re-analyze with Cassini first to get proper communication_patterns

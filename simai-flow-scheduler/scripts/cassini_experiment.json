@@ -1,0 +1,22 @@
+{
+    "topology": "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100",
+    "output_dir": "outputs/cassini_experiment2",
+    "placement": "interleave",
+    "k_paths": 4,
+    "step_deg": 5,
+    "no_compat": false,
+    "workloads": [
+        {
+            "aicb": "inputs/aicb-workload/A100-gpt_7B_ws4_pp2-world_size4-tp2-pp2-ep1-gbs16-mbs4-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
+            "dp": 2,
+            "num_jobs": 2,
+            "num_iters": 5
+        }
+    ],
+    "modes": ["default", "puppeteer", "cassini-default", "cassini-puppeteer"],
+    "visualize": {
+        "modes": ["verbose", "compact"],
+        "detail_time_range": null,
+        "show_arrows": false
+    }
+}
