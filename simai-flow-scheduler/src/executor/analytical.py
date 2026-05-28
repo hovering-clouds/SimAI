@@ -84,6 +84,9 @@ class AnalyticalExecutor:
 
         # ── 事件循环 ──
         last_time = 0
+        total_tasks = len(workload.tasks)
+        event_count = 0
+        _PROGRESS_INTERVAL = 10000  # 每处理 10K 事件输出一次进度
         while event_queue:
             event = heapq.heappop(event_queue)
             current_time = event.time
@@ -106,6 +109,16 @@ class AnalyticalExecutor:
                     event, task_map, active_flows, end_times,
                     dep_count, dependents, push_event,
                     start_times, ready_pool,
+                )
+
+            event_count += 1
+            if event_count % _PROGRESS_INTERVAL == 0:
+                pct = len(end_times) / total_tasks * 100
+                print(
+                    f"  [progress] processed {event_count:,} events, "
+                    f"{len(end_times):,}/{total_tasks:,} tasks done "
+                    f"({pct:.1f}%)  time={current_time}",
+                    flush=True,
                 )
 
         # ── 死锁检查 ──
@@ -304,6 +317,7 @@ class AnalyticalExecutor:
 
         # Step 3: 更新每条 flow 的带宽和预计完成时间
         for flow in flows_list:
+            old_bw = flow.current_bw_gbps
             flow.current_bw_gbps = new_bw.get(flow.task_id, 0.0)
 
             if flow.remaining_bytes == 0:
@@ -311,8 +325,18 @@ class AnalyticalExecutor:
                 # 旧事件已包含正确的完成时间（transmission_done + propagation_delay），
                 # 不递增 version，不推送新事件，让旧事件自然触发。
                 pass
+            elif flow.current_bw_gbps == old_bw:
+                # 带宽未变：已有事件的时间仍然是正确的（时间推导见下面注释），
+                # 不递增 version，不推送新事件，让旧事件自然触发。
+                # 推导：旧事件时间 = T₁ + prop_delay + R₁ * 8 / (bw * 1e3)
+                #       Step 1 衰减后 R₂ = R₁ - elapsed * bw * 1e3 / 8
+                #       新事件时间 = T₂ + prop_delay + R₂ * 8 / (bw * 1e3)
+                #                  = T₂ + prop_delay + R₁*8/(bw*1e3) - (T₂ - T₁)
+                #                  = T₁ + prop_delay + R₁*8/(bw*1e3)
+                #                  = 旧事件时间 ✅
+                pass
             elif flow.current_bw_gbps > 0:
-                # 正常传输：用新事件替换旧事件
+                # 带宽发生变化（0→正值 或 正数→不同正数）：用新事件替换旧事件
                 flow.version += 1
                 propagation_delay = self._compute_propagation_delay(flow.path)
                 # remaining_bytes * 8 = bits, bw_gbps * 1e3 = bits per us
@@ -327,7 +351,7 @@ class AnalyticalExecutor:
                     version=flow.version,
                 )
             else:
-                # 带宽为零：流被暂停，递增 version 使旧事件失效，不安排新事件
+                # 带宽降到零：流被暂停，递增 version 使旧事件失效，不安排新事件
                 flow.version += 1
 
     def _compute_propagation_delay(self, path: list[int]) -> int:
