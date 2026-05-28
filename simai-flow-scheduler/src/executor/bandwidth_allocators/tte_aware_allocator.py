@@ -3,7 +3,7 @@
 Provides weighted fair sharing and strict-priority allocation modes
 based on flow TTE (Time-to-Exposed) priority classification.
 """
-from .base_allocator import BandwidthAllocator
+from .base_allocator import BandwidthAllocator, MIN_BW_REMAINING
 from ...static_analysis.passes.topology_loader import NetworkTopology
 from ...static_analysis.passes.puppeteer_tte import TTEInfo
 
@@ -150,7 +150,7 @@ class TteAwareAllocator(BandwidthAllocator):
                 for i in range(len(path) - 1):
                     link = (path[i], path[i + 1])
                     if link in link_rem:
-                        if link_rem[link] <= 0:
+                        if link_rem[link] < MIN_BW_REMAINING:
                             min_alloc = 0.0
                             break
                         count = len(link_map.get(link, []))

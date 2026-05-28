@@ -7,7 +7,7 @@ EARLY RLI=0 flows are tiered into separate queues by RED quantile.
 """
 from dataclasses import dataclass
 
-from .base_allocator import BandwidthAllocator
+from .base_allocator import BandwidthAllocator, MIN_BW_REMAINING
 from ...static_analysis.passes.topology_loader import NetworkTopology
 from ...static_analysis.passes.mfs_context import MfsContext, MfsStage
 
@@ -222,7 +222,7 @@ class MfsAllocator(BandwidthAllocator):
                 rem = link_rem.get(link, 0.0)
                 count = link_counts.get(link, 0)
                 if count > 0:
-                    if rem <= 0:
+                    if rem < MIN_BW_REMAINING:
                         min_alloc = 0.0
                         break
                     alloc = rem / count
