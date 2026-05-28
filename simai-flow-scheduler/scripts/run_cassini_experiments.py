@@ -37,6 +37,7 @@ JSON config schema (all fields optional, CLI args override config values):
 import argparse
 import json
 import os
+import random
 import sys
 import time
 import traceback
@@ -101,6 +102,11 @@ def run_puppeteer(workload, topology, k_paths=4, **_):
 
 def run_cassini_default(workload, topology, step_deg=5, **_):
     analysis = CassiniAnalyzer(topology, step_deg=step_deg).analyze(workload)
+    _print_cassini_diagnostics(
+        workload, topology, analysis.route_table,
+        analysis.communication_patterns, analysis.time_shifts,
+        step_deg, "cassini-default",
+    )
     policy = CassiniSchedulingPolicy(analysis)
     return AnalyticalExecutor(topology=topology, policy=policy).execute(workload)
 
@@ -109,6 +115,11 @@ def run_cassini_puppeteer(workload, topology, k_paths=4, step_deg=5, **_):
     puppet = PuppeteerAnalyzer(topology, k_paths=k_paths).analyze(workload)
     cassini = CassiniAnalyzer(topology, step_deg=step_deg)
     cassini_analysis = cassini.analyze(workload, route_table=puppet.route_table)
+    _print_cassini_diagnostics(
+        workload, topology, cassini_analysis.route_table,
+        cassini_analysis.communication_patterns, cassini_analysis.time_shifts,
+        step_deg, "cassini-puppeteer",
+    )
     tte_allocator = TteAwareAllocator(tte_info=puppet.tte_info, mode="weighted")
     policy = CassiniSchedulingPolicy(analysis=cassini_analysis, allocator=tte_allocator)
     return AnalyticalExecutor(topology=topology, policy=policy).execute(workload)
@@ -171,23 +182,36 @@ def _server_spread_gpus(job_configs, gpu_count, gpus_per_server):
     return assignments
 
 
-def _interleave_gpus(job_configs, gpu_count):
-    """Assign GPUs so replicas are forced into mirror domains — extreme contention."""
-    replica_sizes = [c["tp"] * c["pp"] * c["ep"] for c in job_configs]
-    max_size = max(replica_sizes)
-    domains = [
-        list(range(i, i + max_size))
-        for i in range(0, gpu_count, max_size)
-        if i + max_size <= gpu_count
-    ]
-    nd = len(domains)
+def _interleave_gpus(job_configs, gpu_count, gpus_per_server):
+    """Randomly assign each replica to a server with space — creates unpredictable contention patterns.
+
+    Each replica (tp*pp*ep GPUs) stays within one server.  Replicas from
+    different jobs may land on the same servers, creating shared-link
+    contention at the ToR/Spine level.
+    """
+    n_servers = gpu_count // gpus_per_server
+    server_offset = [s * gpus_per_server for s in range(n_servers)]
+    server_pool = list(range(n_servers))
 
     assignments = [[] for _ in job_configs]
     for j, cfg in enumerate(job_configs):
-        size = replica_sizes[j]
-        for k in range(cfg["dp"]):
-            d = j % nd if k == 0 else (nd - 1 - j) % nd
-            assignments[j].extend(domains[d][:size])
+        replica_size = cfg["tp"] * cfg["pp"] * cfg["ep"]
+        dp = cfg["dp"]
+        random.shuffle(server_pool)
+        for _ in range(dp):
+            found = False
+            for s in server_pool:
+                base = server_offset[s]
+                if base + replica_size <= (s + 1) * gpus_per_server:
+                    assignments[j].extend(list(range(base, base + replica_size)))
+                    server_offset[s] = base + replica_size
+                    found = True
+                    break
+            if not found:
+                raise RuntimeError(
+                    f"Cannot allocate {replica_size} consecutive GPUs "
+                    f"for job {j}"
+                )
     return assignments
 
 
@@ -231,10 +255,8 @@ def build_workload(workload_entries, topology, placement, gpus_per_server):
     placement_fn = PLACEMENT_MAP[placement]
     if placement == "contiguous":
         assignments = placement_fn(job_configs)
-    elif placement == "server-spread":
+    elif placement in ("server-spread", "interleave"):
         assignments = placement_fn(job_configs, topology.gpu_count, gpus_per_server)
-    else:
-        assignments = placement_fn(job_configs, topology.gpu_count)
 
     total = sum(len(a) for a in assignments)
     if total > topology.gpu_count:
@@ -405,6 +427,74 @@ def print_speedup(all_metrics):
         ratio = m["p99_flow_us"] / max(m["avg_flow_us"], 1)
         print(f"  {m['mode']:<22s}: p99={m['p99_flow_us']:.0f} us, "
               f"avg={m['avg_flow_us']:.0f} us, ratio={ratio:.2f}")
+
+
+def _print_cassini_diagnostics(workload, topology, route_table, patterns, time_shifts, step_deg, label):
+    """Print per-link Cassini before/after scores and applied time-shifts."""
+    from collections import defaultdict
+    from src.cassini.circle_abstraction import CircleAbstraction
+    from src.cassini.pair_compatibility import compute_score
+
+    job_links: dict[int, set[tuple[int, int]]] = defaultdict(set)
+    for task in workload.tasks:
+        if not task.is_flow():
+            continue
+        try:
+            path = route_table.get_path(task)
+        except (KeyError, ValueError):
+            continue
+        for i in range(len(path) - 1):
+            job_links[task.job_id].add((path[i], path[i + 1]))
+
+    link_jobs: dict[tuple[int, int], list[int]] = defaultdict(list)
+    link_caps: dict[tuple[int, int], float] = {}
+    for jid, links in job_links.items():
+        for lid in links:
+            link_jobs[lid].append(jid)
+            if lid not in link_caps:
+                link = topology.get_link(lid[0], lid[1])
+                link_caps[lid] = link.bandwidth_gbps if link else 100.0
+
+    contended = [(lid, sorted(set(jids)))
+                 for lid, jids in link_jobs.items() if len(set(jids)) >= 2]
+
+    if not contended:
+        print(f"  [{label}] No shared links — Cassini has nothing to optimize")
+        return
+
+    print(f"\n  [{label}] Per-Link Optimization")
+    print(f"  {'Link':<18s} {'Jobs':<18s} {'Cap(Gbps)':<10s} {'Before':<10s} {'After':<10s} "
+          f"{'Delta':<10s} {'Time-shifts(us)':<36s}")
+    print(f"  " + "-" * 112)
+
+    for lid, jids in sorted(contended):
+        cap = link_caps.get(lid, 100.0)
+        link_patterns = [patterns[jid] for jid in jids
+                         if jid in patterns and lid in patterns[jid].link_demands]
+
+        perimeters = {p.iteration_time_us for p in link_patterns}
+        if len(perimeters) > 1:
+            _, circles = CircleAbstraction.build_unified(link_patterns, lid)
+        else:
+            circles = [CircleAbstraction.from_pattern(p, lid) for p in link_patterns]
+        if not circles or len(circles) < 2:
+            continue
+
+        n = len(circles)
+        before = compute_score(circles, [0] * n, cap)
+
+        after_shifts_deg = []
+        for c, p in zip(circles, link_patterns):
+            us = time_shifts.get(p.job_id, 0)
+            after_shifts_deg.append(round(us * 360 / c.perimeter) if c.perimeter > 0 else 0)
+        after = compute_score(circles, after_shifts_deg, cap)
+
+        link_str = f"{lid[0]}-{lid[1]}"
+        jobs_str = ",".join(f"J{j}" for j in jids)
+        shifts_str = ", ".join(f"J{j}={time_shifts.get(j, 0):>6d}us" for j in jids)
+        print(f"  {link_str:<18s} {jobs_str:<18s} {cap:<10.0f} {before:<10.4f} "
+              f"{after:<10.4f} {after - before:<+10.4f} {shifts_str:<36s}")
+    print()
 
 
 def print_compatibility_report(workload, topology, step_deg=5):

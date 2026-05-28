@@ -13,7 +13,6 @@ from src.cassini.communication_pattern import (
     CommunicationPattern,
     extract_communication_patterns,
     _path_to_links,
-    _flow_bandwidth_gbps,
 )
 
 
