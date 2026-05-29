@@ -17,7 +17,8 @@ JSON config schema (all fields optional, CLI args override config values):
   {
     "topology":       "path/to/topology",
     "output_dir":     "path/to/output",
-    "placement":      "contiguous" | "server-spread" | "interleave",
+    "placement":      "contiguous" | "contention-spread",
+    "placement_clusters": 2,
     "gpus_per_server": 8,
     "k_paths":        4,
     "step_deg":       5,
@@ -37,22 +38,26 @@ JSON config schema (all fields optional, CLI args override config values):
 import argparse
 import json
 import os
-import random
 import sys
 import time
 import traceback
+from dataclasses import replace
 from pathlib import Path
 
 project_root = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, project_root)
 os.chdir(project_root)
 
+from src.cassini.workload_transform import (
+    merge_ga_to_one_iteration,
+    patch_iteration_time_us,
+    replicate_with_cross_iteration_deps,
+)
 from src.workload_format.schema import Job, ParallelismConfig
 from src.workload_format.writer import WorkloadWriter
 from src.workload_generator.aicb_parser import AicbParser
 from src.workload_generator.workload_builder import WorkloadBuilder
 from src.workload_generator.job_merger import JobMerger
-from src.workload_generator.iteration_replicator import replicate_iterations
 from src.static_analysis.passes.topology_loader import NodeType, TopologyLoader
 from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
 from src.static_analysis.strategies.puppeteer_strategy import PuppeteerAnalyzer
@@ -102,6 +107,7 @@ def run_puppeteer(workload, topology, k_paths=4, **_):
 
 def run_cassini_default(workload, topology, step_deg=5, **_):
     analysis = CassiniAnalyzer(topology, step_deg=step_deg).analyze(workload)
+    patch_iteration_time_us(analysis, workload)
     _print_cassini_diagnostics(
         workload, topology, analysis.route_table,
         analysis.communication_patterns, analysis.time_shifts,
@@ -115,6 +121,7 @@ def run_cassini_puppeteer(workload, topology, k_paths=4, step_deg=5, **_):
     puppet = PuppeteerAnalyzer(topology, k_paths=k_paths).analyze(workload)
     cassini = CassiniAnalyzer(topology, step_deg=step_deg)
     cassini_analysis = cassini.analyze(workload, route_table=puppet.route_table)
+    patch_iteration_time_us(cassini_analysis, workload)
     _print_cassini_diagnostics(
         workload, topology, cassini_analysis.route_table,
         cassini_analysis.communication_patterns, cassini_analysis.time_shifts,
@@ -131,6 +138,11 @@ MODE_MAP = {
     "cassini-default": run_cassini_default,
     "cassini-puppeteer": run_cassini_puppeteer,
 }
+
+# ---------------------------------------------------------------------------
+# Cassini iteration_time_us patching
+# ---------------------------------------------------------------------------
+
 
 # ---------------------------------------------------------------------------
 # GPU placement strategies
@@ -159,66 +171,140 @@ def _contiguous_gpus(job_configs):
     return assignments
 
 
-def _server_spread_gpus(job_configs, gpu_count, gpus_per_server):
-    """Spread each job's DP replicas across different servers.
+def _replica_size(cfg):
+    """Number of GPUs for one DP replica across PP/EP/TP dimensions."""
+    return cfg["tp"] * cfg["pp"] * cfg["ep"]
 
-    Each replica stays within one server, but different replicas of the same
-    job are placed on different servers, creating natural cross-server DP
-    traffic.  This produces moderate spine contention — more than contiguous
-    but less than the extreme mirroring of interleave.
-    """
-    n_servers = gpu_count // gpus_per_server
+
+def _job_size(cfg):
+    return cfg["tp"] * cfg["dp"] * cfg["pp"] * cfg["ep"]
+
+
+def _server_count(gpu_count, gpus_per_server):
+    if gpus_per_server <= 0:
+        raise ValueError("gpus_per_server must be positive")
+    if gpu_count % gpus_per_server != 0:
+        raise ValueError(
+            f"gpu_count ({gpu_count}) must be divisible by "
+            f"gpus_per_server ({gpus_per_server})"
+        )
+    return gpu_count // gpus_per_server
+
+
+def _partition_even(items, num_groups):
+    if num_groups <= 0:
+        raise ValueError("placement_clusters must be positive")
+    groups = []
+    n = len(items)
+    start = 0
+    for i in range(num_groups):
+        size = n // num_groups + (1 if i < n % num_groups else 0)
+        groups.append(items[start:start + size])
+        start += size
+    return groups
+
+
+def _can_fit(server_id, size, gpus_per_server, server_free):
+    return server_free[server_id] + size <= (server_id + 1) * gpus_per_server
+
+
+def _take_from_server(server_id, size, gpus_per_server, server_free):
+    if size > gpus_per_server:
+        raise RuntimeError(
+            f"Replica needs {size} GPUs but one server only has {gpus_per_server}. "
+            "Use smaller tp/pp/ep or a topology with more GPUs per server."
+        )
+    if not _can_fit(server_id, size, gpus_per_server, server_free):
+        raise RuntimeError(
+            f"Server {server_id} does not have {size} contiguous GPUs left "
+            f"(next={server_free[server_id]}, limit={(server_id + 1) * gpus_per_server})."
+        )
+    base = server_free[server_id]
+    server_free[server_id] += size
+    return list(range(base, base + size))
+
+
+def _assignment_from_dp_servers(cfg, dp_servers, gpus_per_server, server_free):
+    """Build assigned_nodes in RankGrouper's [PP][DP][EP][TP] order."""
+    if len(dp_servers) != cfg["dp"]:
+        raise RuntimeError(
+            f"Expected {cfg['dp']} DP server assignments, got {len(dp_servers)}"
+        )
+
+    blocks = []
+    size = _replica_size(cfg)
+    for server_id in dp_servers:
+        blocks.append(_take_from_server(server_id, size, gpus_per_server, server_free))
+
+    nodes = []
+    for pp_idx in range(cfg["pp"]):
+        for dp_idx in range(cfg["dp"]):
+            block = blocks[dp_idx]
+            for ep_idx in range(cfg["ep"]):
+                for tp_idx in range(cfg["tp"]):
+                    offset = pp_idx * (cfg["ep"] * cfg["tp"]) + ep_idx * cfg["tp"] + tp_idx
+                    nodes.append(block[offset])
+
+    expected = _job_size(cfg)
+    if len(nodes) != expected:
+        raise RuntimeError(f"Expected {expected} assigned nodes, got {len(nodes)}")
+    return nodes
+
+
+def _contention_spread_gpus(
+    job_configs,
+    gpu_count,
+    gpus_per_server,
+    placement_clusters=2,
+    **_,
+):
+    """Deterministically place jobs to create cross-cluster DP contention."""
+    n_servers = _server_count(gpu_count, gpus_per_server)
+    server_groups = _partition_even(list(range(n_servers)), placement_clusters)
+    if any(not group for group in server_groups):
+        raise RuntimeError(
+            f"placement_clusters={placement_clusters} is too high for "
+            f"{n_servers} servers"
+        )
+
     server_free = [s * gpus_per_server for s in range(n_servers)]
+    reserved_free = list(server_free)
+    cluster_cursor = [0 for _ in server_groups]
+    assignments = []
 
-    assignments = [[] for _ in job_configs]
     for j, cfg in enumerate(job_configs):
-        replica_size = cfg["tp"] * cfg["pp"] * cfg["ep"]
-        for k in range(cfg["dp"]):
-            server = (j * cfg["dp"] + k) % n_servers
-            base = server_free[server]
-            assignments[j].extend(list(range(base, base + replica_size)))
-            server_free[server] += replica_size
-
-    return assignments
-
-
-def _interleave_gpus(job_configs, gpu_count, gpus_per_server):
-    """Randomly assign each replica to a server with space — creates unpredictable contention patterns.
-
-    Each replica (tp*pp*ep GPUs) stays within one server.  Replicas from
-    different jobs may land on the same servers, creating shared-link
-    contention at the ToR/Spine level.
-    """
-    n_servers = gpu_count // gpus_per_server
-    server_offset = [s * gpus_per_server for s in range(n_servers)]
-    server_pool = list(range(n_servers))
-
-    assignments = [[] for _ in job_configs]
-    for j, cfg in enumerate(job_configs):
-        replica_size = cfg["tp"] * cfg["pp"] * cfg["ep"]
-        dp = cfg["dp"]
-        random.shuffle(server_pool)
-        for _ in range(dp):
-            found = False
-            for s in server_pool:
-                base = server_offset[s]
-                if base + replica_size <= (s + 1) * gpus_per_server:
-                    assignments[j].extend(list(range(base, base + replica_size)))
-                    server_offset[s] = base + replica_size
-                    found = True
+        replica_size = _replica_size(cfg)
+        dp_servers = []
+        for dp_idx in range(cfg["dp"]):
+            cluster_idx = (j + dp_idx) % placement_clusters
+            candidates = server_groups[cluster_idx]
+            picked = None
+            for attempt in range(len(candidates)):
+                pos = (cluster_cursor[cluster_idx] + attempt) % len(candidates)
+                server_id = candidates[pos]
+                if _can_fit(server_id, replica_size, gpus_per_server, reserved_free):
+                    picked = server_id
+                    reserved_free[server_id] += replica_size
+                    cluster_cursor[cluster_idx] = (pos + 1) % len(candidates)
                     break
-            if not found:
+            if picked is None:
                 raise RuntimeError(
-                    f"Cannot allocate {replica_size} consecutive GPUs "
-                    f"for job {j}"
+                    f"Cannot allocate job {j} DP replica {dp_idx}: no server in "
+                    f"cluster {cluster_idx} has {replica_size} GPUs left. "
+                    "Reduce num_jobs/dp/tp/pp/ep or increase topology size."
                 )
+            dp_servers.append(picked)
+
+        assignments.append(
+            _assignment_from_dp_servers(cfg, dp_servers, gpus_per_server, server_free)
+        )
+
     return assignments
 
 
 PLACEMENT_MAP = {
     "contiguous": _contiguous_gpus,
-    "server-spread": _server_spread_gpus,
-    "interleave": _interleave_gpus,
+    "contention-spread": _contention_spread_gpus,
 }
 
 # ---------------------------------------------------------------------------
@@ -226,7 +312,15 @@ PLACEMENT_MAP = {
 # ---------------------------------------------------------------------------
 
 
-def build_workload(workload_entries, topology, placement, gpus_per_server):
+
+
+def build_workload(
+    workload_entries,
+    topology,
+    placement,
+    gpus_per_server,
+    placement_clusters=2,
+):
     """Build a merged P2PWorkload from multiple workload entries.
 
     Each entry: {"aicb": path, "dp": int, "num_jobs": int, "num_iters": int}
@@ -255,8 +349,13 @@ def build_workload(workload_entries, topology, placement, gpus_per_server):
     placement_fn = PLACEMENT_MAP[placement]
     if placement == "contiguous":
         assignments = placement_fn(job_configs)
-    elif placement in ("server-spread", "interleave"):
-        assignments = placement_fn(job_configs, topology.gpu_count, gpus_per_server)
+    elif placement == "contention-spread":
+        assignments = placement_fn(
+            job_configs,
+            topology.gpu_count,
+            gpus_per_server,
+            placement_clusters=placement_clusters,
+        )
 
     total = sum(len(a) for a in assignments)
     if total > topology.gpu_count:
@@ -275,18 +374,20 @@ def build_workload(workload_entries, topology, placement, gpus_per_server):
             ),
         )
         wl = WorkloadBuilder().build_from_aicb(header, items, job, comm_algo="ring")
-
-        # Replicate this specific job to its target iteration count
-        num_iters = job_specs[idx][2]
-        if num_iters > 1:
-            wl = replicate_iterations(wl, num_iters)
-
+        wl = merge_ga_to_one_iteration(wl, header.ga)
         workloads.append(wl)
 
+    # Merge all jobs, then replicate iterations on the merged workload
     if len(workloads) == 1:
-        return workloads[0]
+        merged = workloads[0]
+    else:
+        merged = JobMerger().merge(workloads).merged_workload
 
-    return JobMerger().merge(workloads).merged_workload
+    num_iters = job_specs[0][2] if job_specs else 1
+    if num_iters > 1:
+        merged = replicate_with_cross_iteration_deps(merged, num_iters)
+
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -294,14 +395,19 @@ def build_workload(workload_entries, topology, placement, gpus_per_server):
 # ---------------------------------------------------------------------------
 
 
-def _print_placement_report(workload, topology, gpus_per_server):
+def _print_placement_report(workload, topology, gpus_per_server, placement_clusters=2):
     print("\nGPU Placement Report")
     print("-" * 40)
 
     job_servers = {}
+    n_servers = max(1, topology.gpu_count // gpus_per_server)
     for job in workload.jobs:
         nodes = sorted(job.assigned_nodes)
         servers = sorted(set(g // gpus_per_server for g in nodes))
+        clusters = sorted(set(
+            min(s * placement_clusters // n_servers, placement_clusters - 1)
+            for s in servers
+        ))
         job_servers[job.job_id] = servers
 
         ranges = []
@@ -318,8 +424,10 @@ def _print_placement_report(workload, topology, gpus_per_server):
 
         tag = "cross-server" if len(servers) > 1 else "single-server"
         server_str = ",".join(str(s) for s in servers)
+        cluster_str = ",".join(str(c) for c in clusters)
         print(f"  Job {job.job_id}: GPUs [{gpu_str}] -> "
-              f"server(s) [{server_str}] ({tag}, {len(servers)} server(s))")
+              f"server(s) [{server_str}], cluster(s) [{cluster_str}] "
+              f"({tag}, {len(servers)} server(s))")
 
     n_cross = sum(1 for s in job_servers.values() if len(s) > 1)
     all_servers = set().union(*job_servers.values())
@@ -329,7 +437,7 @@ def _print_placement_report(workload, topology, gpus_per_server):
               f"DP traffic will cross shared spine (natural contention)")
     elif n_cross == 0:
         print(f"  -> All jobs single-server: no spine traffic, no contention")
-        print(f"     Hint: use larger model, higher DP, or server-spread placement")
+        print(f"     Hint: use larger model, higher DP, or contention-spread placement")
     else:
         print(f"  -> Only {n_cross} job(s) cross servers: limited contention")
         print(f"     Hint: ensure all jobs span 2+ servers for natural contention")
@@ -549,6 +657,7 @@ def save_report(all_metrics, config):
             "k_paths": config["k_paths"],
             "step_deg": config["step_deg"],
             "placement": config["placement"],
+            "placement_clusters": config.get("placement_clusters"),
             "gpus_per_server": config.get("gpus_per_server"),
         },
         "results": all_metrics,
@@ -623,7 +732,7 @@ Examples:
   python scripts/run_cassini_experiments.py --config experiments.json
   python scripts/run_cassini_experiments.py --topo <path> --aicb <path> --dp 4 --num-jobs 4
   python scripts/run_cassini_experiments.py --modes default cassini-default
-  python scripts/run_cassini_experiments.py --placement server-spread
+  python scripts/run_cassini_experiments.py --placement contention-spread --placement-clusters 2
   bash scripts/run_experiments.sh
         """,
     )
@@ -638,11 +747,13 @@ Examples:
     parser.add_argument("--output", "-o", type=str, default=None,
                         help="Output directory")
     parser.add_argument("--placement", type=str,
-                        choices=["contiguous", "server-spread", "interleave"],
+                        choices=["contiguous", "contention-spread"],
                         default=None,
                         help="GPU placement strategy (default: contiguous)")
     parser.add_argument("--gpus-per-server", type=int, default=None,
                         help="GPUs per NVSwitch server (default: inferred from topology)")
+    parser.add_argument("--placement-clusters", type=int, default=None,
+                        help="Number of fabric clusters for contention-spread")
 
     # --- Workload definition ---
     parser.add_argument("--aicb", nargs="+", default=None,
@@ -681,6 +792,7 @@ Examples:
         "topology": DEFAULT_TOPO,
         "output_dir": DEFAULT_OUTPUT,
         "placement": "contiguous",
+        "placement_clusters": 2,
         "gpus_per_server": None,
         "k_paths": 4,
         "step_deg": 5,
@@ -706,6 +818,7 @@ Examples:
         "topology": args.topo,
         "output_dir": args.output,
         "placement": args.placement,
+        "placement_clusters": args.placement_clusters,
         "gpus_per_server": args.gpus_per_server,
         "k_paths": args.k_paths,
         "step_deg": args.step_deg,
@@ -762,6 +875,7 @@ Examples:
     topo = config["topology"]
     output_dir = config["output_dir"]
     placement = config["placement"]
+    placement_clusters = config["placement_clusters"]
     k_paths = config["k_paths"]
     step_deg = config["step_deg"]
     viz_config = config["visualize"]
@@ -786,27 +900,38 @@ Examples:
     # --- Workload ---
     print("\nBuilding workload...")
     print(f"  Placement: {placement}")
+    if placement == "contention-spread":
+        print(f"  Placement clusters: {placement_clusters}")
     for i, w in enumerate(workloads_cfg):
         print(f"  [{i}] {Path(w['aicb']).name}: dp={w['dp']}, "
               f"jobs={w['num_jobs']}, iters={w['num_iters']}")
 
-    workload = build_workload(workloads_cfg, topology, placement, gpus_per_server)
+    workload = build_workload(
+        workloads_cfg,
+        topology,
+        placement,
+        gpus_per_server,
+        placement_clusters=placement_clusters,
+    )
 
     print(f"  Total tasks: {len(workload.tasks)} "
           f"(compute: {len(workload.get_compute_tasks())}, "
           f"flow: {len(workload.get_flow_tasks())})")
     print(f"  Jobs: {len(workload.jobs)}")
     for job in workload.jobs:
-        iters = len({t.iteration for t in workload.tasks if t.job_id == job.job_id})
         print(f"    Job {job.job_id} ({job.name}): {len(job.assigned_nodes)} GPUs, "
               f"tp={job.parallelism.tp}, dp={job.parallelism.dp}, "
-              f"pp={job.parallelism.pp}, ep={job.parallelism.ep}, "
-              f"{iters} iters")
+              f"pp={job.parallelism.pp}, ep={job.parallelism.ep}")
 
     WorkloadWriter().write(workload, os.path.join(output_dir, "workload.json"))
 
     # --- Placement ---
-    _print_placement_report(workload, topology, gpus_per_server)
+    _print_placement_report(
+        workload,
+        topology,
+        gpus_per_server,
+        placement_clusters=placement_clusters,
+    )
 
     # --- Compatibility ---
     if not config["no_compat"] and len(workload.jobs) > 1:

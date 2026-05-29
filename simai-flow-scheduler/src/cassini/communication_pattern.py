@@ -42,6 +42,20 @@ class CommunicationPattern:
     link_demands: dict[tuple[int, int], dict[int, float]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class _IterationWindow:
+    """Timing span for one Cassini logical training iteration."""
+
+    index: int
+    start_us: int
+    finish_us: int
+    task_ids: set[int]
+
+    @property
+    def span_us(self) -> int:
+        return self.finish_us - self.start_us
+
+
 def _path_to_links(path: list[int]) -> list[tuple[int, int]]:
     """Convert a node path [src, hop1, ..., dst] to a list of link tuples."""
     return [(path[i], path[i + 1]) for i in range(len(path) - 1)]
@@ -90,59 +104,66 @@ def extract_communication_patterns(
     return patterns
 
 
-def _estimate_iteration_time(
+def _logical_iteration_index(iteration: int, has_pre_stage: bool) -> int:
+    """Map task iteration labels to Cassini logical iteration windows."""
+    if has_pre_stage:
+        return (iteration + 1) // 3
+    return iteration
+
+
+def _build_iteration_windows(
     tasks: list,
     critical_path: CriticalPathInfo,
-) -> int:
-    """Estimate steady-state iteration time from task timings.
+) -> list[_IterationWindow]:
+    """Build full pre/periodic/post iteration windows from task timings."""
+    has_pre_stage = any(t.iteration < 0 for t in tasks)
+    tasks_by_window: dict[int, list] = defaultdict(list)
+    for task in tasks:
+        window_index = _logical_iteration_index(task.iteration, has_pre_stage)
+        tasks_by_window[window_index].append(task)
 
-    Uses the median span of non-warmup iterations when multiple iterations
-    are available.  Falls back to iteration 0 (or the only iteration) when
-    only one iteration is in the trace.  Returns 0 if no valid estimate can
-    be made.
-    """
-    # Group tasks by iteration
-    tasks_by_iter: dict[int, list] = defaultdict(list)
-    for t in tasks:
-        tasks_by_iter[t.iteration].append(t)
-
-    if not tasks_by_iter:
-        return 0
-
-    def _iter_span(iter_tasks: list) -> int:
-        """Compute the span (max_finish - min_start) of one iteration."""
+    windows: list[_IterationWindow] = []
+    for index, window_tasks in tasks_by_window.items():
         starts = []
         finishes = []
-        for t in iter_tasks:
-            timing = critical_path.task_timings.get(t.task_id)
-            if timing is not None:
-                starts.append(timing.earliest_start_us)
-                finishes.append(timing.earliest_finish_us)
-        if not starts:
-            return 0
-        return max(finishes) - min(starts)
+        task_ids = set()
+        for task in window_tasks:
+            timing = critical_path.task_timings.get(task.task_id)
+            if timing is None:
+                continue
+            starts.append(timing.earliest_start_us)
+            finishes.append(timing.earliest_finish_us)
+            task_ids.add(task.task_id)
+        if starts and finishes:
+            windows.append(
+                _IterationWindow(
+                    index=index,
+                    start_us=min(starts),
+                    finish_us=max(finishes),
+                    task_ids=task_ids,
+                )
+            )
 
-    # Collect spans for all iterations that have timing data
-    spans: dict[int, int] = {}
-    for it, its in tasks_by_iter.items():
-        s = _iter_span(its)
-        if s > 0:
-            spans[it] = s
+    return sorted(windows, key=lambda w: (w.index, w.start_us))
 
+
+def _estimate_iteration_time(
+    windows: list[_IterationWindow],
+    critical_path: CriticalPathInfo,
+) -> int:
+    """Estimate steady-state iteration time from logical iteration windows."""
+    spans = {w.index: w.span_us for w in windows if w.span_us > 0}
     if not spans:
         return critical_path.makespan_us
 
-    # Prefer non-zero iterations (skip warmup); fall back to all available
     non_warmup = {it: s for it, s in spans.items() if it != 0}
     candidates = non_warmup if non_warmup else spans
 
-    # Median is more robust to outliers than mean
     sorted_spans = sorted(candidates.values())
     n = len(sorted_spans)
     if n % 2 == 1:
         return sorted_spans[n // 2]
-    else:
-        return (sorted_spans[n // 2 - 1] + sorted_spans[n // 2]) // 2
+    return (sorted_spans[n // 2 - 1] + sorted_spans[n // 2]) // 2
 
 
 def _build_job_pattern(
@@ -162,7 +183,13 @@ def _build_job_pattern(
     # Estimate iteration time from task timings.
     # Skip iteration 0 when possible — warmup / cache-fill / pipeline-fill
     # effects make it less representative of steady-state.
-    iteration_time_us = _estimate_iteration_time(tasks, critical_path)
+    windows = _build_iteration_windows(tasks, critical_path)
+    task_window_starts = {
+        task_id: window.start_us
+        for window in windows
+        for task_id in window.task_ids
+    }
+    iteration_time_us = _estimate_iteration_time(windows, critical_path)
     if iteration_time_us <= 0:
         return
 
@@ -173,7 +200,8 @@ def _build_job_pattern(
 
     for task in flow_tasks:
         _add_task_to_pattern(task, critical_path, route_table, topology,
-                             iteration_time_us, num_angles, pattern)
+                             iteration_time_us, num_angles, pattern,
+                             task_window_starts)
 
     if pattern.link_demands:
         patterns[job_id] = pattern
@@ -187,6 +215,7 @@ def _add_task_to_pattern(
     iteration_time_us: int,
     num_angles: int,
     pattern: CommunicationPattern,
+    task_window_starts: dict[int, int] | None = None,
 ) -> None:
     """Discretize a single flow task's bandwidth onto the pattern's links.
 
@@ -212,9 +241,13 @@ def _add_task_to_pattern(
         return
     links = _path_to_links(path)
 
-    cpm_start = timing.earliest_start_us
+    window_start = 0
+    if task_window_starts is not None:
+        window_start = task_window_starts.get(task.task_id, 0)
+
+    cpm_start = timing.earliest_start_us - window_start
     cpm_finish = timing.earliest_finish_us
-    cpm_duration = max(cpm_finish - cpm_start, 1)
+    cpm_duration = max(cpm_finish - timing.earliest_start_us, 1)
 
     for link in links:
         # Look up the actual link capacity (default 100 Gbps if missing)

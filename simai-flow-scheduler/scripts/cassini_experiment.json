@@ -1,16 +1,23 @@
 {
-    "topology": "inputs/topologies/Spectrum-X_16g_8gps_400Gbps_H100",
-    "output_dir": "outputs/cassini_experiment5",
-    "placement": "server-spread",
+    "topology": "inputs/topologies/Cassini_Fig10_24g_l1-6_l2-4_l3-3_nv4_400Gbps_A100",
+    "output_dir": "outputs/cassini_experiment8",
+    "placement": "contention-spread",
+    "placement_clusters": 2,
     "k_paths": 4,
     "step_deg": 1,
     "no_compat": false,
     "workloads": [
         {
-            "aicb": "inputs/aicb-workload/A100-gpt_22B_ws4_pp2-world_size4-tp2-pp2-ep1-gbs2-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
-            "dp": 2,
-            "num_jobs": 2,
-            "num_iters": 1
+            "aicb": "inputs/aicb-workload/A100-gpt_7B_ws4_pp1-world_size4-tp4-pp1-ep1-gbs2-mbs2-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
+            "dp": 3,
+            "num_jobs": 1,
+            "num_iters": 2
+        },
+                {
+            "aicb": "inputs/aicb-workload/A100-gpt_22B_ws4_pp2-world_size4-tp2-pp2-ep1-gbs1-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
+            "dp": 3,
+            "num_jobs": 1,
+            "num_iters": 2
         }
     ],
     "modes": ["default", "puppeteer", "cassini-default", "cassini-puppeteer"],
