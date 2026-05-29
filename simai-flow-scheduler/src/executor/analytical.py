@@ -1,5 +1,6 @@
 """Analytical Executor - discrete event simulation for P2P workloads."""
 import heapq
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -11,6 +12,8 @@ from .runtime import ActiveFlow
 
 # 带宽变化幅度阈值（百分比）：小于该值时跳过事件推送。设为 0.0 关闭过滤。
 BW_CHANGE_THRESHOLD_PCT = 1.0
+# 进度输出间隔（事件数）
+PROGRESS_INTERVAL = 10000
 
 
 @dataclass(order=True)
@@ -89,7 +92,7 @@ class AnalyticalExecutor:
         last_time = 0
         total_tasks = len(workload.tasks)
         event_count = 0
-        _PROGRESS_INTERVAL = 10000  # 每处理 10K 事件输出一次进度
+        _start_time = time.monotonic()
         while event_queue:
             event = heapq.heappop(event_queue)
             current_time = event.time
@@ -115,15 +118,19 @@ class AnalyticalExecutor:
                 )
 
             event_count += 1
-            if event_count % _PROGRESS_INTERVAL == 0:
+            if event_count % PROGRESS_INTERVAL == 0:
                 pct = len(end_times) / total_tasks * 100
+                elapsed = time.monotonic() - _start_time
+                eta = elapsed / max(pct, 0.1) * (100 - pct) if pct > 0 else 0
                 print(
-                    f"  [progress] processed {event_count:,} events, "
-                    f"{len(end_times):,}/{total_tasks:,} tasks done "
-                    f"({pct:.1f}%)  time={current_time}  "
+                    f"\r  [progress elps/eta={elapsed:.0f}s/{eta:.0f}s] "
+                    f"{len(end_times):,}/{total_tasks:,} tasks "
+                    f"({pct:.1f}%)  t={current_time:,} us  "
                     f"queue={len(event_queue):,}",
-                    flush=True,
+                    end="\r", flush=True,
                 )
+
+        print()  # 结束进度条
 
         # ── 死锁检查 ──
         if ready_pool:
