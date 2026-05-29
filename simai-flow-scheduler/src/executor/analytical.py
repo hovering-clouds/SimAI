@@ -9,6 +9,9 @@ from .policies.base_policy import SchedulingPolicy
 from .result import ExecutionResult, TaskTiming
 from .runtime import ActiveFlow
 
+# 带宽变化幅度阈值（百分比）：小于该值时跳过事件推送。设为 0.0 关闭过滤。
+BW_CHANGE_THRESHOLD_PCT = 1.0
+
 
 @dataclass(order=True)
 class Event:
@@ -117,7 +120,8 @@ class AnalyticalExecutor:
                 print(
                     f"  [progress] processed {event_count:,} events, "
                     f"{len(end_times):,}/{total_tasks:,} tasks done "
-                    f"({pct:.1f}%)  time={current_time}",
+                    f"({pct:.1f}%)  time={current_time}  "
+                    f"queue={len(event_queue):,}",
                     flush=True,
                 )
 
@@ -334,6 +338,11 @@ class AnalyticalExecutor:
                 #                  = T₂ + prop_delay + R₁*8/(bw*1e3) - (T₂ - T₁)
                 #                  = T₁ + prop_delay + R₁*8/(bw*1e3)
                 #                  = 旧事件时间 ✅
+                pass
+            elif (old_bw > 0 and flow.current_bw_gbps > 0
+                  and abs(flow.current_bw_gbps - old_bw) / max(old_bw, flow.current_bw_gbps) * 100
+                      <= BW_CHANGE_THRESHOLD_PCT):
+                # 变化幅度小于阈值：旧事件的完成时间误差在阈值范围内，不推送新事件。
                 pass
             elif flow.current_bw_gbps > 0:
                 # 带宽发生变化（0→正值 或 正数→不同正数）：用新事件替换旧事件

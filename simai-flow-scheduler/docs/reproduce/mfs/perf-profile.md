@@ -1,88 +1,209 @@
-# MFS Policy Performance Profile
+# MFS 策略性能分析报告
 
-Recorded: 2026-05-25
-Workload: inference_trace_stage1_pp2.json (874,432 tasks: 249,856 compute + 624,576 flow)
-Topology: AlibabaHPN_32g_8gps_DualToR_DualPlane_200Gbps_A100_stage1 (174 nodes)
-Policies: Default vs MFS
+更新日期: 2026-05-29
+工作负载: inference_trace_stage1_pp1_4096.json（1,347,456 个 task：249,856 个 compute + 1,097,600 个 flow）
+拓扑: AlibabaHPN_64g_8gps_DualToR_DualPlane_200Gbps_H100_stage1（210 节点）
+策略: MFS（--mfs-only）
 
-## Summary
+## 工作负载对比
 
-| Policy | Execution Time | Makespan | vs Default |
-|--------|---------------|----------|------------|
-| Default | ~191s | 5.663s | 1.0x |
-| MFS | ~373s | 5.521s | 1.95x |
+### 规模参数
 
-## Default Policy Profile (top 15 by cumtime)
+| | 1P1D | 2P2D | 倍率 |
+|---|---|---|---|
+| Trace 文件 | inference_trace_stage1_pp1.json | inference_trace_stage1_pp1_4096.json |
+| 拓扑 | 16g_A100_stage1（156 节点） | 64g_H100_stage1（210 节点） |
+| GPU 数量 | 16 | 64 | 4× |
+| tp/ep/pp | 2/4/1 | 2/8/1 |
+| 副本数 | 2（1P+1D） | 4（2P+2D） |
+| Batch 数 | 128 | 128 | 1× |
+| Request 数 | 4 | 4 | 1× |
+| **总 task 数** | **436,160** | **1,347,456** | **3.1×** |
+| Compute task | 124,928 | 249,856 | 2.0× |
+| Flow task | 311,232 | 1,097,600 | 3.5× |
+| Storage 节点 | 154（200G × 2 TOR） | 208（200G × 2 TOR） |
 
-| ncalls | tottime | cumtime | function |
-|--------|---------|---------|----------|
-| 1 | 8.5s | 191.5s | execute |
-| 1,214,991 | 16.2s | 133.0s | _reallocate_bandwidth |
-| 20,047,552 | 3.3s | 108.9s | _handle_flow_completion |
-| 1,214,991 | 1.0s | 62.9s | allocate_bandwidth (default) |
-| 1,214,991 | 39.3s | 61.9s | fair_share_allocator.allocate |
-| 874,432 | 0.5s | 42.1s | _release_dependents |
-| 870,528 | 0.3s | 41.5s | _mark_task_ready |
-| 1,744,961 | 1.3s | 41.1s | _drain_ready_pool |
-| 20,297,408 | 19.8s | 38.6s | heappop |
-| 197,050,847 | 22.1s | 22.1s | __lt__ (heap compare) |
-| 182,610,128 | 16.4s | 16.4s | dict.get |
-| 20,297,408 | 4.3s | 7.7s | heappush |
+### 流类型分布
 
-## MFS Policy Profile (top 15 by cumtime)
+| 流类型 | 1P1D | 2P2D | 倍率 |
+|---|---|---|---|
+| TP（allreduce，1对1） | 131,072 | 262,144 | 2× |
+| AIO（all-to-all，MoE 专家通信） | 178,208 | 831,552 | **4.7×** |
+| AIO 不同 src→dst 对数 | 56 | 480 | **8.6×** |
+| Storage（KV reuse） | 1,952 | 3,904 | 2× |
 
-| ncalls | tottime | cumtime | function |
-|--------|---------|---------|----------|
-| 1 | 8.7s | 372.8s | execute |
-| 1,215,071 | 23.6s | 250.8s | _reallocate_bandwidth |
-| 22,039,925 | 3.7s | 192.9s | _handle_flow_completion |
-| 1,215,071 | 0.6s | 155.7s | allocate_bandwidth (mfs) |
-| 1,215,071 | 25.2s | 155.1s | mfs_allocator.allocate |
-| 1,320,138 | 68.8s | 100.3s | _allocate_fair_share |
-| 22,289,781 | 51.8s | 101.4s | heappop |
-| 512,169,195 | 58.4s | 58.4s | __lt__ (heap compare) |
-| 22,487,815 | 6.9s | 16.6s | _queue_for |
-| 11,060,407 | 4.9s | 7.7s | _compute_rli |
-| 22,289,781 | 13.5s | 36.3s | push_event |
-| 22,039,925 | 16.6s | 33.5s | _compute_propagation_delay |
-| 334,827,984 | 31.5s | 31.5s | dict.get |
-| 1,092,315 | 0.6s | 1.0s | _compute_red |
-| 1,092,315 | 0.5s | 0.7s | _is_infeasible |
+> **关键发现：** AIO（all-to-all，MoE 专家通信）是差异的主要来源。ep=8 时（vs ep=4），
+> 每个 16-GPU 副本每层产生约 224 条 all-to-all 流，而 8-GPU 副本仅约 48 条。
+> 加上 2 个 P-replica 同时做 prefill，并发 AIO 流数量约为 1P1D 的 9×。
 
-## MFS-Specific Breakdown
+### 拓扑链路对比
 
-Total MFS overhead over default: ~182s.
+| 链路类型 | 16-GPU 拓扑 | 64-GPU 拓扑 |
+|---|---|---|
+| NVSwitch（2880G） | 0（未统计） | 64 |
+| TOR（200G） | 36 | 132 |
+| **Spine（400G）** | **976** | **960（≈ 相同!）** |
 
-### allocator.allocate — 155s (41.6% of MFS time)
+> **关键发现：** 两个拓扑的 Spine 层链路数几乎相同（约 970 条）。
+> 所有流都要经过 Spine，因此 4.7× 更多的 AIO 流在相同的 Spine 带宽上竞争。
 
-| Phase | Cost | Detail |
-|-------|------|--------|
-| Phase 1: queue classification | ~25s | _queue_for (17s) + _compute_rli (8s) |
-| Phase 2: RED + feasibility | ~2s | _compute_red (1s) + _is_infeasible (1s) |
-| Phase 3: build link_rem | ~19s | get_link for each unique link per cycle (74M calls) |
-| Phase 4: _allocate_fair_share | ~101s | 3-pass link iteration × 1.3M calls |
-| Other (loop/alloc overhead) | ~8s | |
+## 性能计数器汇总
 
-### _allocate_fair_share — 101s (27% of MFS time)
+### 1P1D MFS（完整运行）
 
-Three passes over each flow's path links:
-1. Count flows sharing each link (link_counts)
-2. Compute per-flow bandwidth as min(rem / count) across links
-3. Deduct allocated bandwidth from link_rem
+| 指标 | 数值 |
+|---|---|
+| 总事件数 | 1,173,326 |
+| Compute 事件 | 124,928 |
+| Flow 事件 | 1,048,398 |
+| 事件/任务 | 2.69 |
+| 带宽重分配调用次数 | 731,650 |
+| 平均活跃流数 | 16.6 |
+| **最大活跃流数** | **516** |
+| Drain 迭代次数 | 435,673 |
+| Makespan | 5,250 ms |
 
-Each call: ~18 flows × ~3 hop links × 3 passes = 162 link iterations.
-1.3M calls × 162 iterations = ~210M link traversals at ~0.5μs each.
+### 2P2D MFS（完整运行）
 
-### Event processing overhead — ~170s
+| 指标 | 数值 |
+|---|---|
+| 总事件数 | **7,831,609** |
+| Compute 事件 | 249,856 |
+| Flow 事件 | **7,581,753** |
+| 事件/任务 | **5.81** |
+| 带宽重分配调用次数 | **2,430,609** |
+| 平均活跃流数 | **147.3** |
+| **最大活跃流数** | **2,040** |
+| Drain 迭代次数 | 1,345,546 |
+| Makespan | 5,232 ms |
 
-MFS has ~2M more events than default (22M vs 20M) due to EARLY/P2D flow state changes causing more reallocations. Extra operations:
-- heappop: +2M calls, +32s
-- __lt__: +315M comparisons, +36s
-- push_event: +2M calls, +13s (mostly propagation delay compute)
+### 扩缩对比
 
-## System
+| 指标 | 1P1D | 2P2D | 倍率 |
+|---|---|---|---|
+| Tasks | 436K | 1.35M | 3.1× |
+| 事件数 | 1.17M | 7.83M | **6.7×** |
+| 重分配调用 | 732K | 2.43M | 3.3× |
+| 活跃流（平均） | 16.6 | 147.3 | **8.9×** |
+| 活跃流（最大） | 516 | 2,040 | 4.0× |
+| 每次重分配带宽变化数 | 1.47 | 3.15 | 2.1× |
+| 队列峰值 | 40,519 | **1,018,303** | **25×** |
+| 冗余事件（总事件 - 任务数） | 0.73M | **6.48M（占 83%）** | 8.9× |
 
-- Platform: macOS (Darwin)
-- Python: 3.x (via `uv run`)
-- Model: deepseek-671B (tp=2, ep=4, pp=2)
-- Hardware: Apple Silicon
+## 带宽变化幅度分析
+
+每次 flow 完成都会触发 `_reallocate_bandwidth`，重新计算所有活跃流的带宽。
+当某条流的带宽发生变化时，会推送一个新的完成事件。以下统计了变化幅度大小。
+
+| 幅度区间 | 1P1D 计数 | 1P1D 占比 | 2P2D 计数 | 2P2D 占比 |
+|---|---|---|---|---|
+| **<1%** | **380,784** | **53.7%** | **3,934,762** | **61.4%** |
+| 1-5% | 19,080 | 2.7% | 11,468 | 0.2% |
+| 5-10% | 620 | 0.1% | 4,833 | 0.1% |
+| 10-25% | 464 | 0.1% | 680,868 | 10.6% |
+| 25-50% | 181,467 | 25.6% | 1,365,779 | 21.3% |
+| 50-100% | 127,267 | 17.9% | 407,388 | 6.4% |
+| 从零增加到正数 | 338,716 | — | 1,176,655 | — |
+| 从正数降到零 | 27,484 | — | 79,055 | — |
+| 无变化 | 11,047,918 | — | 350,472,703 | — |
+| **总变化次数** | **1,075,882** | **100%** | **7,660,808** | **100%** |
+
+> **关键发现：54-61% 的带宽变化是 <1% 的微小波动。** 这些微小变化来自共享瓶颈链路的流 ——
+> 一条流完成后，剩余流的分额等比增加。每次变化都推送一个新事件，但新旧事件的完成时间差异 <1%。
+
+## 事件队列动态
+
+### 队列长度随模拟时间变化（2P2D MFS）
+
+| 阶段 | 已处理事件 | 队列长度 | 特征 |
+|---|---|---|---|
+| 初始期 | 0 — 1.5M | 30 — 600 | 队列平稳，task 正常推进 |
+| **级联爆发** | 1.5M — 1.57M | 600 → **1,018,303** | **队列暴涨：单次 flow 完成触发约 100 万事件的级联** |
+| 级联排空 | 1.57M — 4.34M | 1M → 2,405 | 缓慢排空：约需 100 万事件才能消化级联 |
+| 稳态 | 4.34M — 7.83M | 27 — 358 | 队列正常，事件/任务 ≈ 2.8（与 1P1D 的 2.69 相当） |
+
+### 队列不会无限增长
+
+队列峰值达到约 100 万，但**经过约 116 万事件后完全排空**。进入稳态后，
+队列维持在 27-358 之间，事件/任务比约为 2.8 —— 与 1P1D 的 2.69 基本一致。
+级联是一个**有限的交通拥堵**，而非失控爆炸。
+
+### 级联的触发机制
+
+当多条共享某条瓶颈链路的流在几乎相同的模拟时间戳上完成时，会触发级联：
+
+- N 条流共享链路 L，总带宽为 C
+- 每条分得 C/N 的带宽
+- 流 F1 完成 → 剩余 N-1 条流的带宽变为 C/(N-1)
+- 所有 N-1 条流的带宽都发生变化 → **推送 N-1 个新事件**
+- 这 N-1 个新事件逐个触发 → 每个完成又触发新一轮重分配
+- 总计：N + (N-1) + (N-2) + ... + 1 = **O(N²) 个事件**
+
+## 根因分析
+
+### 为什么 2P2D 的级联严重 25 倍
+
+**三个乘法因素：**
+
+1. **ep=8 vs ep=4** → 每 batch 的 all-to-all（MoE）流增加 4.7×
+2. **2 个 P-replica** → 2× 并行的 prefill batch
+3. **16-GPU vs 8-GPU 副本** → 每张 GPU 与 14 张（而非 6 张）其他 GPU 通信
+
+合计：4.7 × 2 × 2 = **2P2D 的并发 AIO 流约是 1P1D 的 19 倍。**
+
+但 **Spine 层链路容量相同**（960 vs 976 条）。多出 19 倍的流全部经过相同的 Spine 瓶颈，
+从而触发了大规模的级联。
+
+### 队列峰值对比
+
+| | 1P1D | 2P2D | 原因 |
+|---|---|---|---|
+| 平均活跃流数 | 16.6 | 147.3 | 8.9× 更多并发流 |
+| 队列峰值 | 40,519 | 1,018,303 | **~25×**（得益于"带宽不变时跳过"优化，实际低于二次增长） |
+| 级联持续时间 | ~10 万事件 | ~116 万事件 | 11.6× 更长 |
+
+如果没有"带宽不变时跳过"优化（commit 2bac8ea），队列增长将是 O(N²/2) ≈ (147/17)² ≈ 75× 更差，
+峰值将达到约 300 万事件 —— 可能超出内存限制。
+
+## 优化方案
+
+### 方案一：跳过小于阈值的带宽变化事件
+
+**观察：** 61% 的带宽变化是 <1% 的微小波动。这些事件推送后，新旧事件的完成时间差异 <1%，
+引入的模拟误差可忽略。
+
+**修改：** 在 `_reallocate_bandwidth` 中，当 `old_bw > 0` 且 `new_bw > 0` 时：
+
+```python
+change_pct = abs(new_bw - old_bw) / max(old_bw, new_bw)
+if change_pct < 0.01:  # <1% 阈值
+    # 不推送新事件 —— 旧事件的完成时间误差在 1% 以内
+    pass
+```
+
+**预估效果：**
+- 减少约 55% 的 flow_completion 事件
+- 2P2D：7.8M → 约 4.5M 事件，预估运行时间从 15 分钟降至 8 分钟
+- 级联峰值：100 万 → 约 40 万队列
+- 误差界：每次跳过 <1%，makespan 累积误差 <0.1%
+
+### 方案二：重分配去抖
+
+不在每次 flow 完成时都重分配带宽，而是累积待处理的完成事件，
+按固定间隔（例如每 10μs 模拟时间）或待处理完成事件数超过阈值时再统一重分配。
+
+**权衡：** 更复杂，可能延迟 flow 的完成，影响 DAG 的推进。
+
+### 方案三：精确的增量追踪
+
+只重新分配其瓶颈链路分配确实发生变化的那些流。如果某条流的路径与完成流没有共享链路，
+其带宽不受影响，无需重算。
+
+**权衡：** 需要追踪每条流经过哪些链路，增加簿记开销。
+
+## 测试环境
+
+- 平台：macOS（Darwin），Apple Silicon
+- Python：3.x（通过 `uv run`）
+- 模型：deepseek-671B
+- 执行器：AnalyticalExecutor + MfsSchedulingPolicy + MfsAllocator
