@@ -12,8 +12,9 @@ from .runtime import ActiveFlow
 
 # 带宽变化幅度阈值（百分比）：小于该值时跳过事件推送。设为 0.0 关闭过滤。
 BW_CHANGE_THRESHOLD_PCT = 0.0
-# 事件批处理时间差阈值（微秒）：同一批次中 events 时间戳的最大允许间隔。
-# 设为 0 表示只合并严格相同时间戳的事件（完全正确）。
+# 事件批处理时间差阈值（微秒）：设为 0 只合并相同时间戳的事件。
+# 设为 N 则合并时间戳相差不超过 N us 的事件，统一做一次 realloc。
+# 注意 gap > 0 时，较晚事件的 start_time 会偏差最多 N us。
 EVENT_BATCH_GAP_US = 0
 # 进度输出间隔（事件数）
 PROGRESS_INTERVAL = 10000
@@ -98,41 +99,40 @@ class AnalyticalExecutor:
         event_count = 0
         _start_time = time.monotonic()
         while event_queue:
-            # 批处理时间戳差距不超过阈值的 events
-            batch = [heapq.heappop(event_queue)]
-            batch_time = batch[0].time
-            while event_queue and event_queue[0].time - batch_time <= EVENT_BATCH_GAP_US:
-                batch.append(heapq.heappop(event_queue))
-
-            current_time = batch_time
+            current_time = event_queue[0].time
 
             # 时间单调性检查
             assert current_time >= last_time, (
-                f"Time went backwards: {last_time} → {current_time} "
-                f"(event: {batch[0].kind} task_id={batch[0].task_id})"
+                f"Time went backwards: {last_time} → {current_time}"
             )
             last_time = current_time
 
-            # 批处理：realloc 推迟到所有 events 处理完后的一次调用
+            # 处理当前时间戳 ALL events（包括 handler 新推入的），最后做一次 realloc
             self._skip_reallocate = True
-            for event in batch:
-                if event.kind == "compute_done":
-                    self._handle_compute_done(
-                        event, task_map, end_times, dep_count, dependents,
-                        push_event, start_times, active_flows, ready_pool,
-                    )
-                elif event.kind == "flow_completion":
-                    self._handle_flow_completion(
-                        event, task_map, active_flows, end_times,
-                        dep_count, dependents, push_event,
-                        start_times, ready_pool,
-                    )
-                event_count += 1
+            while True:
+                batch = []
+                while event_queue and event_queue[0].time - current_time <= EVENT_BATCH_GAP_US:
+                    batch.append(heapq.heappop(event_queue))
+                if not batch:
+                    break
+                for event in batch:
+                    if event.kind == "compute_done":
+                        self._handle_compute_done(
+                            event, task_map, end_times, dep_count, dependents,
+                            push_event, start_times, active_flows, ready_pool,
+                        )
+                    elif event.kind == "flow_completion":
+                        self._handle_flow_completion(
+                            event, task_map, active_flows, end_times,
+                            dep_count, dependents, push_event,
+                            start_times, ready_pool,
+                        )
+                    event_count += 1
 
-            # 一次重分配处理所有变化
             self._skip_reallocate = False
             if active_flows:
                 self._reallocate_bandwidth(current_time, active_flows, push_event)
+
             if event_count % PROGRESS_INTERVAL == 0:
                 pct = len(end_times) / total_tasks * 100
                 elapsed = time.monotonic() - _start_time
