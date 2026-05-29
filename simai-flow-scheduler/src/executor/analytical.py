@@ -11,7 +11,10 @@ from .result import ExecutionResult, TaskTiming
 from .runtime import ActiveFlow
 
 # 带宽变化幅度阈值（百分比）：小于该值时跳过事件推送。设为 0.0 关闭过滤。
-BW_CHANGE_THRESHOLD_PCT = 1.0
+BW_CHANGE_THRESHOLD_PCT = 0.0
+# 事件批处理时间差阈值（微秒）：同一批次中 events 时间戳的最大允许间隔。
+# 设为 0 表示只合并严格相同时间戳的事件（完全正确）。
+EVENT_BATCH_GAP_US = 0
 # 进度输出间隔（事件数）
 PROGRESS_INTERVAL = 10000
 
@@ -35,6 +38,7 @@ class AnalyticalExecutor:
     def __init__(self, topology: NetworkTopology, policy: SchedulingPolicy):
         self.topology = topology
         self.policy = policy
+        self._skip_reallocate = False
 
     def execute(self, workload: P2PWorkload) -> ExecutionResult:
         """运行离散事件模拟。"""
@@ -94,30 +98,41 @@ class AnalyticalExecutor:
         event_count = 0
         _start_time = time.monotonic()
         while event_queue:
-            event = heapq.heappop(event_queue)
-            current_time = event.time
+            # 批处理时间戳差距不超过阈值的 events
+            batch = [heapq.heappop(event_queue)]
+            batch_time = batch[0].time
+            while event_queue and event_queue[0].time - batch_time <= EVENT_BATCH_GAP_US:
+                batch.append(heapq.heappop(event_queue))
 
-            # 时间单调性检查：防止逆向因果（未来事件触发过去时刻的事件）
+            current_time = batch_time
+
+            # 时间单调性检查
             assert current_time >= last_time, (
                 f"Time went backwards: {last_time} → {current_time} "
-                f"(event: {event.kind} task_id={event.task_id})"
+                f"(event: {batch[0].kind} task_id={batch[0].task_id})"
             )
             last_time = current_time
 
-            if event.kind == "compute_done":
-                self._handle_compute_done(
-                    event, task_map, end_times, dep_count, dependents,
-                    push_event, start_times, active_flows, ready_pool,
-                )
+            # 批处理：realloc 推迟到所有 events 处理完后的一次调用
+            self._skip_reallocate = True
+            for event in batch:
+                if event.kind == "compute_done":
+                    self._handle_compute_done(
+                        event, task_map, end_times, dep_count, dependents,
+                        push_event, start_times, active_flows, ready_pool,
+                    )
+                elif event.kind == "flow_completion":
+                    self._handle_flow_completion(
+                        event, task_map, active_flows, end_times,
+                        dep_count, dependents, push_event,
+                        start_times, ready_pool,
+                    )
+                event_count += 1
 
-            elif event.kind == "flow_completion":
-                self._handle_flow_completion(
-                    event, task_map, active_flows, end_times,
-                    dep_count, dependents, push_event,
-                    start_times, ready_pool,
-                )
-
-            event_count += 1
+            # 一次重分配处理所有变化
+            self._skip_reallocate = False
+            if active_flows:
+                self._reallocate_bandwidth(current_time, active_flows, push_event)
             if event_count % PROGRESS_INTERVAL == 0:
                 pct = len(end_times) / total_tasks * 100
                 elapsed = time.monotonic() - _start_time
@@ -309,6 +324,8 @@ class AnalyticalExecutor:
         self, current_time, active_flows, push_event,
     ):
         """重新分配带宽：更新 remaining_bytes → 调用 policy → 安排新的 completion 事件。"""
+        if self._skip_reallocate:
+            return  # 批处理：推迟到所有 events 处理完后统一重分配
         flows_list = list(active_flows.values())
         if not flows_list:
             return
@@ -337,14 +354,6 @@ class AnalyticalExecutor:
                 # 不递增 version，不推送新事件，让旧事件自然触发。
                 pass
             elif flow.current_bw_gbps == old_bw:
-                # 带宽未变：已有事件的时间仍然是正确的（时间推导见下面注释），
-                # 不递增 version，不推送新事件，让旧事件自然触发。
-                # 推导：旧事件时间 = T₁ + prop_delay + R₁ * 8 / (bw * 1e3)
-                #       Step 1 衰减后 R₂ = R₁ - elapsed * bw * 1e3 / 8
-                #       新事件时间 = T₂ + prop_delay + R₂ * 8 / (bw * 1e3)
-                #                  = T₂ + prop_delay + R₁*8/(bw*1e3) - (T₂ - T₁)
-                #                  = T₁ + prop_delay + R₁*8/(bw*1e3)
-                #                  = 旧事件时间 ✅
                 pass
             elif (old_bw > 0 and flow.current_bw_gbps > 0
                   and abs(flow.current_bw_gbps - old_bw) / max(old_bw, flow.current_bw_gbps) * 100
