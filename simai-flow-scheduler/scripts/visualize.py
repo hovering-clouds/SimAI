@@ -26,10 +26,13 @@ from src.executor.visualizer import (
 # ── Configuration ──────────────────────────────────────────────
 
 # Output directory from run_e2e.py (must contain workload.json and execution_result.json)
-OUTPUT_DIR = "outputs/cassini_experiments"
+OUTPUT_DIR = "outputs/mfs_e2e_2p2d"
+
+# workload file name (default: workload.json; for puppeteer: workload_route-tte.json, etc.)
+WORKLOAD_FILE = "workload_2p2d.json"
 
 # Result file name (default: execution_result.json; for puppeteer: result_route-tte.json, etc.)
-RESULT_FILE = "result_cassini-puppeteer.json"
+RESULT_FILE = "mfs_execution_result_2p2d.json"
 
 # Visualization mode: "verbose" | "compact" | "detail"
 MODE = "detail"
@@ -41,13 +44,13 @@ SHOW_ARROWS = False
 DETAIL_TIME_RANGE = (5625400, 5903810)
 
 # Output file path (None = auto-generate from mode name)
-OUTPUT_FILE = None
+OUTPUT_FILE = "mfs_execution_timeline_verbose_2p2d.json"
 
 # ───────────────────────────────────────────────────────────────
 
 
 def main():
-    workload_path = os.path.join(OUTPUT_DIR, "workload.json")
+    workload_path = os.path.join(OUTPUT_DIR, WORKLOAD_FILE)
     result_path = os.path.join(OUTPUT_DIR, RESULT_FILE)
 
     if not os.path.exists(workload_path):
@@ -82,7 +85,10 @@ def main():
         sys.exit(1)
 
     # Export
-    out_path = OUTPUT_FILE or os.path.join(OUTPUT_DIR, f"execution_timeline_{suffix}.json")
+    if OUTPUT_FILE is None:
+        out_path = os.path.join(OUTPUT_DIR, f"execution_timeline_{suffix}.json")
+    else:
+        out_path = os.path.join(OUTPUT_DIR, OUTPUT_FILE)
 
     viz.export(result, out_path)
     print(f"Trace saved to: {out_path}")

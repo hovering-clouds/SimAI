@@ -3,6 +3,10 @@ from abc import ABC, abstractmethod
 
 from ...static_analysis.passes.topology_loader import NetworkTopology
 
+# Minimum remaining bandwidth threshold to avoid floating-point epsilon issues.
+# When link_rem drops below this value after fair-share subtraction, treat it as zero.
+MIN_BW_REMAINING = 1e-6
+
 
 class BandwidthAllocator(ABC):
     """带宽分配策略接口。"""

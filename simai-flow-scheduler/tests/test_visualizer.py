@@ -144,7 +144,7 @@ class TestChromeTraceVerbose:
         assert len(flow_events) == 1
 
         evt = flow_events[0]
-        assert evt["name"] == "tp_ar 0->1"
+        assert evt["name"] == "tp_ar 0->1 L0"
         assert evt["args"]["src"] == 0
         assert evt["args"]["dst"] == 1
         assert evt["args"]["size_bytes"] == 12500000

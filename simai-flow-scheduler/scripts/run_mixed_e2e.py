@@ -31,6 +31,7 @@ from src.workload_generator.job_merger import JobMerger
 from src.static_analysis.passes.topology_loader import TopologyLoader
 from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
 from src.workload_format.writer import WorkloadWriter
+from src.workload_format.schema import BatchEntryType
 from src.executor.analytical import AnalyticalExecutor
 from src.executor.policies.default_policy import DefaultSchedulingPolicy
 
@@ -38,8 +39,9 @@ from src.executor.policies.default_policy import DefaultSchedulingPolicy
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 TRAINING_AICB   = "inputs/aicb-workload/gpt175b-a100.txt"
-TOPO_FILE       = "inputs/topologies/AlibabaHPN_32g_8gps_DualToR_DualPlane_200Gbps_A100"
-INFERENCE_TRACE = "inputs/traces/inference_trace.json"
+TOPO_FILE       = "inputs/topologies/AlibabaHPN_32g_8gps_DualToR_DualPlane_200Gbps_A100_stage1"
+INFERENCE_TRACE = "inputs/traces/inference_trace_stage1_pp1.json"
+STORAGE_NODE_IDS = [172]
 OUTPUT_DIR      = "outputs/mixed_e2e"
 
 # Profile directory: all matching CSV files will be auto-loaded
@@ -113,7 +115,7 @@ expander = InferenceTraceExpander(
     store, tp=infer_tp, ep=infer_ep, pp=infer_pp,
     assigned_nodes=INFER_NODES,
 )
-inference_wl, batch_task_map = expander.expand(trace, job_id=1)
+inference_wl, batch_task_info = expander.expand(trace, job_id=1, storage_node_ids=STORAGE_NODE_IDS)
 print(f"  Tasks: {len(inference_wl.tasks)}  "
       f"(compute={len(inference_wl.get_compute_tasks())}, "
       f"flow={len(inference_wl.get_flow_tasks())})")
@@ -182,9 +184,9 @@ for req_id_str, req_info in trace["requests"].items():
 
     # Collect decode batches for this request in order
     decode_batches = []
-    for bid, binfo in batch_task_map.items():
-        if binfo["type"] == "decode" and req_id in binfo["request_ids"]:
-            remapped = remap_tids(binfo["task_ids"])
+    for info in batch_task_info:
+        if info.entry_type == BatchEntryType.DECODE and req_id in info.request_ids:
+            remapped = remap_tids(info.task_ids)
             end_times = [
                 result.per_task[tid].end_time_us
                 for tid in remapped
@@ -192,7 +194,7 @@ for req_id_str, req_info in trace["requests"].items():
             ]
             if end_times:
                 decode_batches.append({
-                    "batch_id": bid,
+                    "batch_id": info.batch_id,
                     "end_time_us": max(end_times),
                 })
 

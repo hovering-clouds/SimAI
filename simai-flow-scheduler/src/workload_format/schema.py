@@ -48,8 +48,35 @@ class CommType(str, Enum):
     PP_RECV = "pp_recv"
     # Inference
     KV_CACHE_TRANSFER = "kv_cache_transfer"
+    KV_CACHE_REUSE = "kv_cache_reuse"
     # Unknown/unspecified
     UNKNOWN = "unknown"
+
+
+class BatchEntryType(str, Enum):
+    """Type of batch entry in BatchTaskInfo."""
+    PREFILL = "prefill"
+    DECODE = "decode"
+    PP_COMM = "pp_comm"
+    KV_TRANSFER = "kv_transfer"
+    KV_REUSE = "kv_reuse"
+
+
+@dataclass
+class BatchTaskInfo:
+    """Structured entry in the batch→task mapping from InferenceTraceExpander.
+
+    Each entry maps one trace batch or sub-operation (PP communication,
+    KV transfer, KV reuse) to the expanded task IDs it generated.
+
+    All fields are required — no silent defaults.
+    """
+    batch_id: str
+    task_ids: list[int]
+    entry_type: BatchEntryType
+    replica_id: int
+    stage_id: int
+    request_ids: list[int]
 
 
 @dataclass

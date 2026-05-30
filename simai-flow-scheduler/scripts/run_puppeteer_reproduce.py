@@ -73,21 +73,15 @@ def run_route_only(workload, topology, k_paths=4):
 
 def run_tte_only(workload, topology, **_):
     """BFS shortest paths + TTE-aware allocation (no greedy routing)."""
-    from src.static_analysis.passes.routing_hints import compute_routing_hints
+    from src.static_analysis.passes.routing import BfsStrategy
     from src.static_analysis.passes.puppeteer_tte import compute_tte
     from src.static_analysis.passes.task_serializer import CppReferenceSerializer
     from src.static_analysis.passes.puppeteer_coordination import ResourceDependencyTable
 
-    # Compute routing hints + TTE with shortest paths
-    hints = compute_routing_hints(topology, workload)
+    # Compute BFS shortest paths + TTE
+    route_table = BfsStrategy().compute_routes(workload, topology)
     plan = CppReferenceSerializer().serialize(workload)
-    tte_info, _ = compute_tte(workload, hints, plan)
-
-    # Build route table from shortest paths
-    route_table = type('RouteTable', (), {'paths': {}, 'get_path': lambda self, tid: self.paths[tid]})()
-    for t in workload.tasks:
-        if t.is_flow():
-            route_table.paths[t.task_id] = hints.get_path(t.src, t.dst)
+    tte_info, _ = compute_tte(workload, route_table, plan)
 
     policy = PuppeteerSchedulingPolicy(
         route_table=route_table,
@@ -198,7 +192,7 @@ def main():
     dp = 2
     k_paths = 4
     # modes = ["default", "route-only", "tte-only", "route-tte", "full"]
-    modes = ["default", "route-only", "tte-only"]
+    modes = ["default", "route-only", "tte-only", "route-tte"]
 
     os.makedirs(output_dir, exist_ok=True)
 

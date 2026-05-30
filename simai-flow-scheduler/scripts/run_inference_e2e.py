@@ -24,15 +24,17 @@ from src.workload_generator.inference_trace_expander import InferenceTraceExpand
 from src.static_analysis.passes.topology_loader import TopologyLoader
 from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
 from src.workload_format.writer import WorkloadWriter
+from src.workload_format.schema import BatchEntryType
 from src.executor.analytical import AnalyticalExecutor
 from src.executor.policies.default_policy import DefaultSchedulingPolicy
 
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-INFERENCE_TRACE = "inputs/traces/inference_trace.json"
-TOPO_FILE       = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100"
+INFERENCE_TRACE = "inputs/traces/inference_trace_stage1_pp1.json"
+TOPO_FILE       = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100_stage1"
 PROFILE_DIR     = "inputs/vidur-csv/deepseek-tp2-pp1-ep4"
+STORAGE_NODE_IDS = [154]
 OUTPUT_DIR      = "outputs/inference_e2e"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -66,7 +68,7 @@ loaded = store.load_directory(PROFILE_DIR)
 print(f"  Loaded {loaded} profiles")
 
 expander = InferenceTraceExpander(store, tp=infer_tp, ep=infer_ep, pp=infer_pp)
-inference_wl, batch_task_map = expander.expand(trace, job_id=0)
+inference_wl, batch_task_info = expander.expand(trace, job_id=0, storage_node_ids=STORAGE_NODE_IDS)
 print(f"  Tasks: {len(inference_wl.tasks)}  "
       f"(compute={len(inference_wl.get_compute_tasks())}, "
       f"flow={len(inference_wl.get_flow_tasks())})")
@@ -115,16 +117,16 @@ for req_id_str, req_info in trace["requests"].items():
     req_id = int(req_id_str)
 
     decode_batches = []
-    for bid, binfo in batch_task_map.items():
-        if binfo["type"] == "decode" and req_id in binfo["request_ids"]:
+    for info in batch_task_info:
+        if info.entry_type == BatchEntryType.DECODE and req_id in info.request_ids:
             end_times = [
                 result.per_task[tid].end_time_us
-                for tid in binfo["task_ids"]
+                for tid in info.task_ids
                 if tid in result.per_task
             ]
             if end_times:
                 decode_batches.append({
-                    "batch_id": bid,
+                    "batch_id": info.batch_id,
                     "end_time_us": max(end_times),
                 })
 

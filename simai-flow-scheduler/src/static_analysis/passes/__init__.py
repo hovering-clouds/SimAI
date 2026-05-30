@@ -4,6 +4,7 @@ from .task_serializer import ExecutionPlan, TaskSerializer, CppReferenceSerializ
 from .puppeteer_tte import TTEInfo, FlowTiming
 from .routing import RouteTable, RouteStrategy, BfsStrategy, GreedyStrategy
 from .puppeteer_coordination import ResourceDependencyTable
+from .mfs_context import MfsContext, MfsTaskInfo, MfsStage, MfsRequestInfo, build_mfs_context
 
 __all__ = [
     "ExecutionPlan",
@@ -16,4 +17,9 @@ __all__ = [
     "BfsStrategy",
     "GreedyStrategy",
     "ResourceDependencyTable",
+    "MfsContext",
+    "MfsTaskInfo",
+    "MfsStage",
+    "MfsRequestInfo",
+    "build_mfs_context",
 ]

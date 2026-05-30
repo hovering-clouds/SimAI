@@ -20,9 +20,11 @@ Usage:
 """
 
 import json
+import math
 import os
+import random
 from math import ceil
-from typing import Optional
+from typing import Callable, Optional
 
 
 _DTYPE_BYTES = {
@@ -30,6 +32,38 @@ _DTYPE_BYTES = {
     'int8': 1, 'int16': 2, 'int32': 4, 'int64': 8,
     'float64': 8,
 }
+
+
+# ── SLO Generation Config ─────────────────────────────────────────────────────
+# Edit this to configure per-request TTFT SLO generation.
+# The slo_generator callable receives a request object and returns an SLO in us.
+# Set to None to disable SLO output.
+
+SLO_MEAN_US = 2_000_000       # 2 seconds
+SLO_STD_US = 500_000           # 0.5 seconds
+SLO_MIN_US = 200_000           # floor at 200ms
+
+
+def _default_slo_generator(request) -> int:
+    """Generate a per-request TTFT SLO using a log-normal distribution."""
+    # log-normal: always positive, right-skewed, realistic for latency SLOs
+    mu = math.log(SLO_MEAN_US)
+    sigma = SLO_STD_US / SLO_MEAN_US
+    slo = random.lognormvariate(mu, sigma)
+    return max(SLO_MIN_US, int(slo))
+
+
+# Set to None to disable SLO output, or provide a custom callable.
+SLO_GENERATOR: Callable | None = _default_slo_generator
+
+
+# ── Stage 1 KV Reuse Config ───────────────────────────────────────────────────
+# Edit this to configure Stage 1 KV cache reuse metadata generation.
+# Set STAGE1_KV_REUSE_ENABLE = False to disable.
+
+STAGE1_KV_REUSE_ENABLE: bool = True
+STAGE1_KV_REUSE_HIT_RATIO: float = 0.5
+STAGE1_NUM_STORAGE_NODES: int = 1
 
 
 class TraceRecorder:
@@ -40,16 +74,49 @@ class TraceRecorder:
         replica_config,
         output_dir: str = ".",
         enabled: bool = True,
+        ttft_slo_us: int | None = None,
+        slo_generator: Callable | None = None,
+        stage1_kv_reuse_enable: bool | None = None,
+        stage1_kv_reuse_hit_ratio: float | None = None,
+        stage1_num_storage_nodes: int | None = None,
     ):
         """
         Args:
             replica_config: Vidur ReplicaConfig with model, parallelism, and PD settings.
             output_dir: Directory to write trace JSON.
             enabled: Set False to disable recording.
+            ttft_slo_us: Fixed TTFT SLO in microseconds for all requests.
+                Ignored when slo_generator is provided.
+            slo_generator: Callable(request) -> int that returns a per-request
+                TTFT SLO in microseconds. Overrides ttft_slo_us when provided.
+                Defaults to the module-level SLO_GENERATOR.
+            stage1_kv_reuse_enable: Enable Stage 1 KV cache reuse metadata.
+                Defaults to the module-level STAGE1_KV_REUSE_ENABLE.
+            stage1_kv_reuse_hit_ratio: Fraction of KV cache that is reusable (0~1).
+                Defaults to the module-level STAGE1_KV_REUSE_HIT_RATIO.
+            stage1_num_storage_nodes: Number of dedicated storage nodes.
+                Defaults to the module-level STAGE1_NUM_STORAGE_NODES.
         """
         self._config = replica_config
         self._output_dir = output_dir
         self._enabled = enabled
+        self._ttft_slo_us = ttft_slo_us
+        self._slo_generator = slo_generator if slo_generator is not None else SLO_GENERATOR
+
+        # Stage 1 KV reuse config (fall back to module-level defaults)
+        self._stage1_enable = (
+            stage1_kv_reuse_enable if stage1_kv_reuse_enable is not None
+            else STAGE1_KV_REUSE_ENABLE
+        )
+        self._stage1_hit_ratio = (
+            stage1_kv_reuse_hit_ratio if stage1_kv_reuse_hit_ratio is not None
+            else STAGE1_KV_REUSE_HIT_RATIO
+        )
+        self._stage1_num_storage = (
+            stage1_num_storage_nodes if stage1_num_storage_nodes is not None
+            else STAGE1_NUM_STORAGE_NODES
+        )
+        self._stage1_req_counter = 0  # for round-robin storage node assignment
 
         # Accumulated data
         self._requests: dict[str, dict] = {}
@@ -73,10 +140,22 @@ class TraceRecorder:
         """Record a request when it first arrives (call from global scheduler)."""
         if not self._enabled:
             return
-        self._requests[str(request.id)] = {
+        entry = {
             "num_prefill_tokens": request.num_prefill_tokens,
             "num_decode_tokens": request.num_decode_tokens,
         }
+
+        slo = self._slo_generator(request) if self._slo_generator else self._ttft_slo_us
+        if slo is not None:
+            entry["ttft_slo_us"] = int(slo)
+
+        # Stage 1 KV reuse: per-request storage node assignment
+        if self._stage1_enable and self._stage1_hit_ratio > 0 and self._stage1_num_storage > 0:
+            entry["kv_reuse_hit_ratio"] = self._stage1_hit_ratio
+            entry["kv_reuse_storage_node_idx"] = self._stage1_req_counter % self._stage1_num_storage
+            self._stage1_req_counter += 1
+
+        self._requests[str(request.id)] = entry
 
     def record_batch_stage(
         self,
@@ -294,4 +373,11 @@ class TraceRecorder:
             "requests": self._requests,
             "batches": self._batches,
         }
+
+        # Stage 1 KV reuse top-level config
+        if self._stage1_enable and self._stage1_num_storage > 0:
+            trace["stage1_kv_reuse"] = {
+                "num_storage_nodes": self._stage1_num_storage,
+            }
+
         return trace
