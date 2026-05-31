@@ -1,0 +1,28 @@
+{
+    "topology": "inputs/topologies/Cassini_Fig10_64g_l1-16_l2-14_l3-12_nv4_400Gbps_A100",
+    "output_dir": "outputs/cassini_experiment10",
+    "placement": "contention-spread",
+    "placement_clusters": 2,
+    "k_paths": 4,
+    "step_deg": 5,
+    "no_compat": false,
+    "workloads": [
+        {
+            "aicb": "inputs/aicb-workload/A100-gpt_13B_ws4_pp1-world_size4-tp4-pp1-ep1-gbs4-mbs4-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
+            "dp": 1,
+            "num_jobs": 1,
+            "num_iters": 1
+        }
+    ],
+    "modes": [
+        "default",
+        "cassini-default"
+    ],
+    "visualize": {
+        "modes": [
+            ""
+        ],
+        "detail_time_range": null,
+        "show_arrows": false
+    }
+}

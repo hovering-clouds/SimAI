@@ -185,9 +185,9 @@ def _build_job_pattern(
     # effects make it less representative of steady-state.
     windows = _build_iteration_windows(tasks, critical_path)
     task_window_starts = {
-        task_id: window.start_us
-        for window in windows
-        for task_id in window.task_ids
+        tid: w.start_us
+        for w in windows
+        for tid in w.task_ids
     }
     iteration_time_us = _estimate_iteration_time(windows, critical_path)
     if iteration_time_us <= 0:
@@ -215,7 +215,7 @@ def _add_task_to_pattern(
     iteration_time_us: int,
     num_angles: int,
     pattern: CommunicationPattern,
-    task_window_starts: dict[int, int] | None = None,
+    task_window_starts: dict[int, int],
 ) -> None:
     """Discretize a single flow task's bandwidth onto the pattern's links.
 
@@ -241,9 +241,7 @@ def _add_task_to_pattern(
         return
     links = _path_to_links(path)
 
-    window_start = 0
-    if task_window_starts is not None:
-        window_start = task_window_starts.get(task.task_id, 0)
+    window_start = task_window_starts.get(task.task_id, 0)
 
     cpm_start = timing.earliest_start_us - window_start
     cpm_finish = timing.earliest_finish_us
@@ -289,9 +287,12 @@ def _add_flow_to_link_buckets(
     and occupies all buckets.  Otherwise, the flow is folded into the
     iteration window via modulo and fills the buckets it overlaps.
     """
+    def _inc(a: int) -> None:
+        link_bw[a] = link_bw.get(a, 0.0) + bw
+
     if duration >= iteration_time_us:
         for a in range(num_angles):
-            link_bw[a] = link_bw.get(a, 0.0) + bw
+            _inc(a)
         return
 
     offset_start = task_start % iteration_time_us
@@ -305,13 +306,11 @@ def _add_flow_to_link_buckets(
 
     if end_angle > start_angle:
         for a in range(start_angle, end_angle):
-            link_bw[a] = link_bw.get(a, 0.0) + bw
+            _inc(a)
     elif end_angle == start_angle:
-        # Flow fits within a single angle bucket
-        link_bw[start_angle] = link_bw.get(start_angle, 0.0) + bw
+        _inc(start_angle)
     else:
-        # Wrap-around
         for a in range(start_angle, num_angles):
-            link_bw[a] = link_bw.get(a, 0.0) + bw
+            _inc(a)
         for a in range(0, end_angle):
-            link_bw[a] = link_bw.get(a, 0.0) + bw
+            _inc(a)

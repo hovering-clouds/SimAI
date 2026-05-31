@@ -18,6 +18,11 @@ from dataclasses import dataclass, field
 
 from .circle_abstraction import CircleAbstraction
 
+# Minimum compatibility improvement threshold.  If rotating a job improves the
+# score by less than this, the shift is discarded — the scheduling delay it
+# introduces always hurts makespan more than the contention it avoids.
+_MIN_COMPAT_IMPROVEMENT = 0.02
+
 
 @dataclass
 class CompatibilityResult:
@@ -100,9 +105,9 @@ def optimize_link_compatibility(
 ) -> CompatibilityResult:
     """Find near-optimal time-shifts for a group of jobs sharing a link.
 
-    When *fixed_shifts_deg* is None or empty all circles are optimised freely
-    (existing behaviour).  Otherwise the listed circles keep their pre-assigned
-    rotation while the remaining circles are grid-searched.
+    When *fixed_shifts_deg* is None or empty all circles are optimised freely.
+    Otherwise the listed circles keep their pre-assigned rotation while the
+    remaining circles are grid-searched.
 
     Args:
         circles: Mapping of circle_index → CircleAbstraction to optimise.
@@ -122,20 +127,15 @@ def optimize_link_compatibility(
     circle_list = [circles[i] for i in indices]
     n = len(circle_list)
 
-    # ── All-free path (original behaviour) ──
-    if not fixed_shifts_deg:
-        if n == 1:
-            return CompatibilityResult(score=1.0, time_shifts_us={indices[0]: 0})
-        if n == 2:
-            return _optimize_two(circle_list, indices, link_capacity, step_deg)
-        return _optimize_multi(circle_list, indices, link_capacity, step_deg)
+    # N=1 is always contention-free
+    if n == 1:
+        return CompatibilityResult(score=1.0, time_shifts_us={indices[0]: 0})
 
-    # ── Partial-fix path ──
-    unfixed = [i for i in range(n) if indices[i] not in fixed_shifts_deg]
+    fixed = fixed_shifts_deg or {}
 
-    if not unfixed:
-        # All fixed — evaluate only
-        shifts_deg = [fixed_shifts_deg[indices[i]] for i in range(n)]
+    # All fixed — evaluate only
+    if len(fixed) == n:
+        shifts_deg = [fixed[i] for i in indices]
         score = compute_score(circle_list, shifts_deg, link_capacity)
         return CompatibilityResult(
             score=score,
@@ -145,16 +145,18 @@ def optimize_link_compatibility(
             },
         )
 
-    if len(unfixed) == 1:
-        return _search_one_fixed(
-            circle_list, indices, unfixed[0], fixed_shifts_deg,
-            link_capacity, step_deg,
+    # 2 jobs, nothing pre-fixed → fix one at 0°, search the other
+    if n == 2 and not fixed_shifts_deg:
+        return _optimize_two(
+            circle_list, indices, link_capacity, step_deg,
+            {indices[0]: 0},
         )
 
-    return _search_multi_fixed(
-        circle_list, indices, unfixed, fixed_shifts_deg,
-        link_capacity, step_deg,
-    )
+    # General case: 1 unfixed → _optimize_two, 2+ → _optimize_multi
+    unfixed_count = n - len(fixed)
+    if unfixed_count == 1:
+        return _optimize_two(circle_list, indices, link_capacity, step_deg, fixed)
+    return _optimize_multi(circle_list, indices, link_capacity, step_deg, fixed_shifts_deg=fixed)
 
 
 def _optimize_two(
@@ -162,36 +164,49 @@ def _optimize_two(
     indices: list[int],
     link_capacity: float,
     step_deg: int,
+    fixed_shifts_deg: dict[int, int] | None = None,
 ) -> CompatibilityResult:
-    """Exhaustive grid search for exactly two jobs.
+    """1D grid search: one free circle, the rest fixed.
 
-    Fixes job 0 at 0° and searches the full rotation space of job 1.
+    When *fixed_shifts_deg* is None (the all-free 2-job case), fixes
+    circle at indices[0] at 0° and searches indices[1].
+    Otherwise searches the one dimension NOT in fixed_shifts_deg.
+
     When the best non-zero shift provides negligible improvement over no
     shift (compatibility delta < 0.02), prefers shift 0 — the delay cost
     of a useless shift always hurts makespan.
     """
+    n = len(circles)
     samples = _pre_sample(circles)
     angles = _search_angles(step_deg)
-    score_zero = compute_score(circles, [0, 0], link_capacity, samples=samples)
-    best_score = score_zero
-    best_s1 = 0
 
-    for s1 in angles:
-        score = compute_score(circles, [0, s1], link_capacity, samples=samples)
+    if fixed_shifts_deg is None:
+        fixed_shifts_deg = {}
+    free_pos = next(i for i in range(n) if indices[i] not in fixed_shifts_deg)
+
+    base = [fixed_shifts_deg.get(indices[i], 0) for i in range(n)]
+    score_zero = compute_score(circles, base, link_capacity, samples=samples)
+    best_score = score_zero
+    best_deg = 0
+
+    for s in angles:
+        candidate = list(base)
+        candidate[free_pos] = s
+        score = compute_score(circles, candidate, link_capacity, samples=samples)
         if score > best_score + 1e-9:
             best_score = score
-            best_s1 = s1
+            best_deg = s
 
-    # When the improvement is negligible the delay is pure waste.
-    if best_score - score_zero < 0.02:
-        best_s1 = 0
+    if best_score - score_zero < _MIN_COMPAT_IMPROVEMENT:
+        best_deg = 0
         best_score = score_zero
 
+    base[free_pos] = best_deg
     return CompatibilityResult(
         score=best_score,
         time_shifts_us={
-            indices[0]: 0,
-            indices[1]: _deg_to_us(best_s1, circles[1].perimeter),
+            indices[i]: _deg_to_us(base[i], circles[i].perimeter)
+            for i in range(n)
         },
     )
 
@@ -202,37 +217,47 @@ def _optimize_multi(
     link_capacity: float,
     step_deg: int,
     max_iter: int = 10,
+    fixed_shifts_deg: dict[int, int] | None = None,
 ) -> CompatibilityResult:
     """Iterative greedy optimisation for 3+ jobs.
 
     At each round, fix all shifts except one and grid-search the free
     axis.  Repeat until convergence or max_iter.
 
-    When the best non-zero shifts provide negligible improvement over all
-    zeros (compatibility delta < 0.02), resets to zero — the delay cost
-    of useless shifts always hurts makespan.
+    When *fixed_shifts_deg* is provided, only dimensions NOT in the dict
+    participate in the search; pre-assigned dimensions stay locked.
+
+    When the improvement over the no-shift baseline is negligible
+    (compatibility delta < 0.02), resets unfixed dimensions to 0 — the
+    delay cost of useless shifts always hurts makespan.
     """
     n = len(circles)
     samples = _pre_sample(circles)
     angles = _search_angles(step_deg)
-    score_zero = compute_score(circles, [0] * n, link_capacity, samples=samples)
-    best_shifts = [0] * n
+
+    if fixed_shifts_deg is None:
+        fixed_shifts_deg = {}
+    unfixed = [i for i in range(n) if indices[i] not in fixed_shifts_deg]
+
+    best_shifts = [fixed_shifts_deg.get(indices[i], 0) for i in range(n)]
+
+    # Baseline: keep fixed positions, set unfixed to 0
+    baseline = list(best_shifts)
+    for pos in unfixed:
+        baseline[pos] = 0
+    score_zero = compute_score(circles, baseline, link_capacity, samples=samples)
 
     for _ in range(max_iter):
         improved = False
-        for idx in range(n):
-            # Per-dimension local best — compare within this coordinate only.
-            # A global best_score would stall: once a high score is reached,
-            # no single-coordinate change can beat it even when a better
-            # value exists for that coordinate in the current context.
-            best_s = best_shifts[idx]
+        for pos in unfixed:
+            best_s = best_shifts[pos]
             best_local = compute_score(
                 circles, best_shifts, link_capacity, samples=samples,
             )
 
             for s in angles:
                 candidate = list(best_shifts)
-                candidate[idx] = s
+                candidate[pos] = s
                 score = compute_score(
                     circles, candidate, link_capacity, samples=samples
                 )
@@ -240,16 +265,17 @@ def _optimize_multi(
                     best_local = score
                     best_s = s
 
-            if best_s != best_shifts[idx]:
+            if best_s != best_shifts[pos]:
                 improved = True
-            best_shifts[idx] = best_s
+            best_shifts[pos] = best_s
 
         if not improved:
             break
 
     final_score = compute_score(circles, best_shifts, link_capacity, samples=samples)
-    if final_score - score_zero < 0.02:
-        best_shifts = [0] * n
+    if final_score - score_zero < _MIN_COMPAT_IMPROVEMENT:
+        for pos in unfixed:
+            best_shifts[pos] = 0
         final_score = score_zero
 
     return CompatibilityResult(
@@ -261,93 +287,8 @@ def _optimize_multi(
     )
 
 
-# ---------------------------------------------------------------------------
-# Partial-fix search helpers (one or more dimensions pre-locked)
-# ---------------------------------------------------------------------------
 
 
-def _search_one_fixed(
-    circle_list: list[CircleAbstraction],
-    indices: list[int],
-    free_pos: int,
-    fixed_shifts_deg: dict[int, int],
-    link_capacity: float,
-    step_deg: int,
-) -> CompatibilityResult:
-    """1D grid search: one free circle, the rest pre-fixed."""
-    n = len(circle_list)
-    samples = _pre_sample(circle_list)
-    angles = _search_angles(step_deg)
-
-    base = [fixed_shifts_deg.get(indices[i], 0) for i in range(n)]
-    best_score = -float("inf")
-    best_deg = 0
-
-    for s in angles:
-        candidate = list(base)
-        candidate[free_pos] = s
-        score = compute_score(circle_list, candidate, link_capacity, samples=samples)
-        if score > best_score:
-            best_score = score
-            best_deg = s
-
-    base[free_pos] = best_deg
-    return CompatibilityResult(
-        score=best_score,
-        time_shifts_us={
-            indices[i]: _deg_to_us(base[i], circle_list[i].perimeter)
-            for i in range(n)
-        },
-    )
 
 
-def _search_multi_fixed(
-    circle_list: list[CircleAbstraction],
-    indices: list[int],
-    unfixed: list[int],
-    fixed_shifts_deg: dict[int, int],
-    link_capacity: float,
-    step_deg: int,
-    max_iter: int = 10,
-) -> CompatibilityResult:
-    """Iterative greedy search with a subset of dimensions pre-locked.
 
-    Only *unfixed* positions participate in the grid search; pre-assigned
-    dimensions never change.
-    """
-    n = len(circle_list)
-    samples = _pre_sample(circle_list)
-    angles = _search_angles(step_deg)
-
-    best_shifts = [fixed_shifts_deg.get(indices[i], 0) for i in range(n)]
-
-    for _ in range(max_iter):
-        improved = False
-        for pos in unfixed:
-            best_s = best_shifts[pos]
-            best_local = compute_score(
-                circle_list, best_shifts, link_capacity, samples=samples,
-            )
-            for s in angles:
-                candidate = list(best_shifts)
-                candidate[pos] = s
-                score = compute_score(
-                    circle_list, candidate, link_capacity, samples=samples,
-                )
-                if score > best_local:
-                    best_local = score
-                    best_s = s
-            if best_s != best_shifts[pos]:
-                improved = True
-            best_shifts[pos] = best_s
-        if not improved:
-            break
-
-    final_score = compute_score(circle_list, best_shifts, link_capacity, samples=samples)
-    return CompatibilityResult(
-        score=final_score,
-        time_shifts_us={
-            indices[i]: _deg_to_us(best_shifts[i], circle_list[i].perimeter)
-            for i in range(n)
-        },
-    )

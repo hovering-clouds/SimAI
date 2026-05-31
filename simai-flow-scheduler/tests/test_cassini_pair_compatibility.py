@@ -1,7 +1,5 @@
 """Unit tests for src/cassini/pair_compatibility.py — score & optimise."""
 
-import pytest
-
 from src.cassini.circle_abstraction import CircleAbstraction
 from src.cassini.pair_compatibility import (
     CompatibilityResult,
@@ -169,9 +167,11 @@ class TestPartialFix:
             c, link_capacity=10.0, step_deg=15,
             fixed_shifts_deg={0: 0},
         )
-        # Fixing 0 at 0 should produce the same result as the all-free case
+        # Two identical spikes at 0° on a 10 Gbps link:
+        #   score_zero ≈ 0.997, best_score = 1.0 → diff ≈ 0.0028 < 0.02
+        # Threshold kicks in: shifting is not worth the delay.
         assert result.time_shifts_us[0] == 0
-        assert result.time_shifts_us[1] > 0  # should have optimised away from 0
+        assert result.time_shifts_us[1] == 0  # improvement below 0.02 threshold
 
     def test_all_fixed_just_evaluates(self):
         c0 = _spike(0, gbps=10.0)

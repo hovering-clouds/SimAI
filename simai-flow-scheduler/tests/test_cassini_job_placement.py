@@ -1,18 +1,10 @@
 """Tests for Cassini experiment GPU placement helpers."""
 
-import importlib.util
-from pathlib import Path
-
+from src.cassini.job_placement import (
+    contention_spread_gpus,
+)
 from src.workload_format.schema import ParallelismConfig
 from src.workload_generator.rank_grouper import RankGrouper
-
-
-def _load_runner():
-    path = Path(__file__).resolve().parents[1] / "scripts" / "run_cassini_experiments.py"
-    spec = importlib.util.spec_from_file_location("run_cassini_experiments", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _servers(nodes, gpus_per_server=4):
@@ -24,10 +16,9 @@ def _clusters(nodes, gpus_per_server=4, clusters=2, servers=6):
 
 
 def test_contention_spread_places_dp_replicas_across_clusters():
-    runner = _load_runner()
     cfg = {"tp": 2, "dp": 3, "pp": 2, "ep": 1}
 
-    assignments = runner._contention_spread_gpus(
+    assignments = contention_spread_gpus(
         [cfg, cfg],
         gpu_count=24,
         gpus_per_server=4,
@@ -47,9 +38,8 @@ def test_contention_spread_places_dp_replicas_across_clusters():
 
 
 def test_contention_spread_preserves_rank_grouper_order_for_dp_groups():
-    runner = _load_runner()
     cfg = {"tp": 2, "dp": 3, "pp": 2, "ep": 1}
-    nodes = runner._contention_spread_gpus(
+    nodes = contention_spread_gpus(
         [cfg],
         gpu_count=24,
         gpus_per_server=4,

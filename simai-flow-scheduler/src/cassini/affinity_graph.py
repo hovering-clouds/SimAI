@@ -23,7 +23,6 @@ The core constraint is that each job has exactly ONE global time-shift,
 shared across all links it traverses.
 """
 
-import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -352,24 +351,15 @@ def _build_link_circles(
             patterns.append(p)
             jid_order.append(jid)
 
-    if len(patterns) < 2:
-        circles: dict[int, CircleAbstraction] = {}
-        circle_to_job: dict[int, int] = {}
-        for i, jid in enumerate(jid_order):
-            p = graph.patterns.get(jid)
-            if p is not None and link_id in p.link_demands:
-                circles[i] = CircleAbstraction.from_pattern(p, link_id)
-                circle_to_job[i] = jid
-        return circles, circle_to_job
+    if len(patterns) >= 2:
+        unified = CircleAbstraction.build_unified(patterns, link_id)
+        if unified:
+            return (
+                {i: c for i, c in enumerate(unified)},
+                {i: jid_order[i] for i in range(len(jid_order))},
+            )
 
-    lcm_perimeter, unified = CircleAbstraction.build_unified(patterns, link_id)
-
-    if unified:
-        circles = {i: c for i, c in enumerate(unified)}
-        circle_to_job = {i: jid_order[i] for i in range(len(jid_order))}
-        return circles, circle_to_job
-
-    # Fallback: use raw per-job circles
+    # Build raw per-job circles (trivial case or LCM overflow fallback)
     circles = {}
     circle_to_job = {}
     for i, jid in enumerate(jid_order):

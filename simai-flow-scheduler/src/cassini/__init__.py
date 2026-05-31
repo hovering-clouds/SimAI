@@ -20,6 +20,7 @@ Phase 3 modules:
 from .circle_abstraction import CircleAbstraction
 from .communication_pattern import CommunicationPattern, extract_communication_patterns
 from .pair_compatibility import CompatibilityResult, optimize_link_compatibility, compute_score
+from .affinity_graph import AffinityGraph, build_affinity_graph, compute_cluster_time_shifts
 
 __all__ = [
     "CommunicationPattern",
@@ -32,18 +33,3 @@ __all__ = [
     "build_affinity_graph",
     "compute_cluster_time_shifts",
 ]
-
-
-def __getattr__(name: str):
-    """Lazy-load affinity_graph to avoid circular imports.
-
-    The affinity_graph module imports circle_abstraction, which imports
-    communication_pattern, which (transitively) depends on static_analysis
-    — which in turn imports cassini_strategy.  Deferring the import breaks
-    that cycle.
-    """
-    _AFFINITY_EXPORTS = {"AffinityGraph", "build_affinity_graph", "compute_cluster_time_shifts"}
-    if name in _AFFINITY_EXPORTS:
-        from . import affinity_graph as _ag
-        return getattr(_ag, name)
-    raise AttributeError(f"module 'src.cassini' has no attribute {name!r}")

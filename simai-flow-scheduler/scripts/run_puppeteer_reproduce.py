@@ -81,7 +81,7 @@ def run_tte_only(workload, topology, **_):
     # Compute BFS shortest paths + TTE
     route_table = BfsStrategy().compute_routes(workload, topology)
     plan = CppReferenceSerializer().serialize(workload)
-    tte_info, _ = compute_tte(workload, route_table, plan)
+    tte_info, _ = compute_tte(workload, route_table, topology, plan)
 
     policy = PuppeteerSchedulingPolicy(
         route_table=route_table,
@@ -186,10 +186,10 @@ def print_comparison(all_metrics):
 
 def main():
     # --- Configuration ---
-    aicb_file = "inputs/aicb-workload/gpt175b-a100.txt"
-    topo_file = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100"
+    aicb_file = "inputs/aicb-workload/A100-gpt_7B_ws4_pp1-world_size4-tp4-pp1-ep1-gbs2-mbs2-seq4096-MOE-False-GEMM-False-flash_attn-True.txt"
+    topo_file = "inputs/topologies/Cassini_Fig10_24g_l1-6_l2-4_l3-3_nv4_400Gbps_A100"
     output_dir = "outputs/puppeteer_reproduce"
-    dp = 2
+    dp = 3
     k_paths = 4
     # modes = ["default", "route-only", "tte-only", "route-tte", "full"]
     modes = ["default", "route-only", "tte-only", "route-tte"]
@@ -210,13 +210,15 @@ def main():
     tp = header.tp
     pp = header.pp
     ep = header.ep
-    total_gpus = header.all_gpus
+    required_gpus = tp * dp * pp * ep
+    print(f"  Run config: tp={tp}, dp={dp}, pp={pp}, ep={ep}, "
+          f"assigned_gpus={required_gpus}")
 
     job = Job(
         job_id=0,
         name="puppeteer-comparison",
         model="gpt175b",
-        assigned_nodes=list(range(total_gpus)),
+        assigned_nodes=list(range(required_gpus)),
         parallelism=ParallelismConfig(tp=tp, dp=dp, pp=pp, ep=ep),
     )
 
@@ -240,6 +242,11 @@ def main():
     topology = loader.load(topo_file)
     print(f"  Nodes: {topology.total_nodes} (GPUs: {topology.gpu_count}, "
           f"Switches: {topology.switch_count})")
+    if required_gpus > topology.gpu_count:
+        raise ValueError(
+            f"Workload requires {required_gpus} GPUs, but topology only has "
+            f"{topology.gpu_count}"
+        )
 
     # ---- Run each mode ----
     mode_map = {

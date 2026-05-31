@@ -1,6 +1,6 @@
-"""Tests for Cassini workload transformation (GA merge + multi-iteration replication)."""
+"""Tests for Cassini iteration expansion (GA merge + multi-iteration replication)."""
 
-from src.cassini.workload_transform import (
+from src.cassini.iteration_expansion import (
     merge_ga_to_one_iteration,
     replicate_with_cross_iteration_deps,
 )
@@ -27,23 +27,6 @@ def _compute(tid, iteration, node=0, deps=None):
         item_id=tid,
         node=node,
         duration_us=10,
-        deps=deps or [],
-    )
-
-
-def _flow(tid, iteration, src=0, dst=1, deps=None):
-    return Task(
-        task_id=tid,
-        job_id=0,
-        type=TaskType.FLOW,
-        iteration=iteration,
-        phase=Phase.FORWARD,
-        layer_id=max(iteration, 0),
-        item_id=tid,
-        src=src,
-        dst=dst,
-        size_bytes=100,
-        comm_type=CommType.TP_ALLREDUCE_RING,
         deps=deps or [],
     )
 

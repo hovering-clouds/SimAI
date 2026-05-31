@@ -1,5 +1,4 @@
 """Integration tests for CassiniPolicy and CassiniAnalyzer."""
-import pytest
 
 from src.executor.analytical import AnalyticalExecutor
 from src.executor.policies.cassini_policy import CassiniSchedulingPolicy
@@ -65,7 +64,6 @@ def _make_single_job_workload(job_id=0, num_iterations=1):
     tasks = []
     tid = 0
     for it in range(num_iterations):
-        prev_flow = None
         # compute on node 0
         c0 = Task(task_id=tid, job_id=job_id, type=TaskType.COMPUTE,
                   node=0, duration_us=100, iteration=it, phase=Phase.FORWARD,

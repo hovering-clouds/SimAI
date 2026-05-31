@@ -17,6 +17,7 @@ from ..passes.critical_path import CriticalPathInfo, analyze_critical_path
 from ..passes.routing import RouteTable, BfsStrategy
 from ..passes.task_serializer import CppReferenceSerializer, ExecutionPlan
 from ..passes.topology_loader import NetworkTopology
+from ...cassini.affinity_graph import build_affinity_graph, compute_cluster_time_shifts
 from ...cassini.communication_pattern import (
     CommunicationPattern,
     extract_communication_patterns,
@@ -104,15 +105,6 @@ class CassiniAnalyzer:
         """
         if len(patterns) < 2:
             return {jid: 0 for jid in patterns}
-
-        # Lazy import to break circular dependency:
-        #   cassini_strategy → cassini.affinity_graph → cassini.circle_abstraction
-        #   → cassini.communication_pattern → static_analysis.passes.critical_path
-        #   → static_analysis.strategies → cassini_strategy
-        from ...cassini.affinity_graph import (
-            build_affinity_graph,
-            compute_cluster_time_shifts,
-        )
 
         job_links = self._build_job_links(workload, route_table)
         link_capacities = self._build_link_capacities(job_links)

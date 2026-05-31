@@ -138,8 +138,7 @@ class TestBuildUnified:
     def test_single_job(self):
         p = _make_pattern(iteration_time_us=1000,
                           link_demands={(0, 1): {0: 10.0}})
-        lcm, unified = CircleAbstraction.build_unified([p], (0, 1))
-        assert lcm == 1000
+        unified = CircleAbstraction.build_unified([p], (0, 1))
         assert len(unified) == 1
         assert unified[0].perimeter == 1000
         assert unified[0].demand_at(0) == 10.0
@@ -149,8 +148,7 @@ class TestBuildUnified:
                            link_demands={(0, 1): {0: 5.0}})
         p2 = _make_pattern(job_id=1, iteration_time_us=3600,
                            link_demands={(0, 1): {90: 3.0}})
-        lcm, unified = CircleAbstraction.build_unified([p1, p2], (0, 1))
-        assert lcm == 3600
+        unified = CircleAbstraction.build_unified([p1, p2], (0, 1))
         assert len(unified) == 2
         assert unified[0].demand_at(0) == 5.0
         assert unified[1].demand_at(90) == 3.0
@@ -161,8 +159,7 @@ class TestBuildUnified:
                            link_demands={(0, 1): {0: 10.0}})
         p2 = _make_pattern(job_id=1, iteration_time_us=3600,
                            link_demands={(0, 1): {100: 5.0}})
-        lcm, unified = CircleAbstraction.build_unified([p1, p2], (0, 1))
-        assert lcm == 3600
+        unified = CircleAbstraction.build_unified([p1, p2], (0, 1))
         assert len(unified) == 2
         # p1 tiled 2×: r = 3600//1800 = 2, max-pool over 2 consecutive buckets
         # original p1 has demand at angle 0, tiled to angles 0 & 1
@@ -172,6 +169,5 @@ class TestBuildUnified:
 
     def test_no_job_uses_link_returns_empty(self):
         p = _make_pattern()
-        lcm, unified = CircleAbstraction.build_unified([p], (99, 100))
-        assert lcm == 0
+        unified = CircleAbstraction.build_unified([p], (99, 100))
         assert unified == []

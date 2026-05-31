@@ -1,4 +1,4 @@
-"""Workload transformation utilities for Cassini multi-iteration experiments.
+"""Iteration expansion utilities for Cassini multi-iteration experiments.
 
 Provides:
     - merge_ga_to_one_iteration: Consolidate multiple GA steps into one periodic
@@ -32,6 +32,40 @@ def task_nodes(task):
 def _copy_iter_bounds(copy_idx, stride):
     """Return inclusive iteration-label bounds for one replicated copy."""
     return copy_idx * stride - 1, copy_idx * stride + 1
+
+
+def _find_boundary_tasks(tasks, copy_ids, task_by_id):
+    """Find source (no predecessor) and sink (no successor) tasks per job+node.
+
+    Returns a dict: (job_id, node) → {"sources": set[task_id], "sinks": set[task_id]}.
+    """
+    successors = {tid: set() for tid in copy_ids}
+    for task in tasks:
+        for dep in task.deps:
+            if dep in copy_ids:
+                successors[dep].add(task.task_id)
+
+    boundary = {}
+    for task in tasks:
+        for node in task_nodes(task):
+            key = (task.job_id, node)
+            entry = boundary.setdefault(key, {"sources": set(), "sinks": set()})
+            has_node_pred = any(
+                dep in copy_ids
+                and node in task_nodes(task_by_id[dep])
+                and task_by_id[dep].job_id == task.job_id
+                for dep in task.deps
+            )
+            has_node_succ = any(
+                node in task_nodes(task_by_id[succ])
+                and task_by_id[succ].job_id == task.job_id
+                for succ in successors[task.task_id]
+            )
+            if not has_node_pred:
+                entry["sources"].add(task.task_id)
+            if not has_node_succ:
+                entry["sinks"].add(task.task_id)
+    return boundary
 
 
 def merge_ga_to_one_iteration(workload, ga):
@@ -106,40 +140,15 @@ def replicate_with_cross_iteration_deps(workload, num_iters):
         lo, hi = _copy_iter_bounds(copy_idx, stride)
         return [t for t in new_tasks if lo <= t.iteration <= hi]
 
-    def _boundary_by_job_node(copy_idx):
-        copy_tasks = _tasks_in_copy(copy_idx)
-        copy_ids = {t.task_id for t in copy_tasks}
-        successors = {tid: set() for tid in copy_ids}
-        for task in copy_tasks:
-            for dep in task.deps:
-                if dep in copy_ids:
-                    successors[dep].add(task.task_id)
-
-        boundary = {}
-        for task in copy_tasks:
-            for node in task_nodes(task):
-                key = (task.job_id, node)
-                entry = boundary.setdefault(key, {"sources": set(), "sinks": set()})
-                has_node_pred = any(
-                    dep in copy_ids
-                    and node in task_nodes(task_by_id[dep])
-                    and task_by_id[dep].job_id == task.job_id
-                    for dep in task.deps
-                )
-                has_node_succ = any(
-                    node in task_nodes(task_by_id[succ])
-                    and task_by_id[succ].job_id == task.job_id
-                    for succ in successors[task.task_id]
-                )
-                if not has_node_pred:
-                    entry["sources"].add(task.task_id)
-                if not has_node_succ:
-                    entry["sinks"].add(task.task_id)
-        return boundary
-
     for copy_idx in range(num_iters - 1):
-        current_boundary = _boundary_by_job_node(copy_idx)
-        next_boundary = _boundary_by_job_node(copy_idx + 1)
+        current_tasks = _tasks_in_copy(copy_idx)
+        next_tasks = _tasks_in_copy(copy_idx + 1)
+        current_boundary = _find_boundary_tasks(
+            current_tasks, {t.task_id for t in current_tasks}, task_by_id,
+        )
+        next_boundary = _find_boundary_tasks(
+            next_tasks, {t.task_id for t in next_tasks}, task_by_id,
+        )
 
         for key, next_entry in next_boundary.items():
             current_entry = current_boundary.get(key)
