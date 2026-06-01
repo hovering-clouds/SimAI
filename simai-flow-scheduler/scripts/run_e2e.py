@@ -25,9 +25,9 @@ from src.executor.policies.default_policy import DefaultSchedulingPolicy
 
 def main():
     # --- Paths ---
-    aicb_file = "inputs/aicb-workload/gpt175b-a100.txt"
+    aicb_file = "inputs/aicb-workload/A100-gpt_7B_ws1_pp1-world_size1-tp1-pp1-ep1-gbs1-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-True.txt"
     topo_file = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100"
-    output_dir = "outputs/e2e_gpt175b_dp2"
+    output_dir = "outputs/A100-gpt_7B_ws1_pp1-world_size1-tp1-pp1-ep1-gbs1-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-True.txt"
     os.makedirs(output_dir, exist_ok=True)
 
     # ============================================================

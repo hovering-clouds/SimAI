@@ -35,7 +35,7 @@ WORKLOAD_FILE = "workload_2p2d.json"
 RESULT_FILE = "mfs_execution_result_2p2d.json"
 
 # Visualization mode: "verbose" | "compact" | "detail"
-MODE = "verbose"
+MODE = "detail"
 
 # Show dependency arrows (compact mode only)
 SHOW_ARROWS = False
