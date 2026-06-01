@@ -18,7 +18,7 @@ Cassini 要解决的问题：在共享 GPU 集群中同时运行多个分布式�
 
 ### 2.1 `communication_pattern.py` — 通信模式提取（论文 Section 3.1）
 
-**核心用途**：给定一个 P2PWorkload，提取出一个作业的周期性通信模式？
+**核心用途**：给定一个 P2PWorkload，提取出一个作业的周期性通信模式。
 
 **关键数据结构**：
 
@@ -49,9 +49,8 @@ def extract_communication_patterns(
 **迭代时间估计** — `_estimate_iteration_time()`：
 
 ```
-- 按 iteration 字段分组 task（GA0, GA1, ... GAK, post）
-- 对每个 iteration 计算 span = max(timing.finish) - min(timing.start)
-- 排除 iteration=0（因为通信模式可能还不稳定），取中位数
+- 从 CPM timing 构建逻辑迭代窗口（pre/periodic/post）
+- 排除 iteration=0（因为通信模式可能还不稳定），取剩余窗口的中位数
 - 这直接决定了圆的周长
 ```
 
@@ -64,6 +63,7 @@ def extract_communication_patterns(
 2. 计算带宽 `bw = size_bytes * 8 / (duration_us * 1000)` (Gbps)
 3. 将时间映射到角度：`angle = (time % iteration_time) * 360 / iteration_time`
 4. 在覆盖的角度区间内累加带宽
+5. **链路速率修正**：对慢于 NVLink 的链路（如 200 Gbps ASW）延长传输时间、降低有效带宽
 
 - 如果 flow 时长 < 迭代周期，按覆盖的角度区间累加
 - 如果 flow 时长 >= 迭代周期（跨周期 flow），则填充全部 360°
@@ -87,9 +87,10 @@ class CircleAbstraction:
 
 ```python
 def rotate(self, shift_deg: int) -> "CircleAbstraction":
-    for a, bw in self.bw_demand.items():
-        rotated[(a + shift_deg) % 360] = bw
-    return CircleAbstraction(perimeter=self.perimeter, bw_demand=rotated)
+    return CircleAbstraction(
+        perimeter=self.perimeter,
+        bw_demand={(a + shift_deg) % 360: bw for a, bw in self.bw_demand.items()},
+    )
 ```
 
 顺时针旋转 `shift_deg` 度 = 将作业的迭代开始时间延迟 `shift_deg/360 * perimeter` 微秒。
@@ -101,9 +102,11 @@ def rotate(self, shift_deg: int) -> "CircleAbstraction":
 ```python
 @staticmethod
 def from_pattern(pattern: CommunicationPattern, link_id: tuple) -> CircleAbstraction:
-    raw_demands = pattern.link_demands.get(link_id, {})
-    full = {a: raw_demands.get(a, 0.0) for a in range(360)}
-    return CircleAbstraction(perimeter=pattern.iteration_time_us, bw_demand=full)
+    raw = pattern.link_demands.get(link_id, {})
+    return CircleAbstraction(
+        perimeter=pattern.iteration_time_us,
+        bw_demand={a: raw.get(a, 0.0) for a in range(360)},
+    )
 ```
 
 从全局的 `CommunicationPattern` 中抽出一条特定链路的圆。
@@ -115,14 +118,18 @@ def from_pattern(pattern: CommunicationPattern, link_id: tuple) -> CircleAbstrac
 这是处理**不同迭代时间**的作业的方法。如果 job A 迭代 100ms，job B 迭代 150ms，它们的圆周长不同，就不能直接在同一个圆上比较。
 
 处理策略：
-- **正常情况**（LCM ≤ 10秒）：计算 LCM 周长，将每个作业的 pattern 在统一圆上平铺 `r = LCM/T` 次，对每个角度取 max-pooling（不低估峰值需求）
-- **溢出情况**（LCM > 10秒）：用时间-比例映射，`angle_uni → time → angle_orig`
+- **正常情况**（LCM ≤ 50s）：计算 LCM 周长，将每个作业的 pattern 在统一圆上平铺 `r = LCM/T` 次，对每个角度取 max-pooling（不低估峰值需求）
+- **溢出情况**（LCM > 50s）：用时间-比例映射，`angle_uni → time → angle_orig`
 
 ```python
-r = lcm // c.perimeter           # job 的圆需要平铺 r 次
-a_start = (a_uni * r) % 360
-peak = max(c.demand_at((a_start + i) % 360) for i in range(r))
-tile_bw[a_uni] = peak            # max-pool 不低估峰值
+if overflowed:
+    t_us = a_uni * lcm // 360
+    a_orig = (t_us * 360 // c.perimeter) % 360
+    tile_bw[a_uni] = c.demand_at(a_orig)
+else:
+    r = lcm // c.perimeter
+    a_start = (a_uni * r) % 360
+    tile_bw[a_uni] = max(c.demand_at((a_start + i) % 360) for i in range(r))
 ```
 
 **论文对应**：Section 3.2 末尾 "unified circle via LCM perimeter"。
@@ -138,10 +145,9 @@ tile_bw[a_uni] = peak            # max-pool 不低估峰值
 ```python
 def compute_score(circles, shifts_deg, link_capacity):
     for α in range(360):
-        total_demand = Σ_j bw_j[(α - shift_j) % 360]  # 各圆在角度α的带宽
-        excess = max(0, total_demand - link_capacity)   # 超出容量的部分
+        total_demand = Σ_j bw_j[(α - shift_j) % 360]
+        excess = max(0, total_demand - link_capacity)
         total_excess += excess
-
     score = 1.0 - total_excess / (360 * link_capacity)
 ```
 
@@ -161,7 +167,7 @@ def compute_score(circles, shifts_deg, link_capacity):
 
 搜索角度由 `step_deg` 决定（默认 5° → 72 个候选角度）。
 
-论文 Fig 18 分析了精度 vs 开销，结论是 5° 是最佳折中。
+**关键设计**：0.02 阈值——如果旋转带来的 score 提升 < 0.02，则放弃该 shift（延迟对 makespan 的伤害 > 争用缓解的收益）。
 
 **论文对应**：Section 3.3 的 grid-search optimization 和 Section 5.7 的 discretization precision 分析。
 
@@ -188,12 +194,9 @@ class AffinityGraph:
 
 ```python
 def compute_cluster_time_shifts(graph, step_deg=5) -> dict[int, int]:
-    # 1. 连通分量分解
     components = _find_connected_components(graph)
-    # 2. 每个分量独立 BFS
     for comp_jobs in components:
         _bfs_traverse_component(graph, comp_jobs, fixed_shifts_us, step_deg)
-    # 3. 未涉及的 job → shift = 0
 ```
 
 **论文对应**：Algorithm 1 (BFS traversal of affinity graph)。
@@ -211,10 +214,9 @@ def compute_cluster_time_shifts(graph, step_deg=5) -> dict[int, int]:
 2. root 的 time_shift = 0（固定参考点）
 3. BFS 循环:
    a. 出队一个已固定的 job
-   b. 收集它的未访问争用链路（_collect_candidate_links）
-   c. 按争用权重 _link_contention_weight 排序（最高优先）
-   d. 对每条候选链路:
-      - 构建 all_jobs_on_link 中每个 job 的圆（_build_link_circles）
+   b. 收集它的未访问争用链路，按争用权重排序
+   c. 对每条候选链路:
+      - 构建所有 job 的圆
       - 将已固定的 job 的 shift 转为度数，传给 optimize_link_compatibility
       - 新作业被赋予优化后的 shift，入队
 ```
@@ -235,17 +237,15 @@ weight = n_jobs × avg_bandwidth_demand_on_link
 def _process_link(graph, link_id, all_jobs_on_link, fixed_on_link, unfixed_on_link, ...):
     circles, circle_to_job = _build_link_circles(graph, link_id, all_jobs_on_link)
     fixed_deg = {job→circle_idx: shift_us→deg for 已固定的job}
-    
     result = optimize_link_compatibility(circles, capacity, step_deg,
                                          fixed_shifts_deg=fixed_deg)
-    # 将优化结果记录到 fixed_shifts_us（只记录新作业）
 ```
 
 这里 `_build_link_circles()` 内部调用 `CircleAbstraction.build_unified()` 处理不同迭代时间的 LCM 统一。
 
 **论文对应**：Section 4.2 Step 3: "optimize compatibility on this link, fix new jobs, propagate to adjacent links"。
 
-**Acyclic BFS Tree** — 论文强调图可能包含环（一个作业经过多条链路，这些链路可能又连回已访问的作业）。代码通过 `visited_jobs` 和 `visited_links` 将 BFS 限制为一棵树：已访问的作业/链路直接跳过。
+**Acyclic BFS Tree** — 论文强调图可能包含环。代码通过 `visited_jobs` 和 `visited_links` 将 BFS 限制为一棵树。
 
 **论文对应**：Section 4.2 "acyclic BFS tree"。
 
@@ -255,7 +255,7 @@ def _process_link(graph, link_id, all_jobs_on_link, fixed_on_link, unfixed_on_li
 
 **文件**: `src/static_analysis/strategies/cassini_strategy.py`
 
-`CassiniAnalyzer` 是上述模块的编排器，将四个步骤串成一条管线：
+`CassiniAnalyzer` 是上述模块的编排器，将步骤串成一条管线：
 
 ```python
 def analyze(self, workload, route_table=None) -> CassiniAnalysisResult:
@@ -266,18 +266,16 @@ def analyze(self, workload, route_table=None) -> CassiniAnalysisResult:
     # Step 2: CPM 关键路径分析
     critical_path = analyze_critical_path(workload, route_table, self.topology)
 
-    # Step 3: 通信模式提取（→ communication_pattern.py）
-    patterns = extract_communication_patterns(workload, critical_path, route_table)
+    # Step 3: 通信模式提取
+    patterns = extract_communication_patterns(workload, critical_path, route_table, self.topology)
 
-    # Step 4: 亲和图遍历 → time_shifts（→ affinity_graph.py）
+    # Step 4: 亲和图遍历 → time_shifts
     time_shifts = self._compute_time_shifts(patterns, route_table, workload)
 
     # Step 5: C++ 参考计算序列化
     execution_plan = CppReferenceSerializer().serialize(workload)
 
-    return CassiniAnalysisResult(
-        route_table, critical_path, patterns, time_shifts, execution_plan,
-    )
+    return CassiniAnalysisResult(route_table, critical_path, patterns, time_shifts, execution_plan)
 ```
 
 **论文对应**：Algorithm 2 的完整 Cassini Module。
@@ -297,33 +295,15 @@ def emit_ready_tasks(self, current_time, ready_tasks):
     emitted = []
     for task in sorted(ready_tasks, key=lambda t: t.task_id):
         if not self._job_cleared(task.job_id, current_time):
-            continue                           # ← 时间偏移未到，阻塞
+            continue              # ← 时间偏移未到，阻塞
         if task.is_flow():
-            emitted.append(task.task_id)        # flow 直接放行
+            emitted.append(task.task_id)
         elif task.is_compute() and self._is_next_compute(task):
-            emitted.append(task.task_id)        # compute 按 per-node 串行
+            emitted.append(task.task_id)
     return emitted
 ```
 
-`_job_cleared()` 的实现：
-
-```python
-def _job_cleared(self, job_id, current_time):
-    if self._job_started.get(job_id, True):    # 已放行过 → 永久通过
-        return True
-    shift = self.time_shifts.get(job_id, 0)
-    if current_time >= shift:                  # 当前时间 ≥ 时间偏移
-        self._job_started[job_id] = True
-        return True
-    return False                               # 尚未到偏移时间 → 阻塞
-```
-
-**关键设计**：`_job_cleared` 是一个**一次性门控** — 作业被"清除"后（`current_time >= time_shift`），后续所有迭代自然按 DAG 依赖周期性执行，不需要重复施加偏移。这对应论文 Section 4.2 Step 3 的描述："Once shifted, the job's cross-iteration dependencies naturally maintain the alignment"。
-
-**其他方法**：
-- `get_flow_path(task)` → 委托给 `route_table.get_path()`
-- `allocate_bandwidth()` → 委托给 `self.allocator`（默认 FairShare，可外部传入 TteAware）
-- `on_task_completed()` → 推进 per-node 计算游标（与 DefaultPolicy 相同）
+`_job_cleared()` 是一个**一次性门控** — 作业被"清除"后（`current_time >= time_shift`），后续所有迭代自然按 DAG 依赖周期性执行，不需要重复施加偏移。
 
 **论文对应**：Section 4.2 "Applying time-shifts at runtime"。
 
@@ -346,7 +326,7 @@ Cassini 只需要基础规划器提供两样东西：
 1. **路由表** (`RouteTable`) — 每个 flow task 走哪些链路
 2. **带宽分配器** (`BandwidthAllocator`) — 决定运行时每条 flow 分多少带宽
 
-无论是 Default（BFS + FairShare）还是 Puppeteer（Greedy + TTE），Cassini 的时间偏移逻辑都是正交的 — 它在作业级别添加启动延迟，不改动作业内部的 DAG 或带宽分配。
+无论是 Default（BFS + FairShare）还是 Puppeteer（Greedy + TTE），Cassini 的时间偏移逻辑都是正交的。
 
 ### 5.3 可插拔实现
 
@@ -362,19 +342,17 @@ Cassini 只需要基础规划器提供两样东西：
 
 ---
 
-## 6. 实验设计（简要）
-
-> 实验尚未运行，此处仅描述设计方案，待后续补充数据。
+## 6. 实验设计
 
 ### 6.1 实验脚本
 
-**文件**: `scripts/run_cassini_experiments.py`
+**文件**: `scripts/run_cassini_e2e.py`
 
 四种配置的 end-to-end 对比：
-- `default` — BFS + FairShare（Themis 基线）
-- `puppeteer` — Greedy + TTE-weighted（Pollux 基线）
-- `cassini-default` — Cassini on BFS + FairShare（**Th+Cassini**）
-- `cassini-puppeteer` — Cassini on Greedy + TTE-weighted（**Po+Cassini**）
+- `default` — BFS + FairShare（基线）
+- `puppeteer` — Greedy + TTE-weighted
+- `cassini-default` — Cassini on BFS + FairShare
+- `cassini-puppeteer` — Cassini on Greedy + TTE-weighted
 
 ### 6.2 实验维度
 
@@ -388,20 +366,31 @@ Cassini 只需要基础规划器提供两样东西：
 ### 6.3 命令行示例
 
 ```bash
-# 双作业完整对比
-python scripts/run_cassini_experiments.py --num-jobs 2
+# 双作业完整对比（所有 4 种模式）
+python scripts/run_cassini_e2e.py --num-jobs 2
 
-# 仅对比 Themis vs Th+Cassini
-python scripts/run_cassini_experiments.py --num-jobs 2 --modes default cassini-default
+# 仅对比 default vs cassini-default
+python scripts/run_cassini_e2e.py --num-jobs 2 --modes default cassini-default
 
-# 混合模型（多 AICB 文件）
-python scripts/run_cassini_experiments.py --multi-aicb gpt.txt bert.txt
+# 多 AICB 文件，每个文件是独立 workload entry
+python scripts/run_cassini_e2e.py --aicb gpt.txt bert.txt --dp 2
+
+# 使用 contention-spread placement 强制跨集群争用
+python scripts/run_cassini_e2e.py --placement contention-spread --placement-clusters 2
+
+# 使用 JSON 配置文件
+python scripts/run_cassini_e2e.py --config experiments.json
+
+# GPU placement 配置
+#   contiguous（默认）— 每个 job 连续 GPU 范围，最小化跨服务器争用
+#   contention-spread — 将 DP replica 分散到不同集群，强制跨 fabric 争用
 ```
 
 ### 6.4 输出说明
 
-- `outputs/cassini_experiments/result_{mode}.json` — 每种模式的完整 `ExecutionResult`（per-task timing）
-- `outputs/cassini_experiments/comparison.json` — 汇总对比报告
+- `outputs/cassini_experiments/result_{mode}.json` — 每种模式的完整 `ExecutionResult`
+- `outputs/cassini_experiments/comparison.json` — 原始 metrics 的 JSON 报告
+- `outputs/cassini_experiments/comparison.txt` — 格式化对比表 + per-job 时间 + 加速比
 - 终端输出：对比表格、per-job iteration time、speedup、flow time tail ratio
 
 ---
@@ -414,7 +403,11 @@ python scripts/run_cassini_experiments.py --multi-aicb gpt.txt bert.txt
 | `src/cassini/circle_abstraction.py` | 几何圆：旋转、LCM 统一、平铺 | Section 3.2 |
 | `src/cassini/pair_compatibility.py` | 两两兼容性：兼容性分数、网格搜索 | Section 3.3, Table 1 |
 | `src/cassini/affinity_graph.py` | 亲和图：二分图 BFS、全局时间偏移求解 | Section 4.1-4.3, Algorithm 1 |
+| `src/cassini/iteration_expansion.py` | GA 合并 + 多迭代复制 + 跨迭代 dep | —（实验工具） |
+| `src/cassini/task_serializer_patch.py` | 跨迭代 DAG 执行序补丁 | —（兼容性） |
+| `src/cassini/job_placement.py` | GPU placement 策略 | —（实验工具） |
+| `src/cassini/diagnostics.py` | 指标提取 + 格式化报告 + 可视化保存 | —（实验工具） |
 | `src/static_analysis/strategies/cassini_strategy.py` | 编排器：串起路由→CPM→模式→时间偏移 | Algorithm 2 |
 | `src/executor/policies/cassini_policy.py` | 运行时：time_shift 门控执行 | Section 4.2 |
-| `scripts/run_cassini_experiments.py` | 实验脚本：四种配置对比 | — |
-| `tests/test_cassini_policy.py` | 12 个单元/集成测试 | — |
+| `scripts/run_cassini_e2e.py` | 实验脚本：四种配置对比 | — |
+| `tests/test_cassini_*.py` | 82 个单元/集成测试（全部通过） | — |

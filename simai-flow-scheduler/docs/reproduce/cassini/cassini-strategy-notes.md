@@ -66,10 +66,12 @@ Cassini 不以单个 flow 为控制粒度，而是以 **iteration time-shift** �
 
 从 `P2PWorkload` 出发：
 
-1. 按 `iteration` 字段对 task 分组
-2. 利用 `CriticalPathInfo` 获得每个 task 的 `earliest_start_us` 和 `earliest_finish_us`
-3. 对每个 flow task，通过 `RouteTable.get_path()` 获知它经过哪些链路
-4. 汇总成每个作业在每条链路上的带宽需求时间序列
+1. 按 `job_id` 分组 task
+2. 从 CPM timing 构建逻辑迭代窗口（pre/periodic/post）
+3. 利用 `CriticalPathInfo` 获得每个 task 的 `earliest_start_us` 和 `earliest_finish_us`
+4. 对每个 flow task，通过 `RouteTable.get_path()` 获知它经过哪些链路
+5. **链路速率修正**：对慢于 NVLink 的链路（如 200 Gbps ASW），延长传输时间、降低有效带宽
+6. 离散化到 360 个角度桶，汇总成每个作业在每条链路上的带宽需求
 
 ### 3.3 输出数据
 
@@ -77,7 +79,7 @@ Cassini 不以单个 flow 为控制粒度，而是以 **iteration time-shift** �
 CommunicationPattern:
   job_id: int
   iteration_time_us: int
-  link_demands: dict[link_id, list[(start_us, end_us, bw_gbps)]]
+  link_demands: dict[link_id, dict[angle, bw_gbps]]
 ```
 
 ---
@@ -89,7 +91,7 @@ CommunicationPattern:
 "把时间卷成一个圆"：
 
 - 圆的**周长** = job 的 iteration time
-- 每个角度 α 对应一个时刻 t = α / 2π × perimeter
+- 每个角度 α 对应一个时刻 t = α / 360 × perimeter
 - 角度 α 上的**带宽需求** = 该时刻作业在此链路上通信所需的带宽
 - Up 阶段 → 高带宽需求的弧段
 - Down 阶段 → 低/零带宽需求的弧段
@@ -101,10 +103,6 @@ CircleAbstraction:
   perimeter: int                # = iteration_time_us
   bw_demand: dict[int, float]  # 角度 α (0-359) → 带宽需求 (Gbps)
 ```
-
-`bw_demand[α]` 的取值方式：将时间轴离散化成 360 等份（或更细粒度），
-每个角度对应的时间 `t = α / 360 × perimeter`，取该时刻所有活跃 flow
-在该链路上的带宽需求之和。
 
 ### 4.3 旋转变换
 
@@ -134,14 +132,18 @@ bw_demand_after_shift[α] = bw_demand[(α - ∆) mod 360]
    - 60ms 的 job 出现 2 次
 4. 在统一圆上叠加所有 job 的带宽需求
 
+LCM 溢出处理：当 LCM > 50s（`_MAX_UNIFIED_PERIMETER_US`）时，降级到 time-proportional mapping——每个 unified 角度桶精确映射到原始时间位置。
+
 ### 5.3 接口
 
 ```python
-def build_unified_circle(
+@staticmethod
+def build_unified(
     patterns: list[CommunicationPattern],
-    link_capacity: float,
-) -> tuple[int, list[CircleAbstraction]]:
-    """返回 (lcm_perimeter, 每个job在统一圆上的表示)"""
+    link_id: tuple[int, int],
+    max_perimeter: int = 50_000_000,
+) -> list[CircleAbstraction]:
+    """返回统一后的 CircleAbstraction 列表（每个 job 一个）。"""
 ```
 
 ---
@@ -156,34 +158,28 @@ def build_unified_circle(
 ### 6.2 兼容性得分定义
 
 ```
-demand_sum(α) = job1.unified_circle.demand_at(α - ∆1) 
-                + job2.unified_circle.demand_at(α - ∆2)
-
+demand_sum(α) = Σ_j job_j.unified_circle.demand_at(α - ∆_j)
 Excess(α) = max(0, demand_sum(α) - link_capacity)
-
-score = 1 - (Σ_α Excess(α)) / (num_angles × link_capacity)
+score = 1 - (Σ_α Excess(α)) / (360 × link_capacity)
 ```
 
 - score = 1：完全兼容（零争用）
 - score = 0：平均争用刚好占满链路容量
 - score < 0：高度不兼容
 
-### 6.3 优化问题
+### 6.3 搜索策略
 
-| 成分 | 内容 |
-|------|------|
-| **输入** | 共享同一条链路的一组 job 的 unified circles |
-| **变量** | 每个 job 的旋转角 ∆_j |
-| **约束** | 0 ≤ ∆_j < 360 / r_j（r_j = 该job在统一圆上的重复次数） |
-| **目标** | 最大化 compatibility score |
+| 场景 | 方法 | 复杂度 |
+|------|------|--------|
+| 2 个 job，全自由 | 固定 job 0 在 0°，网格搜索 job 1（72 个点 @ step=5°） | O(72) |
+| 3+ 个 job，全自由 | 迭代贪婪：每轮逐个坐标搜索，收敛或 10 轮停止 | O(iter × n × 72) |
+| 部分固定 | 锁定固定维度，仅搜索自由维度 | 同前 |
+
+**0.02 阈值**：如果旋转带来的 score 提升 < 0.02，放弃该 shift。
 
 ### 6.4 实现方法
 
-**方法一：网格搜索**。对于小规模（2-3 个 job），可以枚举所有可能的 time-shift
-组合（步长 1° 或 5°），计算每种组合的 score，取最优。
-
-**方法二：对 q 个 jobs，固定 q-1 个，优化第 q 个**。Cassini 论文中描述的方法，
-通过图遍历逐步固定 time-shift。
+**Pre-sampling**：搜索前先采样所有 circle 的 360 个角度值，搜索过程中直接查表。
 
 ---
 
@@ -203,26 +199,24 @@ Cassini 构建一个**二分图**：
 
 ### 7.3 图遍历算法
 
-1. 对每条 link，收集经过它的所有 job
-2. 按 link 的争用严重程度排序（经过的 job 数越多、总带宽需求越大，优先级越高）
-3. 从最争用的 link 开始：
-   a. 对此 link 上的所有 job 求解联合兼容性优化
-   b. 固定这些 job 的 time-shift
-   c. 将已固定的 time-shift 传播到相邻 link（同个 job 在所有 link 上共用同一个 time-shift）
-4. 重复直到所有 job 的 time-shift 都被确定
+```
+1. 连通分量分解
+2. 对每个分量：
+   a. 选根：通信总需求最大的 job，shift = 0
+   b. BFS 遍历：
+      - 从当前 job 出发，收集未访问的争用链路
+      - 按争用权重排序（n_jobs × avg_demand）
+      - 对每条链路：已固定的 job 参与 fixed_shifts_deg，
+        未固定的调用 optimize_link_compatibility 优化
+      - 新固定的 job 入队
+3. 从不出现争用链路的 job → shift = 0
+```
 
 ### 7.4 实现要点
 
-每个 job 在所有链路上只有**一个**全局 time-shift（不是每条链路一个）。
-这是约束也是简化：它保证了调度的一致性，但可能无法在所有链路上同时达到最优。
-
-```python
-def compute_cluster_time_shifts(
-    patterns: dict[int, CommunicationPattern],  # job_id → pattern
-    job_links: dict[int, set[tuple[int, int]]], # job_id → set of link_ids
-    topology: NetworkTopology,
-) -> dict[int, int]:  # job_id → time-shift (微秒)
-```
+- 每个 job 在所有链路上只有**一个**全局 time-shift
+- BFS 通过 `visited_jobs` / `visited_links` 防止回环（等效于论文的 acyclic tree）
+- 争用权重 = `n_jobs × avg_demand_on_link`
 
 ---
 
@@ -230,28 +224,17 @@ def compute_cluster_time_shifts(
 
 ### 8.1 集成方式
 
-Cassini 论文将其设计为**可插拔模块**（约 1000 行代码），将 time-shift 值输出给
-现有的调度器（Themis、Pollux），不改变调度器的核心逻辑。
+Cassini 在 `simai-flow-scheduler` 中作为 `SchedulingPolicy` 的实现：
 
-在 `simai-flow-scheduler` 中，Cassini 作为 `SchedulingPolicy` 的实现：
-
-1. **分析阶段**（`CassiniStrategy`）：从多 job workload 中提取通信模式，
-   计算每个 job 的 time-shift
-2. **执行阶段**（`CassiniPolicy`）：在 executor 运行时，按 time-shift 偏移每个
-   job 的 iteration 起始时间
+1. **分析阶段**（`CassiniStrategy`）：从多 job workload 中提取通信模式，计算 time-shift
+2. **执行阶段**（`CassiniPolicy`）：在 executor 运行时，按 time-shift 偏移启动时间
 
 ### 8.2 Time-shift 的执行方式
 
-在 `emit_ready_tasks()` 中：
-
-- 维护每个 job 的 iteration 计数器 + 当前 iteration 的预期开始时间
-- 如果当前时间 < 该 job 的下一个预期开始时间（含 time-shift），
-  则不释放该 job 下一轮 iteration 的 task
-- 一旦到达预期时间，释放该 job 下一轮所有 ready task
+One-shot gate 机制：每个 job 有一个 `_job_started` 标记。初始为 False，所有 task 被阻塞。
+当 `current_time >= time_shift[job_id]` 时标记变为 True，之后该 job 的所有 task 不再受门控。
 
 ### 8.3 与 Puppeteer 的协同
-
-Cassini 和 Puppeteer 解决不同层次的问题：
 
 | 维度 | Puppeteer | Cassini |
 |------|-----------|---------|
@@ -260,8 +243,8 @@ Cassini 和 Puppeteer 解决不同层次的问题：
 | 解决的问题 | 关键路径上的通信瓶颈 | 多作业共存时的链路争用 |
 | 实现位置 | `static_analysis/` + `policies/` | `cassini/` 新模块 |
 
-两者可以结合：先由 Cassini 决定 time-shift，再由 Puppeteer 做单作业内的
-细粒度调度。
+可以结合为 `cassini-puppeteer` 模式：先由 Cassini 决定 time-shift，再用 Puppeteer 的
+Greedy 路由 + TTE 带宽分配做细粒度调度。
 
 ---
 
@@ -273,19 +256,15 @@ Cassini 和 Puppeteer 解决不同层次的问题：
 2. **几何圆抽象 + 旋转** — 将时间映射到圆上，支持 time-shift
 3. **成对兼容性优化** — 找到最优 time-shift 使争用最小
 
-没有这三点，就无法体现 Cassini 的方法论。
-
 ### 第二层：强烈建议有
 
 4. **统一圆 (LCM)** — 支持不同 iteration time 的 job
 5. **亲和图 + 图遍历** — 扩展到多 job 多 link 的集群级别
 
-这一层决定了方案能否真正解决多作业场景的问题。
-
 ### 第三层：更像论文，但成本更高
 
-6. **与现有调度器的可插拔集成** — 不影响现有 DefaultPolicy 和 PuppeteerPolicy
-7. **大规模集群的近似求解优化** — 当 job 数量较大时，网格搜索不再可行
+6. **与现有调度器的可插拔集成** — 4 种组合模式验证了正交性
+7. **大规模集群的近似求解优化** — 迭代贪婪搜索
 
 ---
 
@@ -306,10 +285,9 @@ Time-shift 只是推迟整轮 iteration 的起始时间，不改变作业内部�
 同一 job 在不同链路上的 time-shift 必须相同。这是图遍历传播时的硬约束，
 也意味着优化可能无法在所有链路上同时达到局部最优。
 
-### 10.4 与同通信压缩/并行策略正交
+### 10.4 与通信压缩/并行策略正交
 
 Cassini 不影响 TP size、PP size、gradient accumulation steps 等训练超参数的选择。
-它是在这些参数已经确定的基础上，优化多作业共存时的网络争用。
 
 ---
 
@@ -326,22 +304,32 @@ Cassini 不影响 TP size、PP size、gradient accumulation steps 等训练超�
 | `workload_generator/job_merger.py` | 合并多 job workload |
 | `executor/policies/base_policy.py` | `SchedulingPolicy` 接口 |
 | `executor/analytical.py` | 离散事件模拟器 |
-| `executor/bandwidth_allocators/fair_share_allocator.py` | 带宽分配（Cassini 不替代此项） |
+| `executor/bandwidth_allocators/` | 带宽分配（Cassini 不替代此项） |
 
-### 11.2 新建模块的定位
+### 11.2 实际模块结构
 
 ```
-src/cassini/                       ← Cassini 核心算法
-├── communication_pattern.py       ← 通信模式提取
-├── circle_abstraction.py          ← 几何圆抽象 + 统一圆 (LCM)
-├── pair_compatibility.py          ← 成对兼容性优化
-└── affinity_graph.py              ← 二分亲和图 + 图遍历
+src/cassini/
+├── communication_pattern.py       ← 通信模式提取 (§3.1)
+├── circle_abstraction.py          ← 几何圆抽象 + 统一圆 (§3.2)
+├── pair_compatibility.py          ← 成对兼容性优化 (§3.3)
+├── affinity_graph.py              ← 二分亲和图 + 图遍历 (§4.1-4.3)
+├── iteration_expansion.py         ← GA 合并 + 多迭代复制（实验工具）
+├── task_serializer_patch.py       ← 跨迭代 DAG 执行序补丁（兼容性）
+├── job_placement.py               ← GPU placement 策略（实验工具）
+├── diagnostics.py                 ← 指标提取 + 报告 + 可视化（实验工具）
 
 src/executor/policies/
 └── cassini_policy.py              ← Cassini 调度策略
 
 src/static_analysis/strategies/
 └── cassini_strategy.py            ← Cassini 分析管线
+```
+
+### 11.3 测试覆盖
+
+```
+tests/test_cassini_*.py  →  82 个用例，全部通过
 ```
 
 ---

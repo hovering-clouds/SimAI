@@ -8,15 +8,17 @@
     "no_compat": false,
     "workloads": [
         {
-            "aicb": "inputs/aicb-workload/A100-gpt_13B_ws4_pp1-world_size4-tp4-pp1-ep1-gbs4-mbs4-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
-            "dp": 1,
-            "num_jobs": 1,
+            "aicb": "inputs/aicb-workload/A100-gpt_7B_ws2_pp1-world_size2-tp2-pp1-ep1-gbs1-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
+            "dp": 2,
+            "num_jobs": 2,
             "num_iters": 1
         }
     ],
     "modes": [
         "default",
-        "cassini-default"
+        "puppeteer",
+        "cassini-default",
+        "cassini-puppeteer"
     ],
     "visualize": {
         "modes": [
