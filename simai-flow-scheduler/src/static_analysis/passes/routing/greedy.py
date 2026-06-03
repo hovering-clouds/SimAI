@@ -105,29 +105,116 @@ class GreedyStrategy(RouteStrategy):
         return route_table
 
 
+def _bfs_shortest_path(
+    topology: NetworkTopology,
+    src: int,
+    dst: int,
+    blocked_nodes: set[int] | None = None,
+    blocked_edges: set[tuple[int, int]] | None = None,
+) -> list[int] | None:
+    """BFS shortest path avoiding blocked nodes/edges.
+
+    Uses a visited set (efficient). Returns None if no path exists.
+    """
+    if src == dst:
+        return [src]
+
+    blocked_nodes = blocked_nodes or set()
+    blocked_edges = blocked_edges or set()
+
+    visited: set[int] = blocked_nodes.copy()
+    queue: deque[tuple[int, list[int]]] = deque([(src, [src])])
+
+    while queue:
+        current, path = queue.popleft()
+        for neighbor, _ in topology.get_neighbors(current):
+            if neighbor in visited:
+                continue
+            if (current, neighbor) in blocked_edges:
+                continue
+            new_path = path + [neighbor]
+            if neighbor == dst:
+                return new_path
+            visited.add(neighbor)
+            queue.append((neighbor, new_path))
+
+    return None
+
+
 def k_shortest_paths(
     topology: NetworkTopology,
     src: int,
     dst: int,
     k: int = 4,
 ) -> list[list[int]]:
-    """Find up to k simple shortest paths using BFS."""
+    """Find up to k shortest simple paths using Yen's algorithm.
+
+    Yen's algorithm iteratively finds k shortest loopless paths by
+    deviating from previously found paths at each node. Unlike the old
+    naive BFS (which enumerated ALL simple paths and never terminated
+    when fewer than k paths existed), this algorithm:
+      - Uses a visited set for efficient shortest-path queries
+      - Terminates gracefully when fewer than k paths exist
+      - Runs in O(k * V * (V+E)) time
+
+    Args:
+        topology: Network topology
+        src: Source node
+        dst: Destination node
+        k: Maximum number of paths to find
+
+    Returns:
+        List of up to k paths, sorted by length (shortest first)
+    """
     if src == dst:
         return [[src]]
 
-    candidates: list[list[int]] = []
-    queue: deque[tuple[int, list[int]]] = deque([(src, [src])])
+    import heapq
 
-    while queue and len(candidates) < k:
-        current, path = queue.popleft()
-        for neighbor, _ in topology.get_neighbors(current):
-            if neighbor in path:
-                continue
-            new_path = path + [neighbor]
-            if neighbor == dst:
-                candidates.append(new_path)
-            else:
-                queue.append((neighbor, new_path))
+    # --- Step 1: first shortest path ---
+    first = _bfs_shortest_path(topology, src, dst)
+    if first is None:
+        return []
 
-    candidates.sort(key=lambda p: (len(p), p))
-    return candidates[:k]
+    A: list[list[int]] = [first]  # finalised shortest paths
+    B: dict[tuple[int, ...], list[int]] = {}  # candidates: path_tuple -> path
+
+    for _ in range(1, k):
+        prev = A[-1]
+
+        for spur_idx in range(len(prev) - 1):
+            root_path = prev[: spur_idx + 1]
+            spur_node = prev[spur_idx]
+
+            # Block nodes in the root path (except spur_node itself)
+            # to prevent revisiting them in the spur path.
+            blocked_nodes = set(root_path[:-1])
+
+            # Block edges from spur_node that would recreate a path
+            # already in A that shares this root prefix.
+            blocked_edges: set[tuple[int, int]] = set()
+            for ap in A:
+                if len(ap) > spur_idx and ap[: spur_idx + 1] == root_path:
+                    blocked_edges.add((spur_node, ap[spur_idx + 1]))
+
+            spur = _bfs_shortest_path(
+                topology, spur_node, dst,
+                blocked_nodes=blocked_nodes,
+                blocked_edges=blocked_edges,
+            )
+            if spur is not None:
+                # Combine root_path and spur_path (avoiding duplicate spur_node)
+                total = root_path[:-1] + spur
+                key = tuple(total)
+                # Only add if not already in A or B
+                if key not in B and not any(tuple(ap) == key for ap in A):
+                    B[key] = total
+
+        if not B:
+            break
+
+        # Pick the shortest path from candidates
+        best_key = min(B.keys(), key=lambda t: (len(t), t))
+        A.append(B.pop(best_key))
+
+    return A
