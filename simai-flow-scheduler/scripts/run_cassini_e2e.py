@@ -21,6 +21,7 @@ JSON config schema (all fields optional, CLI args override config values):
     "gpus_per_server": 8,
     "k_paths":        4,
     "step_deg":       5,
+    "puppeteer_bw_change_threshold_pct": 5.0,
     "no_compat":      false,
     "workloads": [
       {"aicb": "path/to/file.txt", "dp": 2, "num_jobs": 2, "num_iters": 5}
@@ -77,6 +78,7 @@ from src.static_analysis.passes.topology_loader import NodeType, TopologyLoader
 from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
 from src.static_analysis.strategies.puppeteer_strategy import PuppeteerAnalyzer
 from src.static_analysis.strategies.cassini_strategy import CassiniAnalyzer
+import src.executor.analytical as analytical_executor
 from src.executor.analytical import AnalyticalExecutor
 from src.executor.policies.default_policy import DefaultSchedulingPolicy
 from src.executor.policies.puppeteer_policy import PuppeteerSchedulingPolicy
@@ -93,6 +95,7 @@ DEFAULT_AICB = (
 )
 DEFAULT_TOPO = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100"
 DEFAULT_OUTPUT = "outputs/cassini_experiments"
+PUPPETEER_MODES = {"puppeteer", "cassini-puppeteer"}
 
 # ---------------------------------------------------------------------------
 # Run functions — one per configuration
@@ -150,6 +153,13 @@ MODE_MAP = {
     "cassini-default": run_cassini_default,
     "cassini-puppeteer": run_cassini_puppeteer,
 }
+
+
+def apply_executor_tuning(mode: str, puppeteer_bw_change_threshold_pct: float) -> None:
+    """Reduce completion-event churn for TTE-weighted Puppeteer modes."""
+    threshold = puppeteer_bw_change_threshold_pct if mode in PUPPETEER_MODES else 0.0
+    analytical_executor.BW_CHANGE_THRESHOLD_PCT = threshold
+    print(f"  Executor BW change threshold: {threshold:.2f}%")
 
 # ---------------------------------------------------------------------------
 # Workload construction
@@ -306,6 +316,8 @@ Examples:
     # --- Tuning knobs ---
     parser.add_argument("--k-paths", type=int, default=None)
     parser.add_argument("--step-deg", type=int, default=None)
+    parser.add_argument("--puppeteer-bw-change-threshold-pct", type=float, default=None,
+                        help="BW change threshold for Puppeteer modes; reduces TTE event churn")
     parser.add_argument("--no-compat", action="store_true", default=None,
                         help="Skip pairwise compatibility analysis")
 
@@ -330,6 +342,7 @@ Examples:
         "gpus_per_server": None,
         "k_paths": 4,
         "step_deg": 5,
+        "puppeteer_bw_change_threshold_pct": 5.0,
         "no_compat": False,
         "workloads": [
             {"aicb": DEFAULT_AICB, "dp": 2, "num_jobs": 2, "num_iters": 1}
@@ -356,6 +369,7 @@ Examples:
         "gpus_per_server": args.gpus_per_server,
         "k_paths": args.k_paths,
         "step_deg": args.step_deg,
+        "puppeteer_bw_change_threshold_pct": args.puppeteer_bw_change_threshold_pct,
     }
     for key, val in cli_overrides.items():
         if val is not None:
@@ -412,6 +426,7 @@ Examples:
     placement_clusters = config["placement_clusters"]
     k_paths = config["k_paths"]
     step_deg = config["step_deg"]
+    puppeteer_bw_change_threshold_pct = config["puppeteer_bw_change_threshold_pct"]
     viz_config = config["visualize"]
     workloads_cfg = config["workloads"]
 
@@ -482,6 +497,7 @@ Examples:
 
     for mode in run_modes:
         print(f"\n{'=' * 60}\nRunning: {mode}\n{'=' * 60}")
+        apply_executor_tuning(mode, puppeteer_bw_change_threshold_pct)
         t0 = time.time()
         try:
             result = MODE_MAP[mode](workload, topology, **extra)
