@@ -41,10 +41,10 @@ Task 5 (入口 + 验证) ──────┤
 
 **新增文件**:
 
-| 文件 | 内容 |
-|------|------|
+| 文件                                        | 内容                                                                                                   |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | `src/workload_format/compact_workload.py` | CompactWorkload, JobExpansionInfo, JobDAG, ExpandedJob, SimulationState, SlicerConfig, TaskIdAllocator |
-| `src/executor/job_policy.py` | JobPolicy ABC + FifoJobPolicy 默认实现 |
+| `src/executor/job_policy.py`              | JobPolicy ABC + FifoJobPolicy 默认实现                                                                 |
 
 **关键设计**:
 
@@ -54,7 +54,7 @@ Task 5 (入口 + 验证) ──────┤
 @dataclass
 class JobExpansionInfo:
     """单个 Job 的展开信息（不含现有 Job 类已有字段）。
-    
+  
     CompactWorkload 中按 job_id 索引，与现有 Job 类配合使用。
     """
     depends_on: list[int] = field(default_factory=list)
@@ -66,7 +66,7 @@ class JobExpansionInfo:
 @dataclass
 class CompactWorkload:
     """紧凑 Workload — 镜像 P2PWorkload 结构，用 Job DAG 替代全量 tasks。
-    
+  
     对比 P2PWorkload:
       version, meta, network, jobs: list[Job]   ← 完全相同
       tasks: list[Task]                          ← 删掉
@@ -154,6 +154,7 @@ class FifoJobPolicy(JobPolicy):
 ```
 
 **验收标准**:
+
 - JobDAG 的 mark_completed/get_eligible_jobs 逻辑正确
 - TaskIdAllocator 分配 ID 连续不重复
 
@@ -170,28 +171,27 @@ class FifoJobPolicy(JobPolicy):
 **关键设计**:
 
 ```python
-class JobSlicer(ABC):
-    @abstractmethod
-    def slice_trace(self, trace_path: str, config: SlicerConfig) -> CompactWorkload: ...
-
-class InferenceJobSlicer(JobSlicer):
-    # 读 inference trace JSON
-    # 每个 batch → 一个 Job（复用现有类） + 一个 JobExpansionInfo
+class InferenceJobSlicer:
+    # 读 inference trace JSON，每个 batch → 一个 Job
     # batch.depends_on → JobExpansionInfo.depends_on
-    # batch 数据存入 JobExpansionInfo.batch
+    # node_offset: 节点起始偏移（用于多 trace 分区）
+    def slice_trace(self, trace_path: str, node_offset: int = 0) -> CompactWorkload: ...
 
-class TrainingJobSlicer(JobSlicer):
-    # 读 AICB text
-    # 每个 GA iteration → 一个 Job + 一个 JobExpansionInfo
-    # 依赖关系为顺序链 iter_N → iter_{N+1}
+class TrainingJobSlicer:
+    # 读 AICB text，整个 trace → 一个 Job（GA 梯度同步不可拆分）
+    # repeat > 1 时创建 N 个顺序依赖的 Job，实现动态展开
+    # node_offset: 节点起始偏移
+    def slice_trace(self, trace_path: str, repeat: int = 1,
+                    node_offset: int = 0) -> CompactWorkload: ...
 ```
 
-**关键点**: 
+**关键点**:
+
 - 不对 trace 做任何展开，只提取 Job 级别的元数据和依赖关系
-- `granularity: "wave"` 时合并多个连续 batch/iteration 为一个 Job
 - 生成的 JobDAG 总大小 ≈ trace 文件大小（KB 级别），不是展开后的 GB 级别
 
 **验收标准**:
+
 - `inference_trace_stage1_pp1_req16.json` → 512 个 Job，依赖关系与 trace 一致
 - AICB text → 正确的迭代数 + 线性依赖链
 
@@ -203,10 +203,10 @@ class TrainingJobSlicer(JobSlicer):
 
 **改动文件 + 新增文件**:
 
-| 操作 | 文件 | 说明 |
-|------|------|------|
+| 操作 | 文件                                                   | 说明                                |
+| ---- | ------------------------------------------------------ | ----------------------------------- |
 | 修改 | `src/workload_generator/inference_trace_expander.py` | 提取 `expand_single_batch()` 方法 |
-| 新增 | `src/executor/job_expander.py` | JobExpander |
+| 新增 | `src/executor/job_expander.py`                       | JobExpander                         |
 
 **InferenceTraceExpander 重构**:
 
@@ -246,26 +246,26 @@ class JobExpander:
     def __init__(self, task_id_allocator, profile_store, topology):
         ...
         self._trace_cache: dict[str, dict] = {}  # trace_src → parsed trace
-    
+  
     def _load_trace(self, trace_src: str) -> dict:
         """按需加载 trace 文件并缓存。"""
         if trace_src not in self._trace_cache:
             with open(trace_src) as f:
                 self._trace_cache[trace_src] = json.load(f)
         return self._trace_cache[trace_src]
-    
+  
     def expand_job(self, job: Job, info: JobExpansionInfo) -> ExpandedJob:
         if info.job_type == "training":
             return self._expand_training(job, info)
         else:
             return self._expand_inference(job, info)
-    
+  
     def _expand_inference(self, job: Job, info: JobExpansionInfo) -> ExpandedJob:
         trace = self._load_trace(info.trace_src)
         batch = trace["batches"][info.trace_job_index]
         # prev_exits 由 caller（JobManager）从已完成 Job 的 terminal_task_ids 构建
         ...
-    
+  
     def _expand_training(self, job: Job, info: JobExpansionInfo) -> ExpandedJob:
         trace = self._load_trace(info.trace_src)
         # trace 中按 trace_job_index 取出对应 iteration 的 aicb_items
@@ -273,6 +273,7 @@ class JobExpander:
 ```
 
 **验收标准**:
+
 - 重构后 `expand()` 的输出与重构前完全一致
 - `expand_single_batch()` 可以独立调用并返回正确结果
 - JobExpander 展开单个 inference batch 返回 ExpandedJob 包含正确数量的 tasks
@@ -285,9 +286,9 @@ class JobExpander:
 
 **新增文件**:
 
-| 文件 | 内容 |
-|------|------|
-| `src/executor/job_manager.py` | JobManager（展开、回收、持久化） |
+| 文件                                 | 内容                                                   |
+| ------------------------------------ | ------------------------------------------------------ |
+| `src/executor/job_manager.py`      | JobManager（展开、回收、持久化）                       |
 | `src/executor/dynamic_executor.py` | DynamicExecutor（继承 AnalyticalExecutor，父类零修改） |
 
 **JobManager**:
@@ -322,19 +323,21 @@ class DynamicExecutor(AnalyticalExecutor):
         # 5. 事件循环（使用父类的 drain_ready_pool / handle_xxx / reallocate_bandwidth）
         #    + 在事件处理后通过 on_tasks_completed 触发动态注入
         # 6. 返回结果
-    
+  
     def _inject_tasks(self, new_tasks, task_map, dep_count, dependents, ready_pool):
         """将展开后的 tasks 注入 executor 状态。"""
 ```
 
 **关键设计点**:
+
 - 父类 `AnalyticalExecutor` 不做任何修改
 - 所有父类辅助方法（`_drain_ready_pool`, `_handle_compute_done` 等）通过参数传递状态，子类创建自己的局部变量直接调用
-- 事件循环条件增加 `not self._job_manager.is_all_jobs_done()` 
+- 事件循环条件增加 `not self._job_manager.is_all_jobs_done()`
 - Job 完成时回收 task details（释放 task_map / dep_count / dependents 条目）
 - Timing 不单独逐 Job 写入——最终统一通过 `ExecutionResult`（复用现有 `result.py`）输出
 
 **验收标准**:
+
 - 在小 trace 上执行后得到有效的 ExecutionResult（makespan > 0）
 - 所有 Job 完成后正确退出
 - 内存中不同时持有全部 tasks（验证：大 trace 峰值内存远小于全量展开）
@@ -347,8 +350,8 @@ class DynamicExecutor(AnalyticalExecutor):
 
 **新增文件**:
 
-| 文件 | 内容 |
-|------|------|
+| 文件                           | 内容             |
+| ------------------------------ | ---------------- |
 | `scripts/run_dynamic_e2e.py` | 动态模式入口脚本 |
 
 **入口脚本**:
@@ -366,20 +369,22 @@ class DynamicExecutor(AnalyticalExecutor):
 **验证内容**:
 
 1. **功能正确性验证**:
+
    - 对同一个小 trace（如 1 batch），静态模式与动态模式 makespan 一致
    - JobDAG 依赖解析正确，不遗漏任何 batch
    - ExecutionResult 包含所有 task 的时间
-
 2. **内存对比验证**:
+
    - 静态模式: 16 requests trace → 测量内存峰值
    - 动态模式: 同 trace → 测量内存峰值
    - 预期: 动态模式显著（100x+）更低
-
 3. **压力测试**:
+
    - 512 batches 全流程跑通
    - 验证模拟完成后所有 Job 被标记为完成
 
 **验收标准**:
+
 - 迷你测试上动态与静态模式结果一致
 - 大规模 trace 上动态模式内存占用远低于静态模式
 - 无死锁（事件循环正确终止）
@@ -396,16 +401,16 @@ Task 1 (基础层) ──→ Task 2 (JobSlicer) ──→ Task 3 (展开器重�
 
 ### 整体文件变更清单
 
-| 操作 | 文件 | 所属 Task |
-|------|------|-----------|
-| 新增 | `src/workload_format/compact_workload.py` | Task 1（CompactWorkload, JobExpansionInfo, JobDAG, ExpandedJob, SimulationState, TaskIdAllocator） |
-| 新增 | `src/executor/job_policy.py` | Task 1（JobPolicy ABC, FifoJobPolicy） |
-| 新增 | `src/workload_generator/job_slicer.py` | Task 2 |
-| 修改 | `src/workload_generator/inference_trace_expander.py` | Task 3 |
-| 新增 | `src/executor/job_expander.py` | Task 3 |
-| 新增 | `src/executor/job_manager.py` | Task 4 |
-| 新增 | `src/executor/dynamic_executor.py` | Task 4 |
-| 新增 | `scripts/run_dynamic_e2e.py` | Task 5 |
-| 不变 | `src/executor/analytical.py` | — |
-| 不变 | `src/executor/policies/base_policy.py` | — |
-| 不变 | `src/workload_format/schema.py` | — |
+| 操作 | 文件                                                   | 所属 Task                                                                                          |
+| ---- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| 新增 | `src/workload_format/compact_workload.py`            | Task 1（CompactWorkload, JobExpansionInfo, JobDAG, ExpandedJob, SimulationState, TaskIdAllocator） |
+| 新增 | `src/executor/job_policy.py`                         | Task 1（JobPolicy ABC, FifoJobPolicy）                                                             |
+| 新增 | `src/workload_generator/job_slicer.py`               | Task 2                                                                                             |
+| 修改 | `src/workload_generator/inference_trace_expander.py` | Task 3                                                                                             |
+| 新增 | `src/executor/job_expander.py`                       | Task 3                                                                                             |
+| 新增 | `src/executor/job_manager.py`                        | Task 4                                                                                             |
+| 新增 | `src/executor/dynamic_executor.py`                   | Task 4                                                                                             |
+| 新增 | `scripts/run_dynamic_e2e.py`                         | Task 5                                                                                             |
+| 不变 | `src/executor/analytical.py`                         | —                                                                                                 |
+| 不变 | `src/executor/policies/base_policy.py`               | —                                                                                                 |
+| 不变 | `src/workload_format/schema.py`                      | —                                                                                                 |
