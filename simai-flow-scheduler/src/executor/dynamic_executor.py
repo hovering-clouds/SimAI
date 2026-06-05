@@ -35,6 +35,7 @@ class DynamicExecutor(AnalyticalExecutor):
         super().__init__(topology, policy)
         self._analyzer = analyzer
         self._job_manager: JobManager | None = None
+        self._task_meta: dict[int, dict] = {}  # task_id → {phase, layer_id, comm_type, src, dst}
 
     # ── Main entry ──────────────────────────────────────────────────────────
 
@@ -210,7 +211,14 @@ class DynamicExecutor(AnalyticalExecutor):
         result = self._analyzer.analyze(mini_wl)
         self.policy.update_analysis(mini_wl, result)
 
-        # 2. Inject tasks (with delay if applicable)
+        # 2. Record task metadata for visualization
+        for t in ej.tasks:
+            self._task_meta[t.task_id] = {
+                k: getattr(t, k, None)
+                for k in ("phase", "layer_id", "comm_type", "src", "dst", "node")
+            }
+
+        # 3. Inject tasks (with delay if applicable)
         entry_ids = set(ej.entry_task_ids)
         for task in ej.tasks:
             tid = task.task_id
