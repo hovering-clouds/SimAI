@@ -52,12 +52,10 @@ class InferenceJobSlicer:
                 if d in batch_to_job
             ]
 
-            replica_id = batch["replica_id"]
-            assigned = nodes[replica_id * ws : (replica_id + 1) * ws]
-
+            # 每个 job 需要全部节点——expander 内部按 (replica_id * ws) 索引查表
             jobs.append(Job(
                 job_id=idx,
-                assigned_nodes=assigned,
+                assigned_nodes=list(nodes),
                 parallelism=ParallelismConfig(tp=tp, ep=ep, pp=pp),
             ))
             info[idx] = JobExpansionInfo(
