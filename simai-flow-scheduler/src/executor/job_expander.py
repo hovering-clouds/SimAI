@@ -15,9 +15,6 @@ from ..workload_generator.inference_trace_expander import InferenceTraceExpander
 from ..workload_generator.inference_profile import InferenceProfileStore
 from ..workload_generator.workload_builder import WorkloadBuilder
 from ..workload_generator.aicb_parser import AicbParser
-from ..static_analysis.passes.topology_loader import NetworkTopology
-
-
 class JobExpander:
     """Expands a single Job (Job + JobExpansionInfo) into ExpandedJob on demand.
 
@@ -28,11 +25,9 @@ class JobExpander:
         self,
         task_id_allocator: TaskIdAllocator,
         profile_store: InferenceProfileStore,
-        topology: NetworkTopology,
     ):
         self._allocator = task_id_allocator
         self._profile_store = profile_store
-        self._topology = topology
         self._trace_cache: dict[str, dict] = {}
 
     def _load_trace(self, trace_src: str) -> dict:

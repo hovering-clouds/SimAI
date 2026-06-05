@@ -11,7 +11,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .schema import Meta, Network, Job, Task
+from .schema import Meta, Network, Job, Task, P2PWorkload
 
 
 # ── Per-job expansion metadata ──────────────────────────────────────────────
@@ -195,13 +195,30 @@ class ExpandedJob:
     tasks: list[Task]
     entry_task_ids: list[int]
     terminal_task_ids: list[int]
+    delay_us: int = 0
+
+
+def expanded_jobs_to_workload(expanded_jobs: list[ExpandedJob]) -> P2PWorkload:
+    """将多个 ExpandedJob 的 tasks 合并为一个 P2PWorkload。
+
+    用于动态模式下构建完整的 workload 供 analyzer.analyze() 一次性分析。
+    """
+    all_tasks = [t for ej in expanded_jobs for t in ej.tasks]
+    max_node = max(
+        (t.node for t in all_tasks if t.is_compute() and t.node is not None),
+        default=0,
+    )
+    return P2PWorkload(
+        version="1.0",
+        meta=Meta(num_jobs=len(expanded_jobs), num_nodes=max_node + 1),
+        tasks=all_tasks,
+    )
 
 
 @dataclass
 class SimulationState:
     """传递给 JobPolicy 的模拟器状态快照。"""
-    current_time_us: int
-    completed_job_ids: set[int] = field(default_factory=set)
+    current_time_us: int = 0
 
 
 @dataclass
