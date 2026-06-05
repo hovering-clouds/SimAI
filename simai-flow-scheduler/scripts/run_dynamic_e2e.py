@@ -39,6 +39,7 @@ INFERENCE_TRACE = "inputs/traces/inference_trace_stage1_pp1_4096.json"
 TOPO_FILE       = "inputs/topologies/AlibabaHPN_64g_8gps_DualToR_DualPlane_200Gbps_H100_stage1"
 PROFILE_DIR     = "inputs/vidur-csv/deepseek-tp2-pp1-ep8"
 OUTPUT_DIR      = "outputs/dynamic_e2e"
+STORAGE_NODES   = [208]  # storage node in 64g stage1 topology
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -74,7 +75,9 @@ _sep("Step 2: Load topology & profiles")
 topology = TopologyLoader().load(TOPO_FILE)
 print(f"  Nodes: {topology.total_nodes}  Links: {len(topology.links)}")
 
-store = InferenceProfileStore(tp=2, ep=8, pp=1)
+p = compact_wl.jobs[0].parallelism
+print(f"  Parallelism: tp={p.tp} ep={p.ep} pp={p.pp}")
+store = InferenceProfileStore(tp=p.tp, ep=p.ep, pp=p.pp)
 loaded = store.load_directory(PROFILE_DIR)
 print(f"  Profiles loaded: {loaded}")
 
@@ -98,6 +101,7 @@ job_policy = FifoJobPolicy()
 job_expander = JobExpander(
     task_id_allocator=TaskIdAllocator(),
     profile_store=store,
+    storage_node_ids=STORAGE_NODES,
 )
 
 print(f"  Policy: {type(policy).__name__}")
@@ -125,9 +129,15 @@ result_path = os.path.join(OUTPUT_DIR, "execution_result.json")
 result.to_json(result_path)
 print(f"  Saved: {result_path}")
 
+meta_path = os.path.join(OUTPUT_DIR, "task_meta.json")
+with open(meta_path, "w") as f:
+    json.dump({str(k): v for k, v in executor._task_meta.items()}, f)
+print(f"  Saved: {meta_path}")
+
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 _sep("Done")
 print(f"  Output directory: {OUTPUT_DIR}/")
 print(f"  execution_result.json — per-task timing")
+print(f"  task_meta.json — task metadata for visualization")

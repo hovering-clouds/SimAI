@@ -25,9 +25,11 @@ class JobExpander:
         self,
         task_id_allocator: TaskIdAllocator,
         profile_store: InferenceProfileStore,
+        storage_node_ids: list[int] | None = None,
     ):
         self._allocator = task_id_allocator
         self._profile_store = profile_store
+        self._storage_node_ids = storage_node_ids
         self._trace_cache: dict[str, dict] = {}
 
     def _load_trace(self, trace_src: str) -> dict:
@@ -62,7 +64,7 @@ class JobExpander:
 
         batch_lookup = {b["batch_id"]: b for b in trace["batches"]}
         total_layers = expander._get_total_layers(trace)
-        resolved, reuse_info = expander._setup_kv_reuse(trace, None)
+        resolved, reuse_info = expander._setup_kv_reuse(trace, self._storage_node_ids)
 
         tasks, exits, infos, _ = expander.expand_single_batch(
             batch=batch,
