@@ -28,6 +28,11 @@ class BfsRouteTable(RouteTable):
         if (src, dst) not in self._paths:
             self._paths[(src, dst)] = path
 
+    def update_routes(self, other: "RouteTable") -> None:
+        if isinstance(other, BfsRouteTable):
+            for key, path in other._paths.items():
+                self.ensure_path(*key, path)
+
 
 class BfsStrategy(RouteStrategy):
     """Computes BFS shortest paths for all flow tasks."""

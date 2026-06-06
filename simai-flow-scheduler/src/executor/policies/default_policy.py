@@ -91,8 +91,5 @@ class DefaultSchedulingPolicy(SchedulingPolicy):
             for idx, task_id in enumerate(ids)
         }
 
-        # 合并路由表
-        rt = analysis_result.route_table
-        if hasattr(rt, '_paths') and hasattr(self.route_table, 'ensure_path'):
-            for (src, dst), path in rt._paths.items():
-                self.route_table.ensure_path(src, dst, path)
+        # 合并路由表（各 RouteTable 子类自行处理合并逻辑）
+        self.route_table.update_routes(analysis_result.route_table)

@@ -17,6 +17,12 @@ class RouteTable(ABC):
         """Return the path for a flow task."""
         ...
 
+    def update_routes(self, other: "RouteTable") -> None:
+        """将 other 中的路由合并到当前表中（用于动态展开模式）。
+
+        基类为空实现，各具体子类按自己的存储结构覆盖。
+        """
+
 
 class RouteStrategy(ABC):
     """Abstract routing strategy — computes a RouteTable from workload + topology."""
