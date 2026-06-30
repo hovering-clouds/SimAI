@@ -20,7 +20,7 @@ from .job_manager import JobManager
 from .job_expander import JobExpander
 from .job_policy import JobPolicy
 from .runtime import ActiveFlow
-from .result import ExecutionResult
+from .result import ExecutionResult, TaskTiming
 from ..workload_format.compact_workload import expanded_jobs_to_workload
 
 
@@ -36,6 +36,11 @@ class DynamicExecutor(AnalyticalExecutor):
         self._analyzer = analyzer
         self._job_manager: JobManager | None = None
         self._task_meta: dict[int, dict] = {}  # task_id → {phase, layer_id, comm_type, src, dst}
+        # 渐进构造 ExecutionResult
+        self._per_task: dict[int, TaskTiming] = {}
+        self._job_iteration_times: dict[int, int] = {}
+        self._min_start_us: int = 2 ** 63
+        self._max_end_us: int = 0
 
     # ── Main entry ──────────────────────────────────────────────────────────
 
@@ -175,28 +180,38 @@ class DynamicExecutor(AnalyticalExecutor):
                         ready_pool, current_time,
                     )
                     total_injected += n
+                # 回收已完成 Job 的 task details
+                self._reclaim_completed(
+                    task_map, dep_count, dependents, start_times, end_times,
+                )
                 self._release_delayed(delayed_queue, current_time, ready_pool)
                 self._drain_ready_pool(current_time if current_time > 0 else 0,
                                        ready_pool, task_map,
                                        start_times, active_flows, push_event)
 
             # Progress
+            completed_count = len(self._per_task)
             if event_count % PROGRESS_INTERVAL == 0:
-                pct = len(end_times) / total_injected * 100 if total_injected else 0
+                pct = completed_count / total_injected * 100 if total_injected else 0
                 elapsed = time.monotonic() - _start_time
                 eta = elapsed / max(pct, 0.1) * (100 - pct) if pct > 0 else 0
                 print(
                     f"\r  [progress elps/eta={elapsed:.0f}s/{eta:.0f}s] "
                     f"jobs={len(self._job_manager.completed_jobs)}/"
                     f"{len(self._job_manager._dag.jobs)} "
-                    f"{len(end_times):,}/{total_injected:,} tasks "
+                    f"{completed_count:,}/{total_injected:,} tasks "
                     f"({pct:.1f}%)  t={current_time:,} us",
                     end="\r", flush=True,
                 )
 
         print()
 
-        return self._build_result(task_map, start_times, end_times)
+        return ExecutionResult(
+            per_task=self._per_task,
+            job_iteration_times=self._job_iteration_times,
+            total_time_us=self._max_end_us,
+            makespan_us=self._max_end_us - self._min_start_us,
+        )
 
     # ── Dynamic helpers ─────────────────────────────────────────────────────
 
@@ -233,6 +248,42 @@ class DynamicExecutor(AnalyticalExecutor):
                 else:
                     ready_pool.add(tid)
         return len(ej.tasks)
+
+    def _reclaim_completed(
+        self,
+        task_map, dep_count, dependents, start_times, end_times,
+    ):
+        """回收已完成 Job 的 task details，转为 TaskTiming 存入 _per_task。"""
+        for job_id, task_ids in self._job_manager.drain_completed():
+            job_start = 2 ** 63
+            job_end = 0
+
+            for tid in task_ids:
+                task = task_map.get(tid)
+                if task is None:
+                    continue
+                st = start_times.pop(tid, 0)
+                et = end_times.pop(tid, 0)
+                tt = TaskTiming(
+                    task_id=tid,
+                    node=task.node if task.is_compute() else (task.src or 0),
+                    task_type="compute" if task.is_compute() else "flow",
+                    start_time_us=st,
+                    end_time_us=et,
+                )
+                self._per_task[tid] = tt
+                job_start = min(job_start, st)
+                job_end = max(job_end, et)
+
+                # Clean up
+                task_map.pop(tid, None)
+                dep_count.pop(tid, None)
+                dependents.pop(tid, None)
+                self._task_meta.pop(tid, None)
+
+            self._job_iteration_times[job_id] = job_end - job_start
+            self._min_start_us = min(self._min_start_us, job_start)
+            self._max_end_us = max(self._max_end_us, job_end)
 
     def _release_delayed(
         self,

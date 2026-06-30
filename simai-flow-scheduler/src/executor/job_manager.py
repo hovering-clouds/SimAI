@@ -36,6 +36,8 @@ class JobManager:
         # Runtime state
         self.completed_jobs: set[int] = set()
         self._active_jobs: set[int] = set()                     # active job IDs
+        # 已完成但尚未回收的job信息 
+        self._job_task_ids: dict[int, set[int]] = {}            # job_id → all task_ids
 
         # Job 完成检测（反向索引，O(1) per task）
         self._terminal_to_job: dict[int, int] = {}              # terminal_task_id → job_id
@@ -86,6 +88,13 @@ class JobManager:
     def is_all_jobs_done(self) -> bool:
         return len(self.completed_jobs) == len(self._dag.jobs)
 
+    def drain_completed(self) -> list[tuple[int, set[int]]]:
+        """返回本轮新完成的 (job_id, task_ids) 列表，供 DynamicExecutor 回收。"""
+        done = [(jid, self._job_task_ids.pop(jid))
+                for jid in list(self.completed_jobs)
+                if jid in self._job_task_ids]
+        return done
+
     # ── Internal ────────────────────────────────────────────────────────────
 
     def _filter_eligible(self, candidate_ids: list[int]) -> list[int]:
@@ -115,6 +124,7 @@ class JobManager:
 
             # Register runtime state
             self._active_jobs.add(job.job_id)
+            self._job_task_ids[job.job_id] = {t.task_id for t in expanded.tasks}
 
             # Build terminal task index for O(1) completion detection
             for tid in expanded.terminal_task_ids:
