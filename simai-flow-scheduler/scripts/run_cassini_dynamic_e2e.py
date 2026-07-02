@@ -362,12 +362,75 @@ def main():
     result.to_json(result_path)
     print(f"\n  Saved: {result_path}")
 
+    meta_path = os.path.join(output_dir, "task_meta.json")
+    with open(meta_path, "w") as f:
+        json.dump({str(k): v for k, v in executor._task_meta.items()}, f)
+    print(f"  Saved: {meta_path}")
+
+    # ── Chrome Trace 可视化（pid = job group, tid = node×2 + compute(0)/flow(1)）──
+    trace_path = os.path.join(output_dir, "trace.json")
+    events: list[dict] = []
+    seen: set[tuple[int, int]] = set()  # (pid, tid) 组合已发过 metadata 标记
+
+    for task_id, timing in result.per_task.items():
+        meta = executor._task_meta.get(task_id, {})
+        job_id = meta.get("job_id", 0)
+        info = compact_wl.job_expansion_info.get(job_id)
+        pid = info.job_group_id if info else 0
+        node = timing.node
+        type_bit = 0 if timing.task_type == "compute" else 1
+        thread_tid = node * 2 + type_bit
+
+        # process_name（每个 pid 一次）
+        if (pid, -1) not in seen:
+            seen.add((pid, -1))
+            events.append({
+                "name": "process_name", "ph": "M",
+                "pid": pid, "tid": 0,
+                "args": {"name": f"Job Group {pid}"},
+            })
+        # thread_name（每个 (pid, tid) 一次）
+        if (pid, thread_tid) not in seen:
+            seen.add((pid, thread_tid))
+            events.append({
+                "name": "thread_name", "ph": "M",
+                "pid": pid, "tid": thread_tid,
+                "args": {"name": f"Node {node} {'Compute' if type_bit == 0 else 'Comm'}"},
+            })
+
+        # 事件标签
+        if timing.task_type == "compute":
+            phase = meta.get("phase", "")
+            layer = meta.get("layer_id", None)
+            label = f"{phase} L{layer}" if phase and layer is not None else f"compute_{task_id}"
+        else:
+            comm = meta.get("comm_type", "")
+            src = meta.get("src", None)
+            dst = meta.get("dst", None)
+            label = f"{comm} {src}→{dst}" if comm and src is not None and dst is not None else f"flow_{task_id}"
+
+        events.append({
+            "name": label,
+            "cat": timing.task_type,
+            "ph": "X",
+            "ts": timing.start_time_us,
+            "dur": max(timing.end_time_us - timing.start_time_us, 1),
+            "pid": pid,
+            "tid": thread_tid,
+        })
+
+    with open(trace_path, "w") as f:
+        json.dump({"traceEvents": events}, f)
+    print(f"  Saved: {trace_path}")
+
     # ── Summary ──
     print("\n" + "=" * 60)
     print("Done")
     print("=" * 60)
     print(f"  Output: {output_dir}/")
     print(f"  result.json — ExecutionResult with per-task timing")
+    print(f"  task_meta.json — Task metadata for visualization")
+    print(f"  trace.json — Open in chrome://tracing to view")
 
 
 if __name__ == "__main__":

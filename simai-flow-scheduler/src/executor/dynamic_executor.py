@@ -241,7 +241,7 @@ class DynamicExecutor(AnalyticalExecutor):
         for t in ej.tasks:
             self._task_meta[t.task_id] = {
                 k: getattr(t, k, None)
-                for k in ("phase", "layer_id", "comm_type", "src", "dst", "node")
+                for k in ("phase", "layer_id", "comm_type", "src", "dst", "node", "job_id")
             }
 
         # 3. Inject tasks (with delay if applicable)
@@ -290,7 +290,6 @@ class DynamicExecutor(AnalyticalExecutor):
                 task_map.pop(tid, None)
                 dep_count.pop(tid, None)
                 dependents.pop(tid, None)
-                self._task_meta.pop(tid, None)
 
             self._job_iteration_times[job_id] = job_end - job_start
             self._min_start_us = min(self._min_start_us, job_start)
