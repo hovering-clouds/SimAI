@@ -67,7 +67,7 @@ class InferenceJobSlicer:
 
         return CompactWorkload(
             version="1.0",
-            meta=Meta(num_jobs=len(jobs), num_nodes=len(nodes)),
+            meta=Meta(num_jobs=len(jobs), num_nodes=max(assigned_nodes) + 1),
             jobs=jobs,
             job_expansion_info=info,
         )
@@ -81,25 +81,32 @@ class TrainingJobSlicer:
         trace_path: str,
         assigned_nodes: list[int] | None = None,
         repeat: int = 1,
+        job_group_id: int = 0,
     ) -> CompactWorkload:
         header, _ = AicbParser().parse(trace_path)
-        required = header.all_gpus
-        if assigned_nodes is not None and len(assigned_nodes) != required:
-            raise ValueError(
-                f"TrainingJobSlicer: assigned_nodes has {len(assigned_nodes)} nodes, "
-                f"but trace expects exactly {required} (all_gpus={required})"
-            )
-        nodes = assigned_nodes if assigned_nodes is not None else list(range(required))
+        world_size = header.tp * header.pp * header.ep
+
+        if assigned_nodes is not None:
+            if len(assigned_nodes) % world_size != 0:
+                raise ValueError(
+                    f"TrainingJobSlicer: assigned_nodes has {len(assigned_nodes)} nodes, "
+                    f"which is not a multiple of world_size={world_size} "
+                    f"(tp={header.tp} pp={header.pp} ep={header.ep})"
+                )
+            dp = len(assigned_nodes) // world_size
+        else:
+            dp = header.all_gpus // world_size
+            assigned_nodes = list(range(header.all_gpus))
 
         jobs = []
         info = {}
         for i in range(repeat):
             jobs.append(Job(
                 job_id=i,
-                assigned_nodes=list(nodes),
+                assigned_nodes=list(assigned_nodes),
                 parallelism=ParallelismConfig(
                     tp=header.tp,
-                    dp=header.all_gpus // (header.tp * header.ep * header.pp),
+                    dp=dp,
                     pp=header.pp,
                     ep=header.ep,
                 ),
@@ -109,11 +116,12 @@ class TrainingJobSlicer:
                 job_type="training",
                 trace_src=trace_path,
                 trace_job_index=i,
+                job_group_id=job_group_id,
             )
 
         return CompactWorkload(
             version="1.0",
-            meta=Meta(num_jobs=len(jobs), num_nodes=len(nodes)),
+            meta=Meta(num_jobs=len(jobs), num_nodes=max(assigned_nodes) + 1),
             jobs=jobs,
             job_expansion_info=info,
         )

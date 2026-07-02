@@ -27,6 +27,7 @@ class JobExpansionInfo:
     job_type: str = "inference"              # "inference" | "training"
     trace_src: str = ""                      # trace 源文件路径
     trace_job_index: int = 0                 # 在 trace 中的序号（batch_idx / iter_idx）
+    job_group_id: int = 0                    # 逻辑 Job 组 ID（同组 iteration 共享 time-shift）
 
 
 # ── Compact workload ────────────────────────────────────────────────────────
@@ -77,6 +78,7 @@ class CompactWorkload:
                 "job_type": info.job_type,
                 "trace_src": info.trace_src,
                 "trace_job_index": info.trace_job_index,
+                "job_group_id": info.job_group_id,
             }
 
         return {
@@ -212,6 +214,39 @@ def expanded_jobs_to_workload(expanded_jobs: list[ExpandedJob]) -> P2PWorkload:
         version="1.0",
         meta=Meta(num_jobs=len(expanded_jobs), num_nodes=max_node + 1),
         tasks=all_tasks,
+    )
+
+
+def merge_compact_workloads(workloads: list["CompactWorkload"]) -> "CompactWorkload":
+    """合并多个 CompactWorkload，重新分配 job_id 并更新依赖关系。
+
+    每个 TrainingJobSlicer 调用都从 job_id=0 开始编号。
+    此函数全局重新编号，更新 depends_on 中的引用，返回合并后的 CompactWorkload。
+    """
+    all_jobs: list[Job] = []
+    all_info: dict[int, JobExpansionInfo] = {}
+    offset = 0
+
+    for wl in workloads:
+        for job in wl.jobs:
+            job.job_id += offset
+            all_jobs.append(job)
+        for jid, info in wl.job_expansion_info.items():
+            new_id = jid + offset
+            info.depends_on = [d + offset for d in info.depends_on]
+            all_info[new_id] = info
+        offset += len(wl.jobs)
+
+    total_nodes = 0
+    for job in all_jobs:
+        for n in job.assigned_nodes:
+            total_nodes = max(total_nodes, n + 1)
+
+    return CompactWorkload(
+        version="1.0",
+        meta=Meta(num_jobs=len(all_jobs), num_nodes=total_nodes),
+        jobs=all_jobs,
+        job_expansion_info=all_info,
     )
 
 

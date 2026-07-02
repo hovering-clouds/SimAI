@@ -88,6 +88,13 @@ class JobManager:
     def is_all_jobs_done(self) -> bool:
         return len(self.completed_jobs) == len(self._dag.jobs)
 
+    def try_expand_eligible(self, sim_state: SimulationState) -> list[ExpandedJob]:
+        """展开所有符合条件的 eligible jobs（事件队列空时调用）。"""
+        eligible = self._filter_eligible(self._dag.get_eligible_jobs())
+        if not eligible:
+            return []
+        return self._expand_selected(eligible, sim_state)
+
     def drain_completed(self) -> list[tuple[int, set[int]]]:
         """返回本轮新完成的 (job_id, task_ids) 列表，供 DynamicExecutor 回收。"""
         done = [(jid, self._job_task_ids.pop(jid))

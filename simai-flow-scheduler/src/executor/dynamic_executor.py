@@ -118,15 +118,27 @@ class DynamicExecutor(AnalyticalExecutor):
                         f"with empty event queue. Policy: {type(self.policy).__name__}. "
                         f"Pending task IDs: {sorted(ready_pool)}"
                     )
-                # ── No events or ready tasks → jump delayed time or exit ──
-                else:
-                    if delayed_queue:
-                        next_time = delayed_queue[0][0]
-                        self._release_delayed(delayed_queue, next_time, ready_pool)
-                        self._drain_ready_pool(next_time, ready_pool, task_map,
-                                            start_times, active_flows, push_event)
-                        continue
-                    break
+                # ── No events or ready tasks → try expand eligible or jump delayed ──
+                if delayed_queue:
+                    next_time = delayed_queue[0][0]
+                    self._release_delayed(delayed_queue, next_time, ready_pool)
+                    self._drain_ready_pool(next_time, ready_pool, task_map,
+                                        start_times, active_flows, push_event)
+                    continue
+                # Expand next eligible job if any remain (currently not necessary, but may be useful for future dynamic injection policies)
+                sim_state = SimulationState(current_time_us=last_time)
+                new_jobs = self._job_manager.try_expand_eligible(sim_state)
+                if new_jobs:
+                    for ej in new_jobs:
+                        self._analyze_and_inject(
+                            ej, delayed_queue, task_map, dep_count,
+                            dependents, ready_pool, last_time,
+                        )
+                    self._release_delayed(delayed_queue, last_time, ready_pool)
+                    self._drain_ready_pool(last_time, ready_pool, task_map,
+                                           start_times, active_flows, push_event)
+                    continue
+                break
 
             # ── Process events ──
             current_time = event_queue[0].time
@@ -134,14 +146,13 @@ class DynamicExecutor(AnalyticalExecutor):
             last_time = current_time
 
             self._skip_reallocate = True
+            batch_completed: set[int] = set()
             while True:
                 batch_events = []
                 while event_queue and event_queue[0].time - current_time <= EVENT_BATCH_GAP_US:
                     batch_events.append(heapq.heappop(event_queue))
                 if not batch_events:
                     break
-
-                batch_completed: set[int] = set()
                 for event in batch_events:
                     if event.kind == "compute_done":
                         self._handle_compute_done(
@@ -172,22 +183,22 @@ class DynamicExecutor(AnalyticalExecutor):
             new_batches = self._job_manager.on_tasks_completed(
                 batch_completed, sim_state,
             )
-            if new_batches:
-                for ej in new_batches:
-                    n = self._analyze_and_inject(
-                        ej,
-                        delayed_queue, task_map, dep_count, dependents,
-                        ready_pool, current_time,
-                    )
-                    total_injected += n
-                # 回收已完成 Job 的 task details
-                self._reclaim_completed(
-                    task_map, dep_count, dependents, start_times, end_times,
+            # 展开后继 jobs
+            for ej in new_batches:
+                n = self._analyze_and_inject(
+                    ej,
+                    delayed_queue, task_map, dep_count, dependents,
+                    ready_pool, current_time,
                 )
-                self._release_delayed(delayed_queue, current_time, ready_pool)
-                self._drain_ready_pool(current_time if current_time > 0 else 0,
-                                       ready_pool, task_map,
-                                       start_times, active_flows, push_event)
+                total_injected += n
+            # 回收已完成 Job 的 task details（无论是否有后继 jobs）
+            self._reclaim_completed(
+                task_map, dep_count, dependents, start_times, end_times,
+            )
+            self._release_delayed(delayed_queue, current_time, ready_pool)
+            self._drain_ready_pool(current_time if current_time > 0 else 0,
+                                   ready_pool, task_map,
+                                   start_times, active_flows, push_event)
 
             # Progress
             completed_count = len(self._per_task)

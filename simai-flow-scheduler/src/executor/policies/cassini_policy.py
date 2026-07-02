@@ -16,6 +16,7 @@ from ..runtime import ActiveFlow
 from ...static_analysis.passes.routing import RouteTable
 from ...static_analysis.passes.topology_loader import NetworkTopology
 from ...static_analysis.strategies.cassini_strategy import CassiniAnalysisResult
+from ...static_analysis.strategies.default_strategy import DefaultAnalysisResult
 from ...workload_format.schema import P2PWorkload, Task
 
 
@@ -96,6 +97,19 @@ class CassiniSchedulingPolicy(SchedulingPolicy):
     def on_task_completed(self, current_time: int, task: Task) -> None:
         if task.is_compute():
             self.compute_cursor[task.node] += 1
+
+    def update_analysis(self, workload: P2PWorkload, analysis_result: DefaultAnalysisResult) -> None:
+        """增量合并新展开的 iteration 的分析结果。
+
+        将新 iteration 的 task_ids 追加到 compute_order 中，并合并路由表。
+        路由表按 (src, dst) 寻址，update_routes() 对已存在的路径是幂等的。
+        """
+        # 1. 合并 compute_order
+        for node_id, task_ids in analysis_result.execution_plan.compute_order.items():
+            self.compute_order.setdefault(node_id, []).extend(task_ids)
+
+        # 2. 合并路由
+        self.route_table.update_routes(analysis_result.route_table)
 
     # ------------------------------------------------------------------
     # Internal helpers

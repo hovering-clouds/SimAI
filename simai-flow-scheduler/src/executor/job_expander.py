@@ -118,13 +118,12 @@ class JobExpander:
             task.deps = [d + offset for d in task.deps]
 
         # Find entry tasks (no deps) and terminal tasks (no dependents)
+        entry_ids = sorted(t.task_id for t in workload.tasks if not t.deps)
         all_ids = {t.task_id for t in workload.tasks}
         has_dependents: set[int] = set()
         for t in workload.tasks:
             has_dependents.update(t.deps)
-        entry_ids = sorted(all_ids - has_dependents)
-        terminal_ids = sorted(task_id for t in workload.tasks
-                              for task_id in t.deps if task_id not in all_ids)
+        terminal_ids = sorted(all_ids - has_dependents)
 
         return ExpandedJob(
             job_id=job.job_id,
