@@ -62,3 +62,37 @@ class FifoJobPolicy(JobPolicy):
     def order_expansion(self, eligible_jobs: list[Job],
                         sim_state: SimulationState) -> list[Job]:
         return sorted(eligible_jobs, key=lambda j: j.job_id)
+
+
+class DelayByJobPolicy(JobPolicy):
+    """按 job_id 为不同 Job 附加启动延迟的装饰策略。
+
+    将任意 JobPolicy 包装一层，在 get_delay_us() 中从预计算的
+    job_id → delay_us 映射查表返回延迟值。
+
+    Args:
+        delay_by_job: job_id → 启动延迟(us) 的映射。缺失的 job_id 返回 0。
+        base: 被包装的 JobPolicy（默认 FifoJobPolicy）。
+    """
+
+    def __init__(
+        self,
+        delay_by_job: dict[int, int],
+        base: JobPolicy | None = None,
+    ):
+        self._base = base if base is not None else FifoJobPolicy()
+        self._delay_by_job = delay_by_job
+
+    def can_emit(self, job: Job, sim_state: SimulationState) -> bool:
+        return self._base.can_emit(job, sim_state)
+
+    def get_placement(self, job: Job, sim_state: SimulationState) -> list[int]:
+        return self._base.get_placement(job, sim_state)
+
+    def get_delay_us(self, job: Job, sim_state: SimulationState) -> int:
+        return self._delay_by_job.get(job.job_id, 0)
+
+    def order_expansion(
+        self, eligible_jobs: list[Job], sim_state: SimulationState
+    ) -> list[Job]:
+        return self._base.order_expansion(eligible_jobs, sim_state)

@@ -39,7 +39,7 @@ from src.cassini.job_placement import (
 )
 from src.executor.dynamic_executor import DynamicExecutor
 from src.executor.job_expander import JobExpander
-from src.executor.job_policy import FifoJobPolicy
+from src.executor.job_policy import DelayByJobPolicy
 from src.executor.policies.cassini_policy import CassiniSchedulingPolicy
 from src.static_analysis.strategies.cassini_strategy import CassiniAnalyzer
 from src.static_analysis.strategies.default_strategy import LightweightAnalyzer
@@ -328,8 +328,7 @@ def main():
 
     policy = CassiniSchedulingPolicy(cassini_result)
     policy.initialize(rep_workload, topology)
-    # 清除 compute_order — 动态模式的 compute_order 完全由 update_analysis() 填充，
-    # 代表 workload 的 task_ids 会阻塞动态展开的 task 被调度。
+    # 清除 compute_order — 动态模式的 compute_order 完全由 update_analysis() 填充
     policy.compute_order = {}
 
     executor = DynamicExecutor(
@@ -343,11 +342,19 @@ def main():
         profile_store=None,
     )
 
+    # 构建 delay_by_job: 每个逻辑 Job 的第一个 iteration 加偏移，后续靠 DAG 依赖衔接
+    delay_by_job: dict[int, int] = {}
+    groups_seen: set[int] = set()
+    for jid, info in sorted(compact_wl.job_expansion_info.items()):
+        if info.job_group_id not in groups_seen:
+            groups_seen.add(info.job_group_id)
+            delay_by_job[jid] = cassini_result.time_shifts.get(info.job_group_id, 0)
+
     t_exec_start = time.time()
     result = executor.execute_dynamic(
         job_dag=job_dag,
         job_expansion_info=compact_wl.job_expansion_info,
-        job_policy=FifoJobPolicy(),
+        job_policy=DelayByJobPolicy(delay_by_job),
         job_expander=job_expander,
     )
     t_exec_end = time.time()
