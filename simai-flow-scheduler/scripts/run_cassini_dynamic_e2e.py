@@ -66,6 +66,145 @@ DEFAULT_TOPO = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_
 DEFAULT_OUTPUT = "outputs/cassini_dynamic"
 
 # ---------------------------------------------------------------------------
+# 可视化辅助
+# ---------------------------------------------------------------------------
+
+def _abbrev_phase(phase) -> str:
+    from src.workload_format.schema import Phase
+    m = {Phase.FORWARD: "fwd", Phase.BACKWARD_INPUT: "bwd_i",
+         Phase.BACKWARD_WEIGHT: "bwd_w", Phase.OPTIMIZER: "opt"}
+    return m.get(phase, str(phase.value))
+
+
+def _abbrev_comm(comm) -> str:
+    from src.workload_format.schema import CommType
+    m = {CommType.TP_ALLREDUCE_RING: "tp_ar", CommType.TP_ALLGATHER_RING: "tp_ag",
+         CommType.TP_REDUCESCATTER_RING: "tp_rs", CommType.TP_ALLTOALL: "tp_a2a",
+         CommType.EP_ALLTOALL: "ep_a2a", CommType.PP_SEND: "pp_snd",
+         CommType.PP_RECV: "pp_rcv"}
+    return m.get(comm, str(comm.value))
+
+
+def generate_chrome_trace(result, executor, compact_wl, output_dir):
+    """生成实际执行 trace（pid = job_group, tid = node×2 + compute(0)/flow(1)）。"""
+    events = []
+    seen: set[tuple[int, int]] = set()
+
+    for task_id, timing in result.per_task.items():
+        meta = executor._task_meta.get(task_id, {})
+        job_id = meta.get("job_id", 0)
+        info = compact_wl.job_expansion_info.get(job_id)
+        pid = info.job_group_id if info else 0
+        node = timing.node
+        type_bit = 0 if timing.task_type == "compute" else 1
+        thread_tid = node * 2 + type_bit
+
+        if (pid, -1) not in seen:
+            seen.add((pid, -1))
+            events.append({"name": "process_name", "ph": "M", "pid": pid, "tid": 0,
+                           "args": {"name": f"Job Group {pid}"}})
+        if (pid, thread_tid) not in seen:
+            seen.add((pid, thread_tid))
+            events.append({"name": "thread_name", "ph": "M", "pid": pid, "tid": thread_tid,
+                           "args": {"name": f"Node {node} {'Compute' if type_bit == 0 else 'Comm'}"}})
+
+        if timing.task_type == "compute":
+            phase = meta.get("phase", "")
+            layer = meta.get("layer_id", None)
+            label = f"{phase} L{layer}" if phase and layer is not None else f"compute_{task_id}"
+        else:
+            comm, src, dst = meta.get("comm_type", ""), meta.get("src", None), meta.get("dst", None)
+            label = f"{comm} {src}→{dst}" if comm and src is not None and dst is not None else f"flow_{task_id}"
+
+        events.append({"name": label, "cat": timing.task_type, "ph": "X",
+                       "ts": timing.start_time_us, "dur": max(timing.end_time_us - timing.start_time_us, 1),
+                       "pid": pid, "tid": thread_tid})
+
+    path = os.path.join(output_dir, "trace.json")
+    with open(path, "w") as f:
+        json.dump({"traceEvents": events}, f)
+    print(f"  Saved: {path}")
+
+
+def generate_cpm_comparison_trace(result, executor, compact_wl, cassini_result, rep_workload, output_dir):
+    """生成 CPM 理想 vs 实际执行的对比 trace。"""
+    import os, json
+    from collections import defaultdict
+
+    iter_time = {jid: p.iteration_time_us for jid, p in cassini_result.communication_patterns.items()}
+    num_iters = {}
+    for info in compact_wl.job_expansion_info.values():
+        num_iters[info.job_group_id] = num_iters.get(info.job_group_id, 0) + 1
+    max_iters = max(num_iters.values()) if num_iters else 1
+    num_groups = len(set(i.job_group_id for i in compact_wl.job_expansion_info.values()))
+    events = []
+    seen = set()
+
+    # ── Actual 行: 遍历执行结果 ──
+    for task_id, timing in result.per_task.items():
+        meta = executor._task_meta.get(task_id, {})
+        info = compact_wl.job_expansion_info.get(meta.get("job_id", 0))
+        if info is None:
+            continue
+        gid = info.job_group_id
+        node = timing.node
+        type_bit = 0 if timing.task_type == "compute" else 1
+        thread_tid = node * 2 + type_bit
+
+        if (gid, -1) not in seen:
+            seen.add((gid, -1))
+            events.append({"name": "process_name", "ph": "M", "pid": gid, "tid": 0,
+                           "args": {"name": f"Job Group {gid} (Actual)"}})
+        if (gid, thread_tid) not in seen:
+            seen.add((gid, thread_tid))
+            events.append({"name": "thread_name", "ph": "M", "pid": gid, "tid": thread_tid,
+                           "args": {"name": f"Node {node} {'Compute' if type_bit == 0 else 'Comm'}"}})
+
+        if timing.task_type == "compute":
+            label = f"{meta.get('phase', '')} L{meta.get('layer_id', '')}" if meta.get('phase') else f"c{task_id}"
+        else:
+            c, s, d = meta.get("comm_type", ""), meta.get("src"), meta.get("dst")
+            label = f"{c} {s}->{d}" if c and s is not None else f"f{task_id}"
+        events.append({"name": label, "cat": timing.task_type, "ph": "X",
+                       "ts": timing.start_time_us, "dur": max(timing.end_time_us - timing.start_time_us, 1),
+                       "pid": gid, "tid": thread_tid})
+
+    # ── CPM Ideal 行: 从 CPM baseline 独立绘制 ──
+    rep_task_map = {t.task_id: t for t in rep_workload.tasks}
+    cpm_tasks = []
+    for tid, tinfo in cassini_result.critical_path.task_timings.items():
+        task = rep_task_map.get(tid)
+        if task is not None:
+            cpm_tasks.append((task, tinfo.earliest_start_us, tinfo.earliest_finish_us))
+
+    for task, cpm_start, cpm_finish in cpm_tasks:
+        gid = task.job_id
+        ideal_pid = gid + num_groups
+        node = task.node if task.is_compute() else (task.src or 0)
+        type_bit = 0 if task.is_compute() else 1
+        thread_tid = node * 2 + type_bit
+
+        if (ideal_pid, -1) not in seen:
+            seen.add((ideal_pid, -1))
+            events.append({"name": "process_name", "ph": "M", "pid": ideal_pid, "tid": 0,
+                           "args": {"name": f"Job Group {gid} (CPM Ideal)"}})
+        if (ideal_pid, thread_tid) not in seen:
+            seen.add((ideal_pid, thread_tid))
+            events.append({"name": "thread_name", "ph": "M", "pid": ideal_pid, "tid": thread_tid,
+                           "args": {"name": f"Node {node} {'Compute' if type_bit == 0 else 'Comm'} (Ideal)"}})
+
+        label = f"{_abbrev_phase(task.phase)} L{task.layer_id}" if task.is_compute() else f"{_abbrev_comm(task.comm_type)} {task.src}->{task.dst}"
+        dur = max(cpm_finish - cpm_start, 1)
+        for it in range(max_iters):
+            shift = it * iter_time.get(gid, 100000)
+            events.append({"name": label, "cat": "cpm_ideal", "ph": "X",
+                           "ts": cpm_start + shift, "dur": int(dur),
+                           "pid": ideal_pid, "tid": thread_tid})
+
+    path = os.path.join(output_dir, "trace_cpm_comparison.json")
+    with open(path, "w") as f:
+        json.dump({"traceEvents": events}, f)
+    print(f"  Saved: {path}")
 # Phase 1: Build representative workload + Cassini analysis
 # ---------------------------------------------------------------------------
 
@@ -374,62 +513,11 @@ def main():
         json.dump({str(k): v for k, v in executor._task_meta.items()}, f)
     print(f"  Saved: {meta_path}")
 
-    # ── Chrome Trace 可视化（pid = job group, tid = node×2 + compute(0)/flow(1)）──
-    trace_path = os.path.join(output_dir, "trace.json")
-    events: list[dict] = []
-    seen: set[tuple[int, int]] = set()  # (pid, tid) 组合已发过 metadata 标记
+    # ── Chrome Trace 可视化 ──
+    generate_chrome_trace(result, executor, compact_wl, output_dir)
+    generate_cpm_comparison_trace(result, executor, compact_wl, cassini_result, rep_workload, output_dir)
 
-    for task_id, timing in result.per_task.items():
-        meta = executor._task_meta.get(task_id, {})
-        job_id = meta.get("job_id", 0)
-        info = compact_wl.job_expansion_info.get(job_id)
-        pid = info.job_group_id if info else 0
-        node = timing.node
-        type_bit = 0 if timing.task_type == "compute" else 1
-        thread_tid = node * 2 + type_bit
-
-        # process_name（每个 pid 一次）
-        if (pid, -1) not in seen:
-            seen.add((pid, -1))
-            events.append({
-                "name": "process_name", "ph": "M",
-                "pid": pid, "tid": 0,
-                "args": {"name": f"Job Group {pid}"},
-            })
-        # thread_name（每个 (pid, tid) 一次）
-        if (pid, thread_tid) not in seen:
-            seen.add((pid, thread_tid))
-            events.append({
-                "name": "thread_name", "ph": "M",
-                "pid": pid, "tid": thread_tid,
-                "args": {"name": f"Node {node} {'Compute' if type_bit == 0 else 'Comm'}"},
-            })
-
-        # 事件标签
-        if timing.task_type == "compute":
-            phase = meta.get("phase", "")
-            layer = meta.get("layer_id", None)
-            label = f"{phase} L{layer}" if phase and layer is not None else f"compute_{task_id}"
-        else:
-            comm = meta.get("comm_type", "")
-            src = meta.get("src", None)
-            dst = meta.get("dst", None)
-            label = f"{comm} {src}→{dst}" if comm and src is not None and dst is not None else f"flow_{task_id}"
-
-        events.append({
-            "name": label,
-            "cat": timing.task_type,
-            "ph": "X",
-            "ts": timing.start_time_us,
-            "dur": max(timing.end_time_us - timing.start_time_us, 1),
-            "pid": pid,
-            "tid": thread_tid,
-        })
-
-    with open(trace_path, "w") as f:
-        json.dump({"traceEvents": events}, f)
-    print(f"  Saved: {trace_path}")
-
+    # ── Summary ──
     # ── Summary ──
     print("\n" + "=" * 60)
     print("Done")
