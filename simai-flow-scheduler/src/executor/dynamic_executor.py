@@ -178,12 +178,28 @@ class DynamicExecutor(AnalyticalExecutor):
                         )
                         if is_valid:
                             batch_completed.add(event.task_id)
+                    event_count += 1
+                    # 进度检查在事件循环内部：确保每次 event_count 达到
+                    # PROGRESS_INTERVAL 倍数时都会触发，不会因为同一时间戳上
+                    # 聚合了大量事件而跨过多个检查点。
+                    if event_count % PROGRESS_INTERVAL == 0:
+                        completed_count = len(self._per_task)
+                        pct = completed_count / total_injected * 100 if total_injected else 0
+                        elapsed = time.monotonic() - _start_time
+                        eta = elapsed / max(pct, 0.1) * (100 - pct) if pct > 0 else 0
+                        print(
+                            f"\r  [progress elps/eta={elapsed:.0f}s/{eta:.0f}s] "
+                            f"jobs={len(self._job_manager.completed_jobs)}/"
+                            f"{len(self._job_manager._dag.jobs)} "
+                            f"{completed_count:,}/{total_injected:,} tasks "
+                            f"({pct:.1f}%)  t={current_time:,} us",
+                            end="\r", flush=True,
+                        )
 
                 self._release_delayed(delayed_queue, current_time, ready_pool)
                 self._drain_ready_pool(current_time, ready_pool, task_map,
                                        start_times, active_flows, push_event)
 
-                event_count += len(batch_events)
 
             self._skip_reallocate = False
             if active_flows:
@@ -210,21 +226,6 @@ class DynamicExecutor(AnalyticalExecutor):
             self._drain_ready_pool(current_time if current_time > 0 else 0,
                                    ready_pool, task_map,
                                    start_times, active_flows, push_event)
-
-            # Progress
-            completed_count = len(self._per_task)
-            if event_count % PROGRESS_INTERVAL == 0:
-                pct = completed_count / total_injected * 100 if total_injected else 0
-                elapsed = time.monotonic() - _start_time
-                eta = elapsed / max(pct, 0.1) * (100 - pct) if pct > 0 else 0
-                print(
-                    f"\r  [progress elps/eta={elapsed:.0f}s/{eta:.0f}s] "
-                    f"jobs={len(self._job_manager.completed_jobs)}/"
-                    f"{len(self._job_manager._dag.jobs)} "
-                    f"{completed_count:,}/{total_injected:,} tasks "
-                    f"({pct:.1f}%)  t={current_time:,} us",
-                    end="\r", flush=True,
-                )
 
         print()
 
