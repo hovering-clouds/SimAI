@@ -224,6 +224,101 @@ def generate_cpm_comparison_trace(result, executor, compact_wl, cassini_result, 
     with open(path, "w") as f:
         json.dump({"traceEvents": events}, f)
     print(f"  Saved: {path}")
+
+
+def collect_link_contention(result, executor, compact_wl, cassini_result, rep_workload, route_table, output_dir):
+    """收集每条竞争链路上 flow 的实际 vs CPM 理想并发数据。
+
+    输出 link_contention.json: { "src->dst": {"actual": [[t0,t1],...], "cpm": [[t0,t1],...]} }
+    """
+    from collections import defaultdict
+
+    # 找竞争链路
+    job_links = defaultdict(set)
+    for task in rep_workload.tasks:
+        if not task.is_flow():
+            continue
+        try:
+            path = route_table.get_path(task)
+        except (KeyError, ValueError):
+            continue
+        for i in range(len(path) - 1):
+            job_links[task.job_id].add((path[i], path[i + 1]))
+    link_jobs = defaultdict(set)
+    for jid, links in job_links.items():
+        for lid in links:
+            link_jobs[lid].add(jid)
+    contended = {lid for lid, jids in link_jobs.items() if len(jids) >= 2}
+
+    def _path_to_links(p):
+        return [(p[i], p[i + 1]) for i in range(len(p) - 1)]
+
+    # ── actual intervals（按 link → group_id → [t0,t1]）──
+    actual: dict[tuple, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+    for task_id, timing in result.per_task.items():
+        meta = executor._task_meta.get(task_id, {})
+        if timing.task_type != "flow":
+            continue
+        if timing.end_time_us - timing.start_time_us <= 0:
+            continue
+        src, dst = meta.get("src"), meta.get("dst")
+        if src is None or dst is None:
+            continue
+        try:
+            path = route_table.get_path_by_endpoints(src, dst)
+        except (KeyError, ValueError):
+            continue
+        dyn_job_id = meta.get("job_id", 0)
+        info = compact_wl.job_expansion_info.get(dyn_job_id)
+        gid = str(info.job_group_id if info else 0)
+        for link in _path_to_links(path):
+            if link in contended:
+                actual[link][gid].append((timing.start_time_us, timing.end_time_us))
+
+    # ── CPM intervals（按 link → group_id → [t0,t1]）──
+    max_iters = max(
+        len(set(jid for jid in compact_wl.job_expansion_info
+                if compact_wl.job_expansion_info[jid].job_group_id == gid))
+        for gid in set(i.job_group_id for i in compact_wl.job_expansion_info.values())
+    ) if compact_wl.job_expansion_info else 1
+    iter_time_map = {jid: p.iteration_time_us for jid, p in cassini_result.communication_patterns.items()}
+
+    cpm: dict[tuple, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+    rep_task_map = {t.task_id: t for t in rep_workload.tasks}
+    for tid, tinfo in cassini_result.critical_path.task_timings.items():
+        task = rep_task_map.get(tid)
+        if task is None or not task.is_flow():
+            continue
+        cpm_start = tinfo.earliest_start_us
+        cpm_dur = max(tinfo.earliest_finish_us - tinfo.earliest_start_us, 1)
+        try:
+            path = route_table.get_path(task)
+        except (KeyError, ValueError):
+            continue
+        links = _path_to_links(path)
+        gid = str(task.job_id)
+        base_shift = cassini_result.time_shifts.get(task.job_id, 0)
+        for link in links:
+            if link not in contended:
+                continue
+            for it in range(max_iters):
+                shift = base_shift + it * iter_time_map.get(task.job_id, 100000)
+                cpm[link][gid].append((cpm_start + shift, cpm_start + shift + cpm_dur))
+
+    # ── write ──
+    out = {}
+    for link in sorted(set(list(actual.keys()) + list(cpm.keys())), key=lambda l: (l[0], l[1])):
+        a = {gid: sorted(ivs) for gid, ivs in actual.get(link, {}).items()}
+        c = {gid: sorted(ivs) for gid, ivs in cpm.get(link, {}).items()}
+        out[f"{link[0]}->{link[1]}"] = {"actual": a, "cpm": c}
+    path = os.path.join(output_dir, "link_contention.json")
+    with open(path, "w") as f:
+        json.dump(out, f)
+    n_actual = sum(len(ivs) for v in out.values() for ivs in v["actual"].values())
+    n_cpm = sum(len(ivs) for v in out.values() for ivs in v["cpm"].values())
+    print(f"  Saved: {path}  (links={len(out)} actual_flows={n_actual} cpm_flows={n_cpm})")
+
+
 # Phase 1: Build representative workload + Cassini analysis
 # ---------------------------------------------------------------------------
 
@@ -545,6 +640,7 @@ def main():
     # ── Chrome Trace 可视化 ──
     generate_chrome_trace(result, executor, compact_wl, output_dir, min_dur_us=min_trace_dur)
     generate_cpm_comparison_trace(result, executor, compact_wl, cassini_result, rep_workload, output_dir, min_dur_us=min_trace_dur)
+    collect_link_contention(result, executor, compact_wl, cassini_result, rep_workload, ecmp_routes, output_dir)
 
     # ── Summary ──
     # ── Summary ──
