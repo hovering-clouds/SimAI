@@ -86,11 +86,12 @@ def _abbrev_comm(comm) -> str:
     return m.get(comm, str(comm.value))
 
 
-def generate_chrome_trace(result, executor, compact_wl, output_dir, min_dur_us: int = 0):
+def generate_chrome_trace(result, executor, compact_wl, output_dir, min_dur_us: int = 0, suffix: str = ""):
     """生成实际执行 trace（pid = job_group, tid = node×2 + compute(0)/flow(1)）。
 
     Args:
         min_dur_us: 过滤掉 duration <= 该值的 task（默认 0 表示不过滤）。
+        suffix: 文件名后缀（如 "_cassini", "_manual"），为空则输出 trace.json。
     """
     events = []
     seen: set[tuple[int, int]] = set()
@@ -128,7 +129,8 @@ def generate_chrome_trace(result, executor, compact_wl, output_dir, min_dur_us: 
                        "ts": timing.start_time_us, "dur": max(timing.end_time_us - timing.start_time_us, 1),
                        "pid": pid, "tid": thread_tid})
 
-    path = os.path.join(output_dir, "trace.json")
+    filename = f"trace{suffix}.json" if suffix else "trace.json"
+    path = os.path.join(output_dir, filename)
     with open(path, "w") as f:
         json.dump({"traceEvents": events}, f)
     print(f"  Saved: {path}")
@@ -226,56 +228,28 @@ def generate_cpm_comparison_trace(result, executor, compact_wl, cassini_result, 
     print(f"  Saved: {path}")
 
 
-def collect_link_contention(result, executor, compact_wl, cassini_result, rep_workload, route_table, output_dir):
-    """收集每条竞争链路上 flow 的实际 vs CPM 理想并发数据。
-
-    输出 link_contention.json: { "src->dst": {"actual": [[t0,t1],...], "cpm": [[t0,t1],...]} }
-    """
+def _find_contended_links(rep_workload, route_table):
     from collections import defaultdict
-
-    # 找竞争链路
     job_links = defaultdict(set)
     for task in rep_workload.tasks:
-        if not task.is_flow():
-            continue
-        try:
-            path = route_table.get_path(task)
-        except (KeyError, ValueError):
-            continue
-        for i in range(len(path) - 1):
-            job_links[task.job_id].add((path[i], path[i + 1]))
+        if not task.is_flow(): continue
+        try: path = route_table.get_path(task)
+        except: continue
+        for i in range(len(path)-1): job_links[task.job_id].add((path[i], path[i+1]))
     link_jobs = defaultdict(set)
     for jid, links in job_links.items():
-        for lid in links:
-            link_jobs[lid].add(jid)
-    contended = {lid for lid, jids in link_jobs.items() if len(jids) >= 2}
+        for lid in links: link_jobs[lid].add(jid)
+    return {lid for lid, jids in link_jobs.items() if len(jids) >= 2}, job_links
 
-    def _path_to_links(p):
-        return [(p[i], p[i + 1]) for i in range(len(p) - 1)]
 
-    # ── actual intervals（按 link → group_id → [t0,t1]）──
-    actual: dict[tuple, dict[str, list]] = defaultdict(lambda: defaultdict(list))
-    for task_id, timing in result.per_task.items():
-        meta = executor._task_meta.get(task_id, {})
-        if timing.task_type != "flow":
-            continue
-        if timing.end_time_us - timing.start_time_us <= 0:
-            continue
-        src, dst = meta.get("src"), meta.get("dst")
-        if src is None or dst is None:
-            continue
-        try:
-            path = route_table.get_path_by_endpoints(src, dst)
-        except (KeyError, ValueError):
-            continue
-        dyn_job_id = meta.get("job_id", 0)
-        info = compact_wl.job_expansion_info.get(dyn_job_id)
-        gid = str(info.job_group_id if info else 0)
-        for link in _path_to_links(path):
-            if link in contended:
-                actual[link][gid].append((timing.start_time_us, timing.end_time_us))
+def _path_to_links(p):
+    return [(p[i], p[i+1]) for i in range(len(p)-1)]
 
-    # ── CPM intervals（按 link → group_id → [t0,t1]）──
+
+def save_link_contention_cpm(cassini_result, rep_workload, route_table, compact_wl, output_dir):
+    """保存 CPM 理想的 link contention 数据（所有模式共享，只存一份）。"""
+    from collections import defaultdict
+    contended, _ = _find_contended_links(rep_workload, route_table)
     max_iters = max(
         len(set(jid for jid in compact_wl.job_expansion_info
                 if compact_wl.job_expansion_info[jid].job_group_id == gid))
@@ -287,36 +261,50 @@ def collect_link_contention(result, executor, compact_wl, cassini_result, rep_wo
     rep_task_map = {t.task_id: t for t in rep_workload.tasks}
     for tid, tinfo in cassini_result.critical_path.task_timings.items():
         task = rep_task_map.get(tid)
-        if task is None or not task.is_flow():
-            continue
-        cpm_start = tinfo.earliest_start_us
-        cpm_dur = max(tinfo.earliest_finish_us - tinfo.earliest_start_us, 1)
-        try:
-            path = route_table.get_path(task)
-        except (KeyError, ValueError):
-            continue
-        links = _path_to_links(path)
+        if task is None or not task.is_flow(): continue
+        s, d = tinfo.earliest_start_us, max(tinfo.earliest_finish_us - tinfo.earliest_start_us, 1)
+        try: path = route_table.get_path(task)
+        except: continue
         gid = str(task.job_id)
-        base_shift = cassini_result.time_shifts.get(task.job_id, 0)
-        for link in links:
-            if link not in contended:
-                continue
+        base = cassini_result.time_shifts.get(task.job_id, 0)
+        for link in _path_to_links(path):
+            if link not in contended: continue
             for it in range(max_iters):
-                shift = base_shift + it * iter_time_map.get(task.job_id, 100000)
-                cpm[link][gid].append((cpm_start + shift, cpm_start + shift + cpm_dur))
-
-    # ── write ──
+                shift = base + it * iter_time_map.get(task.job_id, 100000)
+                cpm[link][gid].append((s + shift, s + shift + d))
     out = {}
-    for link in sorted(set(list(actual.keys()) + list(cpm.keys())), key=lambda l: (l[0], l[1])):
-        a = {gid: sorted(ivs) for gid, ivs in actual.get(link, {}).items()}
-        c = {gid: sorted(ivs) for gid, ivs in cpm.get(link, {}).items()}
-        out[f"{link[0]}->{link[1]}"] = {"actual": a, "cpm": c}
-    path = os.path.join(output_dir, "link_contention.json")
-    with open(path, "w") as f:
-        json.dump(out, f)
-    n_actual = sum(len(ivs) for v in out.values() for ivs in v["actual"].values())
-    n_cpm = sum(len(ivs) for v in out.values() for ivs in v["cpm"].values())
-    print(f"  Saved: {path}  (links={len(out)} actual_flows={n_actual} cpm_flows={n_cpm})")
+    for link in sorted(cpm.keys(), key=lambda l: (l[0], l[1])):
+        out[f"{link[0]}->{link[1]}"] = {gid: sorted(ivs) for gid, ivs in cpm[link].items()}
+    path = os.path.join(output_dir, "link_contention_cpm.json")
+    with open(path, "w") as f: json.dump(out, f)
+    print(f"  Saved: {path}  (links={len(out)})")
+
+
+def save_link_contention_actual(result, executor, compact_wl, route_table, contended, output_dir, mode_label):
+    """保存单个模式的 actual link contention 数据。"""
+    from collections import defaultdict
+    actual: dict[tuple, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+    for task_id, timing in result.per_task.items():
+        meta = executor._task_meta.get(task_id, {})
+        if timing.task_type != "flow": continue
+        if timing.end_time_us - timing.start_time_us <= 0: continue
+        src, dst = meta.get("src"), meta.get("dst")
+        if src is None or dst is None: continue
+        try: path = route_table.get_path_by_endpoints(src, dst)
+        except: continue
+        dyn_job_id = meta.get("job_id", 0)
+        info = compact_wl.job_expansion_info.get(dyn_job_id)
+        gid = str(info.job_group_id if info else 0)
+        for link in _path_to_links(path):
+            if link in contended:
+                actual[link][gid].append((timing.start_time_us, timing.end_time_us))
+    out = {}
+    for link in sorted(actual.keys(), key=lambda l: (l[0], l[1])):
+        out[f"{link[0]}->{link[1]}"] = {gid: sorted(ivs) for gid, ivs in actual[link].items()}
+    path = os.path.join(output_dir, f"link_contention_actual_{mode_label}.json")
+    with open(path, "w") as f: json.dump(out, f)
+    n = sum(len(ivs) for v in out.values() for ivs in v.values())
+    print(f"  Saved: {path}  (links={len(out)} flows={n})")
 
 
 # Phase 1: Build representative workload + Cassini analysis
@@ -419,6 +407,84 @@ def build_dynamic_dag(workload_entries, assignments) -> CompactWorkload:
 
 
 # ---------------------------------------------------------------------------
+# Shift mode parsing
+# ---------------------------------------------------------------------------
+
+
+def parse_mode_shifts(mode_str: str, cassini_shifts: dict, num_groups: int) -> tuple[str, dict[int, int]]:
+    """Parse a mode string into (label, group_id → shift_us) mapping.
+
+    Supported formats:
+        cassini        → use Cassini-computed shifts
+        none           → all zeros
+        manual:0,50,100,150  → comma-separated shifts in ms (one per group)
+    """
+    if mode_str == "cassini":
+        return "cassini", dict(cassini_shifts)
+    if mode_str == "none":
+        return "none", {g: 0 for g in range(num_groups)}
+    if mode_str.startswith("manual:"):
+        parts = mode_str[len("manual:"):].split(",")
+        shifts = {}
+        for g, val_ms in enumerate(parts):
+            shifts[g] = int(float(val_ms) * 1000)
+        return mode_str, shifts
+    raise ValueError(f"Unknown mode: {mode_str}")
+
+
+def run_single_mode(mode_label, time_shifts_by_group, cassini_result, rep_workload, topology,
+                    compact_wl, output_dir, ecmp_routes):
+    """Run dynamic execution with the given time-shift config, generate outputs."""
+    # 每个 mode 重建 job_dag——JobManager.mark_completed() 会修改 dep_count，
+    # 模式之间不能共用同一个 DAG 实例
+    job_dag = JobDAG.from_compact(compact_wl)
+    policy = CassiniSchedulingPolicy(cassini_result)
+    empty_wl = P2PWorkload(version="1.0", meta=Meta(num_jobs=0, num_nodes=0))
+    policy.initialize(empty_wl, topology)
+    policy.compute_order = {}
+
+    # Build delay_by_job: only first iter of each group gets the shift
+    delay_by_job: dict[int, int] = {}
+    groups_seen: set[int] = set()
+    for jid, info in sorted(compact_wl.job_expansion_info.items()):
+        if info.job_group_id not in groups_seen:
+            groups_seen.add(info.job_group_id)
+            delay_by_job[jid] = time_shifts_by_group.get(info.job_group_id, 0)
+
+    executor = DynamicExecutor(topology=topology, policy=policy, analyzer=LightweightAnalyzer())
+    job_expander = JobExpander(task_id_allocator=TaskIdAllocator(), profile_store=None)
+
+    t_start = time.time()
+    result = executor.execute_dynamic(
+        job_dag=job_dag,
+        job_expansion_info=compact_wl.job_expansion_info,
+        job_policy=DelayByJobPolicy(delay_by_job),
+        job_expander=job_expander,
+    )
+    elapsed = time.time() - t_start
+
+    print(f"\n  [{mode_label}] Makespan: {result.makespan_us / 1000:.2f} ms  "
+          f"({result.makespan_us / 1e6:.3f} s)")
+    print(f"  [{mode_label}] Tasks completed: {len(result.per_task)}")
+    print(f"  [{mode_label}] Execution time: {elapsed:.2f}s")
+
+    # Output files with mode suffix
+    suffix = f"_{mode_label}" if mode_label else ""
+    result_path = os.path.join(output_dir, f"result{suffix}.json")
+    result.to_json(result_path)
+    meta_path = os.path.join(output_dir, f"task_meta{suffix}.json")
+    with open(meta_path, "w") as f:
+        json.dump({str(k): v for k, v in executor._task_meta.items()}, f)
+    print(f"  Saved: {result_path}")
+
+    # Save per-mode link contention data
+    contended, _ = _find_contended_links(rep_workload, ecmp_routes)
+    save_link_contention_actual(result, executor, compact_wl, ecmp_routes, contended, output_dir, mode_label)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -450,6 +516,8 @@ def main():
     parser.add_argument("--step-deg", type=int, default=None)
     parser.add_argument("--min-trace-dur", type=int, default=0,
                         help="Filter tasks with duration <= N us from trace output (default 0 = no filter)")
+    parser.add_argument("--modes", nargs="+", default=["cassini"],
+                        help="Shift modes: cassini, none, manual:0,50,100,150 (ms)")
 
     args = parser.parse_args()
 
@@ -461,6 +529,8 @@ def main():
         "placement_clusters": 2,
         "gpus_per_server": None,
         "step_deg": 5,
+        "modes": ["cassini"],
+        "min_trace_dur": 0,
         "workloads": [
             {"aicb": DEFAULT_AICB, "dp": 2, "num_jobs": 2, "num_iters": 5}
         ],
@@ -484,7 +554,13 @@ def main():
         if val is not None:
             config[attr] = val
 
-    min_trace_dur = args.min_trace_dur
+    # CLI overrides for config-level fields
+    if args.modes is not None and args.modes != ["cassini"]:
+        config["modes"] = args.modes
+    if args.min_trace_dur != 0:
+        config["min_trace_dur"] = args.min_trace_dur
+
+    min_trace_dur = config["min_trace_dur"]
 
     if args.aicb is not None:
         n = len(args.aicb)
@@ -580,73 +656,47 @@ def main():
     ))
     print(f"  Job group IDs: {group_display}")
 
-    # ── Phase 4: Dynamic execution ──
+    # ── Phase 4: Dynamic execution (one run per mode) ──
+    num_groups = len(set(i.job_group_id for i in compact_wl.job_expansion_info.values()))
+    results = {}
+
+    for mode_str in config["modes"]:
+        mode_label, shifts = parse_mode_shifts(mode_str, cassini_result.time_shifts, num_groups)
+        print("\n" + "=" * 60)
+        print(f"Phase 4 [{mode_label}]: shifts={ {g: f'{s/1000:.1f}ms' for g,s in shifts.items()} }")
+        print("=" * 60)
+
+        result = run_single_mode(
+            mode_label, shifts, cassini_result, rep_workload, topology,
+            compact_wl, output_dir, ecmp_routes,
+        )
+        results[mode_label] = result
+
+    # CPM link contention (所有模式共享，只存一份)
+    save_link_contention_cpm(cassini_result, rep_workload, ecmp_routes, compact_wl, output_dir)
+
+    # 为每个模式生成 Chrome Trace；仅 cassini 模式额外生成 CPM 对比 trace
     print("\n" + "=" * 60)
-    print("Phase 4: Dynamic execution")
+    print("Generating traces")
     print("=" * 60)
-
-    policy = CassiniSchedulingPolicy(cassini_result)
-    # 动态模式下 time-shift 由 DelayByJobPolicy 处理，CassiniSchedulingPolicy
-    # 的 emit gate 不应阻挡任何 task。传空 workload 确保 _job_started = {}，
-    # 所有 job_id 被 _job_cleared 短路返回 True。
-    empty_wl = P2PWorkload(version="1.0", meta=Meta(num_jobs=0, num_nodes=0))
-    policy.initialize(empty_wl, topology)
-    # 清除 compute_order — 动态模式的 compute_order 完全由 update_analysis() 填充
-    policy.compute_order = {}
-
-    executor = DynamicExecutor(
-        topology=topology,
-        policy=policy,
-        analyzer=LightweightAnalyzer(),
-    )
-
-    job_expander = JobExpander(
-        task_id_allocator=TaskIdAllocator(),
-        profile_store=None,
-    )
-
-    # 构建 delay_by_job: 每个逻辑 Job 的第一个 iteration 加偏移，后续靠 DAG 依赖衔接
-    delay_by_job: dict[int, int] = {}
-    groups_seen: set[int] = set()
-    for jid, info in sorted(compact_wl.job_expansion_info.items()):
-        if info.job_group_id not in groups_seen:
-            groups_seen.add(info.job_group_id)
-            delay_by_job[jid] = cassini_result.time_shifts.get(info.job_group_id, 0)
-
-    t_exec_start = time.time()
-    result = executor.execute_dynamic(
-        job_dag=job_dag,
-        job_expansion_info=compact_wl.job_expansion_info,
-        job_policy=DelayByJobPolicy(delay_by_job),
-        job_expander=job_expander,
-    )
-    t_exec_end = time.time()
-
-    print(f"\n  Makespan: {result.makespan_us / 1000:.2f} ms  "
-          f"({result.makespan_us / 1e6:.3f} s)")
-    print(f"  Tasks completed: {len(result.per_task)}")
-    print(f"  Execution time: {t_exec_end - t_exec_start:.2f}s")
-
-    # ── Output ──
-    result_path = os.path.join(output_dir, "result.json")
-    result.to_json(result_path)
-    print(f"\n  Saved: {result_path}")
-
-    meta_path = os.path.join(output_dir, "task_meta.json")
-    with open(meta_path, "w") as f:
-        json.dump({str(k): v for k, v in executor._task_meta.items()}, f)
-    print(f"  Saved: {meta_path}")
-
-    # ── Chrome Trace 可视化 ──
-    generate_chrome_trace(result, executor, compact_wl, output_dir, min_dur_us=min_trace_dur)
-    generate_cpm_comparison_trace(result, executor, compact_wl, cassini_result, rep_workload, output_dir, min_dur_us=min_trace_dur)
-    collect_link_contention(result, executor, compact_wl, cassini_result, rep_workload, ecmp_routes, output_dir)
+    for mode_label, result in results.items():
+        meta_file = os.path.join(output_dir, f"task_meta_{mode_label}.json")
+        with open(meta_file) as f:
+            _meta = {int(k): v for k, v in json.load(f).items()}
+        _fake_exec = type('_E', (), {'_task_meta': _meta})()
+        suffix = f"_{mode_label}" if mode_label else ""
+        generate_chrome_trace(result, _fake_exec, compact_wl, output_dir, min_dur_us=min_trace_dur, suffix=suffix)
+        if mode_label == "cassini":
+            generate_cpm_comparison_trace(result, _fake_exec, compact_wl, cassini_result, rep_workload, output_dir, min_dur_us=min_trace_dur)
 
     # ── Summary ──
-    # ── Summary ──
     print("\n" + "=" * 60)
-    print("Done")
+    print("Results")
     print("=" * 60)
+    for mode_label, result in results.items():
+        print(f"  [{mode_label}] makespan: {result.makespan_us / 1000:.2f} ms  "
+              f"tasks: {len(result.per_task)}")
+    print("\nDone")
     print(f"  Output: {output_dir}/")
     print(f"  result.json — ExecutionResult with per-task timing")
     print(f"  task_meta.json — Task metadata for visualization")
