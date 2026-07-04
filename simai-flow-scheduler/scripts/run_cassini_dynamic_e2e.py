@@ -86,12 +86,19 @@ def _abbrev_comm(comm) -> str:
     return m.get(comm, str(comm.value))
 
 
-def generate_chrome_trace(result, executor, compact_wl, output_dir):
-    """生成实际执行 trace（pid = job_group, tid = node×2 + compute(0)/flow(1)）。"""
+def generate_chrome_trace(result, executor, compact_wl, output_dir, min_dur_us: int = 0):
+    """生成实际执行 trace（pid = job_group, tid = node×2 + compute(0)/flow(1)）。
+
+    Args:
+        min_dur_us: 过滤掉 duration <= 该值的 task（默认 0 表示不过滤）。
+    """
     events = []
     seen: set[tuple[int, int]] = set()
 
     for task_id, timing in result.per_task.items():
+        dur = timing.end_time_us - timing.start_time_us
+        if dur <= min_dur_us:
+            continue
         meta = executor._task_meta.get(task_id, {})
         job_id = meta.get("job_id", 0)
         info = compact_wl.job_expansion_info.get(job_id)
@@ -127,8 +134,12 @@ def generate_chrome_trace(result, executor, compact_wl, output_dir):
     print(f"  Saved: {path}")
 
 
-def generate_cpm_comparison_trace(result, executor, compact_wl, cassini_result, rep_workload, output_dir):
-    """生成 CPM 理想 vs 实际执行的对比 trace。"""
+def generate_cpm_comparison_trace(result, executor, compact_wl, cassini_result, rep_workload, output_dir, min_dur_us: int = 0):
+    """生成 CPM 理想 vs 实际执行的对比 trace。
+
+    Args:
+        min_dur_us: 过滤掉 duration <= 该值的 task（默认 0 表示不过滤）。
+    """
     import os, json
     from collections import defaultdict
 
@@ -143,6 +154,9 @@ def generate_cpm_comparison_trace(result, executor, compact_wl, cassini_result, 
 
     # ── Actual 行: 遍历执行结果 ──
     for task_id, timing in result.per_task.items():
+        dur = timing.end_time_us - timing.start_time_us
+        if dur <= min_dur_us:
+            continue
         meta = executor._task_meta.get(task_id, {})
         info = compact_wl.job_expansion_info.get(meta.get("job_id", 0))
         if info is None:
@@ -179,6 +193,9 @@ def generate_cpm_comparison_trace(result, executor, compact_wl, cassini_result, 
             cpm_tasks.append((task, tinfo.earliest_start_us, tinfo.earliest_finish_us))
 
     for task, cpm_start, cpm_finish in cpm_tasks:
+        cpm_dur = cpm_finish - cpm_start
+        if cpm_dur <= min_dur_us:
+            continue
         gid = task.job_id
         ideal_pid = gid + num_groups
         node = task.node if task.is_compute() else (task.src or 0)
@@ -195,9 +212,10 @@ def generate_cpm_comparison_trace(result, executor, compact_wl, cassini_result, 
                            "args": {"name": f"Node {node} {'Compute' if type_bit == 0 else 'Comm'} (Ideal)"}})
 
         label = f"{_abbrev_phase(task.phase)} L{task.layer_id}" if task.is_compute() else f"{_abbrev_comm(task.comm_type)} {task.src}->{task.dst}"
-        dur = max(cpm_finish - cpm_start, 1)
+        dur = max(cpm_dur, 1)
+        base_shift = cassini_result.time_shifts.get(gid, 0)
         for it in range(max_iters):
-            shift = it * iter_time.get(gid, 100000)
+            shift = base_shift + it * iter_time.get(gid, 100000)
             events.append({"name": label, "cat": "cpm_ideal", "ph": "X",
                            "ts": cpm_start + shift, "dur": int(dur),
                            "pid": ideal_pid, "tid": thread_tid})
@@ -335,6 +353,8 @@ def main():
     parser.add_argument("--num-iters", nargs="+", type=int, default=None,
                         help="Iterations per job")
     parser.add_argument("--step-deg", type=int, default=None)
+    parser.add_argument("--min-trace-dur", type=int, default=0,
+                        help="Filter tasks with duration <= N us from trace output (default 0 = no filter)")
 
     args = parser.parse_args()
 
@@ -368,6 +388,8 @@ def main():
         val = getattr(args, cli_key, None)
         if val is not None:
             config[attr] = val
+
+    min_trace_dur = args.min_trace_dur
 
     if args.aicb is not None:
         n = len(args.aicb)
@@ -521,8 +543,8 @@ def main():
     print(f"  Saved: {meta_path}")
 
     # ── Chrome Trace 可视化 ──
-    generate_chrome_trace(result, executor, compact_wl, output_dir)
-    generate_cpm_comparison_trace(result, executor, compact_wl, cassini_result, rep_workload, output_dir)
+    generate_chrome_trace(result, executor, compact_wl, output_dir, min_dur_us=min_trace_dur)
+    generate_cpm_comparison_trace(result, executor, compact_wl, cassini_result, rep_workload, output_dir, min_dur_us=min_trace_dur)
 
     # ── Summary ──
     # ── Summary ──
