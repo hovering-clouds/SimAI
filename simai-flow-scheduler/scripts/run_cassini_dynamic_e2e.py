@@ -43,8 +43,9 @@ from src.executor.job_policy import DelayByJobPolicy
 from src.executor.policies.cassini_policy import CassiniSchedulingPolicy
 from src.static_analysis.strategies.cassini_strategy import CassiniAnalyzer
 from src.static_analysis.strategies.default_strategy import LightweightAnalyzer
+from src.static_analysis.passes.routing import EcmpStrategy
 from src.static_analysis.passes.topology_loader import NodeType, TopologyLoader
-from src.workload_format.schema import Job, ParallelismConfig
+from src.workload_format.schema import Job, Meta, P2PWorkload, ParallelismConfig
 from src.workload_format.compact_workload import (
     CompactWorkload, JobDAG, TaskIdAllocator,
     merge_compact_workloads,
@@ -433,7 +434,9 @@ def main():
     print("Phase 2: Cassini analysis on representative workload")
     print("=" * 60)
     t0 = time.time()
-    cassini_result = CassiniAnalyzer(topology, step_deg=step_deg).analyze(rep_workload)
+    ecmp_routes = EcmpStrategy().compute_routes(rep_workload, topology)
+    cassini_result = CassiniAnalyzer(topology, step_deg=step_deg).analyze(
+        rep_workload, route_table=ecmp_routes)
     patch_iteration_time_us(cassini_result, rep_workload)
     t1 = time.time()
 
@@ -466,7 +469,11 @@ def main():
     print("=" * 60)
 
     policy = CassiniSchedulingPolicy(cassini_result)
-    policy.initialize(rep_workload, topology)
+    # 动态模式下 time-shift 由 DelayByJobPolicy 处理，CassiniSchedulingPolicy
+    # 的 emit gate 不应阻挡任何 task。传空 workload 确保 _job_started = {}，
+    # 所有 job_id 被 _job_cleared 短路返回 True。
+    empty_wl = P2PWorkload(version="1.0", meta=Meta(num_jobs=0, num_nodes=0))
+    policy.initialize(empty_wl, topology)
     # 清除 compute_order — 动态模式的 compute_order 完全由 update_analysis() 填充
     policy.compute_order = {}
 

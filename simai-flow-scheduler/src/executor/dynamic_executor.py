@@ -161,12 +161,23 @@ class DynamicExecutor(AnalyticalExecutor):
                         )
                         batch_completed.add(event.task_id)
                     elif event.kind == "flow_completion":
+                        # 在调用前检查：只有非 stale 事件才计入 batch_completed。
+                        # stale 事件（版本不匹配或 flow 已被删除）会在
+                        # _handle_flow_completion 的懒删除检查中提前返回，
+                        # 但 caller 侧的 batch_completed 不应包含它，否则
+                        # 后续 on_tasks_completed 可能错误地消费 terminal task
+                        # 导致 Job 被过早标记为 completed（见 _reclaim_completed KeyError bug）。
+                        is_valid = (
+                            event.task_id in active_flows
+                            and active_flows[event.task_id].version == event.version
+                        )
                         self._handle_flow_completion(
                             event, task_map, active_flows, end_times,
                             dep_count, dependents, push_event,
                             start_times, ready_pool,
                         )
-                        batch_completed.add(event.task_id)
+                        if is_valid:
+                            batch_completed.add(event.task_id)
 
                 self._release_delayed(delayed_queue, current_time, ready_pool)
                 self._drain_ready_pool(current_time, ready_pool, task_map,
