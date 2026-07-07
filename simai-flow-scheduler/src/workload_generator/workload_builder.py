@@ -426,13 +426,11 @@ class WorkloadBuilder:
                                            └──→ GA[K].fwd chain
               GA[0] fwd done ──┬──→ post_0.fwd → ... → post_M.fwd
               GA[K] fwd done ──┘
-              Bridge: post_M.fwd → post_M.ig
+              Per-GA bridge:  each GA[-1].fwd → GA[-1].ig
+              Post bridge:    post[-1].fwd → post[-1].ig
 
           Backward (reverse):
-            post_M.ig → ... → post_0.ig ──┬──→ GA[0].bkwd chain
-                                            └──→ GA[1].bkwd chain  ← parallel
-                                                     ...
-                                            └──→ GA[K].bkwd chain
+            each GA chain: GA[-1].ig → ... → GA[0].ig  (per GA, independent)
               GA[0] bkwd done ──┬──→ pre_N.ig → ... → pre_0.ig
               GA[K] bkwd done ──┘
 
@@ -440,6 +438,11 @@ class WorkloadBuilder:
           Forward chain: item[0].fwd → item[1].fwd → ... → item[N].fwd
           Backward chain: item[N].ig → item[N-1].ig → ... → item[0].ig
           IG→WG: item[i].ig → item[i].wg (same layer)
+
+        Note: Backward Fork (post[0].ig → GA[-1].ig) is intentionally
+        omitted — post items' backward is all compute=0/comm=NONE and
+        does not gate GA backward. The post→GA ordering in GPipe is
+        enforced by compute_order, not DAG.
         """
         ga_groups = self._group_items_by_ga(
             item_tasks_list, num_pre_items, num_layer_items, items_per_ga)
@@ -462,22 +465,27 @@ class WorkloadBuilder:
         self._wire_forward_chain(post_items)
         self._wire_backward_chain(post_items)
 
-        # Bridge: last item's fwd → last item's ig (fwd→bwd transition)
-        # The bridge lives on whichever section is last in the workload.
-        if post_items:
-            bridge_item = post_items[-1]
-        elif ga_groups:
-            bridge_item = ga_groups[-1][-1]
-        elif pre_items:
-            bridge_item = pre_items[-1]
-        else:
-            bridge_item = None
-
-        if bridge_item is not None:
+        # Per-GA bridge: each GA group's backward depends on its own forward.
+        # This ensures GA's ig has a data dependency on its fwd, which is
+        # the correct per-microbatch backprop dependency. For 1F1B scheduling,
+        # this is essential — each GA's backward can start as soon as its
+        # forward completes, rather than waiting for a global barrier.
+        #
+        # Also keeps the post items bridge (post[-1].fwd → post[-1].ig)
+        # for the optimizer/cross-entropy backward (which is all NONE/0).
+        for ga_group in ga_groups:
+            last_item = ga_group[-1]
             self._wire_per_node_phase_transition(
-                src_result=bridge_item.fwd_result,
-                src_computes=bridge_item.fwd_computes,
-                dst_computes=bridge_item.ig_computes)
+                src_result=last_item.fwd_result,
+                src_computes=last_item.fwd_computes,
+                dst_computes=last_item.ig_computes)
+
+        if post_items:
+            last_post = post_items[-1]
+            self._wire_per_node_phase_transition(
+                src_result=last_post.fwd_result,
+                src_computes=last_post.fwd_computes,
+                dst_computes=last_post.ig_computes)
 
         # ===== Barrier connections between sections =====
 
@@ -514,14 +522,6 @@ class WorkloadBuilder:
                     dst_computes=post_items[0].fwd_computes)
 
         # --- Backward barriers ---
-        # Fork: post → all GAs
-        if post_items:
-            for ga_group in ga_groups:
-                self._wire_per_node_phase_transition(
-                    src_result=post_items[0].ig_result,
-                    src_computes=post_items[0].ig_computes,
-                    dst_computes=ga_group[-1].ig_computes)
-
         # Join: all GAs → pre
         if pre_items:
             for ga_group in ga_groups:
