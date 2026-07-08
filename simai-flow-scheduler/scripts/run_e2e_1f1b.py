@@ -45,7 +45,7 @@ def main():
     print("=" * 60)
     parser = AicbParser()
     header, items = parser.parse(aicb_file)
-    dp = header.all_gpus // (header.tp * header.pp)
+    dp = header.all_gpus // (header.tp * header.pp * header.ep)
     print(f"  Header: tp={header.tp}, dp={dp}, pp={header.pp}, ep={header.ep}, "
           f"ga={header.ga}, vpp={header.vpp}, all_gpus={header.all_gpus}")
     print(f"  Work items: {len(items)}")
@@ -61,7 +61,7 @@ def main():
     tp = header.tp
     pp = header.pp
     ep = header.ep
-    dp = header.all_gpus // (tp * pp)
+    dp = header.all_gpus // (tp * pp * ep)
     total_gpus = header.all_gpus
 
     job = Job(

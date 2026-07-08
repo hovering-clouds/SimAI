@@ -25,9 +25,9 @@ from src.executor.policies.default_policy import DefaultSchedulingPolicy
 
 def main():
     # --- Paths ---
-    aicb_file = "inputs/aicb-workload/A100-gpt_7B_ws1_pp1-world_size1-tp1-pp1-ep1-gbs1-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-True.txt"
+    aicb_file = "inputs/aicb-workload/A100-gpt_7B_ws4_pp2-world_size4-tp2-pp2-ep1-gbs32-mbs4-seq4096-MOE-False-GEMM-False-flash_attn-True.txt"
     topo_file = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100"
-    output_dir = "outputs/A100-gpt_7B_ws1_pp1-world_size1-tp1-pp1-ep1-gbs1-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-True.txt"
+    output_dir = "outputs/e2e_gpipe"
     os.makedirs(output_dir, exist_ok=True)
 
     # ============================================================
@@ -38,9 +38,8 @@ def main():
     print("=" * 60)
     parser = AicbParser()
     header, items = parser.parse(aicb_file)
-    print(f"  Model: GPT-175B")
-    print(f"  Header: tp={header.tp}, dp={header.all_gpus // header.tp}, "
-          f"pp={header.pp}, ep={header.ep}, "
+    dp = header.all_gpus // (header.tp * header.pp * header.ep)
+    print(f"  Header: tp={header.tp}, dp={dp}, pp={header.pp}, ep={header.ep}, "
           f"ga={header.ga}, vpp={header.vpp}, all_gpus={header.all_gpus}")
     print(f"  Work items: {len(items)}")
 
@@ -53,7 +52,7 @@ def main():
     print("=" * 60)
 
     tp = header.tp
-    dp = header.all_gpus // tp  # 16 // 8 = 2
+    dp = header.all_gpus // (header.tp * header.pp * header.ep)
     pp = header.pp
     ep = header.ep
     total_gpus = header.all_gpus
