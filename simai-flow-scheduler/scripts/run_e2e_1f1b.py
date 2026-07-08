@@ -1,8 +1,11 @@
 """
-End-to-end simulation: AICB workload → P2PWorkload → Static Analysis → ExecutionPlan → AnalyticalExecutor
+1F1B end-to-end simulation: AICB workload → P2PWorkload → 1F1B compute_order → AnalyticalExecutor
+
+Replaces the GPipe-style compute_order (all-F → all-B) with 1F1B ordering
+where each GA step's backward follows its forward, reducing pipeline bubble.
 
 Usage:
-    python scripts/run_e2e.py
+    uv run python scripts/run_e2e_1f1b.py
 """
 
 import sys
@@ -16,8 +19,12 @@ os.chdir(project_root)
 from src.workload_format.schema import Job, ParallelismConfig
 from src.workload_generator.aicb_parser import AicbParser
 from src.workload_generator.workload_builder import WorkloadBuilder
+from src.workload_generator.rank_grouper import RankGrouper
 from src.static_analysis.passes.topology_loader import TopologyLoader
-from src.static_analysis.strategies.default_strategy import DefaultAnalyzer
+from src.static_analysis.passes.routing import BfsStrategy
+from src.static_analysis.strategies.default_strategy import (
+    DefaultAnalysisResult, OneFOneBAnalyzer,
+)
 from src.workload_format.writer import WorkloadWriter
 from src.executor.analytical import AnalyticalExecutor
 from src.executor.policies.default_policy import DefaultSchedulingPolicy
@@ -27,7 +34,7 @@ def main():
     # --- Paths ---
     aicb_file = "inputs/aicb-workload/A100-gpt_7B_ws4_pp2-world_size4-tp2-pp2-ep1-gbs32-mbs4-seq4096-MOE-False-GEMM-False-flash_attn-True.txt"
     topo_file = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100"
-    output_dir = "outputs/e2e_gpipe"
+    output_dir = "outputs/e2e_1f1b"
     os.makedirs(output_dir, exist_ok=True)
 
     # ============================================================
@@ -52,9 +59,9 @@ def main():
     print("=" * 60)
 
     tp = header.tp
-    dp = header.all_gpus // (header.tp * header.pp * header.ep)
     pp = header.pp
     ep = header.ep
+    dp = header.all_gpus // (tp * pp * ep)
     total_gpus = header.all_gpus
 
     job = Job(
@@ -82,7 +89,7 @@ def main():
     # ============================================================
     print()
     print("=" * 60)
-    print("Step 3: Load topology & run static analysis")
+    print("Step 3: Load topology & run 1F1B static analysis")
     print("=" * 60)
 
     loader = TopologyLoader()
@@ -91,8 +98,22 @@ def main():
     print(f"  Links: {len(topology.links)}")
     print(f"  GPU type: {topology.gpu_type}")
 
-    analysis = DefaultAnalyzer(topology).analyze(workload)
+    # Build node → PP stage mapping
+    grouper = RankGrouper(job.assigned_nodes, job.parallelism)
+    stage_size = grouper.dp * grouper.ep * grouper.tp
+    node_to_stage: dict[int, int] = {}
+    for stage_id in range(grouper.pp):
+        for i in range(stage_size):
+            node = grouper.nodes[stage_id * stage_size + i]
+            node_to_stage[node] = stage_id
+
+    # Compute routes (BFS) + 1F1B compute order
+    route_table = BfsStrategy().compute_routes(workload, topology)
+    plan = OneFOneBAnalyzer(pp=grouper.pp, node_to_stage=node_to_stage).analyze(workload)
+    analysis = DefaultAnalysisResult(route_table=route_table, execution_plan=plan.execution_plan)
+
     print(f"  Nodes with compute tasks: {len(analysis.execution_plan.compute_order)}")
+    print(f"  Schedule: 1F1B (pp={grouper.pp}, ga={header.ga})")
 
     # ============================================================
     # Step 4: Run analytical executor
@@ -125,7 +146,7 @@ def main():
 
     print()
     print("=" * 60)
-    print("Simulation complete!")
+    print("1F1B simulation complete!")
     print(f"  Output directory: {output_dir}/")
     print(f"  Visualize with:  python scripts/visualize.py {result_path}")
     print("=" * 60)

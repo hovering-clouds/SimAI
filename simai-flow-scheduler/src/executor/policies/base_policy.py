@@ -53,3 +53,16 @@ class SchedulingPolicy(ABC):
     def on_task_completed(self, current_time: int, task: Task) -> None:
         """task 完成时的通知回调。"""
         ...
+
+    def update_analysis(self, workload: P2PWorkload, analysis_result) -> None:
+        """增量合并新 Job 的 workload + 分析结果（用于动态展开模式）。
+
+        Args:
+            workload: 新 Job 展开后的完整 P2PWorkload（含 tasks）。
+            analysis_result: 对应 Analyzer.analyze() 的返回值
+                （如 DefaultAnalysisResult / CassiniAnalysisResult）。
+
+        基类提供空实现，每个策略按需覆盖。
+        """
+
+

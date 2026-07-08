@@ -6,7 +6,6 @@ from .base_policy import SchedulingPolicy
 from ..bandwidth_allocators.fair_share_allocator import FairShareAllocator
 from ..runtime import ActiveFlow
 from ...static_analysis.strategies.default_strategy import DefaultAnalysisResult
-from ...static_analysis.passes.routing import RouteTable
 from ...static_analysis.passes.topology_loader import NetworkTopology
 from ...workload_format.schema import P2PWorkload, Task
 
@@ -78,3 +77,19 @@ class DefaultSchedulingPolicy(SchedulingPolicy):
     def on_task_completed(self, current_time: int, task: Task) -> None:
         if task.is_compute():
             self.compute_cursor[task.node] += 1
+
+    def update_analysis(self, workload: P2PWorkload, analysis_result: DefaultAnalysisResult) -> None:
+        """增量合并新 Job 的分析结果。"""
+        # 合并 compute ordering
+        for node_id, task_ids in analysis_result.execution_plan.compute_order.items():
+            self.compute_order.setdefault(node_id, []).extend(task_ids)
+
+        # 重建 compute_position 索引
+        self.compute_position = {
+            task_id: idx
+            for node, ids in self.compute_order.items()
+            for idx, task_id in enumerate(ids)
+        }
+
+        # 合并路由表（各 RouteTable 子类自行处理合并逻辑）
+        self.route_table.update_routes(analysis_result.route_table)

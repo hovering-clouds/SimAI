@@ -200,10 +200,11 @@ print(f"  Nodes: {topology.total_nodes}  Links: {len(topology.links)}  "
       f"GPUs: {len(topology.gpu_nodes)}")
 
 # Verify storage node exists
-assert 208 in topology.gpu_nodes, "Storage node 208 not found in topology!"
-print(f"  Storage node 208 links:")
-for n, l in topology.get_neighbors(208):
-    print(f"    -> {n}: {l.bandwidth_gbps}Gbps")
+for sn in STORAGE_NODES:
+    assert sn in topology.gpu_nodes, f"Storage node {sn} not found in topology!"
+    print(f"  Storage node {sn} links:")
+    for n, l in topology.get_neighbors(sn):
+        print(f"    -> {n}: {l.bandwidth_gbps}Gbps")
 
 
 # ── Step 3: Run default policy ────────────────────────────────────────────────

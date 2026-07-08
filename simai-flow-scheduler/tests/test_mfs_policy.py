@@ -3,7 +3,7 @@ import pytest
 
 from src.workload_format.schema import (
     P2PWorkload, Meta, Job, Task, Phase, CommType, TaskType,
-    ParallelismConfig,
+    ParallelismConfig, BatchTaskInfo, BatchEntryType,
 )
 from src.static_analysis.passes.topology_loader import NetworkTopology, Link
 from src.static_analysis.strategies.mfs_strategy import MfsAnalyzer
@@ -68,10 +68,12 @@ class TestMfsPolicyExecutor:
                   phase=Phase.PREFILL, layer_id=0, deps=[0])
 
         wl = _make_workload([t0, t1, t2], nodes=3)
-        btm = {
-            "b1": {"task_ids": [0, 1], "request_ids": [1], "type": "prefill"},
-            "kv_b1_b2": {"task_ids": [2], "request_ids": [1], "type": "kv_transfer"},
-        }
+        btm = [
+            BatchTaskInfo(batch_id="b1", task_ids=[0, 1], request_ids=[1],
+                          entry_type=BatchEntryType.PREFILL, replica_id=0, stage_id=0),
+            BatchTaskInfo(batch_id="kv_b1_b2", task_ids=[2], request_ids=[1],
+                          entry_type=BatchEntryType.KV_TRANSFER, replica_id=0, stage_id=0),
+        ]
         trace = _empty_trace([1])
 
         analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
@@ -97,10 +99,12 @@ class TestMfsPolicyExecutor:
                   phase=Phase.PREFILL, layer_id=0)
 
         wl = _make_workload([t0, t1, t2])
-        btm = {
-            "b1": {"task_ids": [0, 1], "request_ids": [1], "type": "prefill"},
-            "kv_b1_b2": {"task_ids": [2], "request_ids": [1], "type": "kv_transfer"},
-        }
+        btm = [
+            BatchTaskInfo(batch_id="b1", task_ids=[0, 1], request_ids=[1],
+                          entry_type=BatchEntryType.PREFILL, replica_id=0, stage_id=0),
+            BatchTaskInfo(batch_id="kv_b1_b2", task_ids=[2], request_ids=[1],
+                          entry_type=BatchEntryType.KV_TRANSFER, replica_id=0, stage_id=0),
+        ]
         trace = {"requests": {"1": {"num_prefill_tokens": 100, "num_decode_tokens": 10, "ttft_slo_us": 1000}}}
 
         analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
@@ -124,7 +128,10 @@ class TestMfsPolicyExecutor:
                   phase=Phase.PREFILL, layer_id=0, deps=[0])
 
         wl = _make_workload([t0, t1, t2])
-        btm = {"b1": {"task_ids": [0, 1, 2], "request_ids": [1], "type": "prefill"}}
+        btm = [
+            BatchTaskInfo(batch_id="b1", task_ids=[0, 1, 2], request_ids=[1],
+                          entry_type=BatchEntryType.PREFILL, replica_id=0, stage_id=0),
+        ]
         trace = _empty_trace([1])
 
         analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
@@ -148,11 +155,14 @@ class TestMfsPolicyExecutor:
                   phase=Phase.PREFILL, layer_id=0)
 
         wl = _make_workload([t0, t1, t2])
-        btm = {
-            "b1": {"task_ids": [0], "request_ids": [1], "type": "prefill"},
-            "kv_b1_b2": {"task_ids": [1], "request_ids": [1], "type": "kv_transfer"},
-            "kv_b3_b4": {"task_ids": [2], "request_ids": [2], "type": "kv_transfer"},
-        }
+        btm = [
+            BatchTaskInfo(batch_id="b1", task_ids=[0], request_ids=[1],
+                          entry_type=BatchEntryType.PREFILL, replica_id=0, stage_id=0),
+            BatchTaskInfo(batch_id="kv_b1_b2", task_ids=[1], request_ids=[1],
+                          entry_type=BatchEntryType.KV_TRANSFER, replica_id=0, stage_id=0),
+            BatchTaskInfo(batch_id="kv_b3_b4", task_ids=[2], request_ids=[2],
+                          entry_type=BatchEntryType.KV_TRANSFER, replica_id=0, stage_id=0),
+        ]
         trace = _empty_trace([1, 2])
 
         analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
@@ -172,7 +182,10 @@ class TestMfsPolicyExecutor:
                   phase=Phase.PREFILL, layer_id=0, deps=[0])
 
         wl = _make_workload([t0, t1])
-        btm = {"b1": {"task_ids": [0, 1], "request_ids": [5], "type": "prefill"}}
+        btm = [
+            BatchTaskInfo(batch_id="b1", task_ids=[0, 1], request_ids=[5],
+                          entry_type=BatchEntryType.PREFILL, replica_id=0, stage_id=0),
+        ]
         trace = _empty_trace([5])
 
         analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
@@ -195,8 +208,11 @@ class TestMfsPolicyExecutor:
                   deps=[0])
 
         wl = _make_workload([t0, t1])
-        btm = {"b1": {"task_ids": [0, 1], "request_ids": [1], "type": "prefill", "stage_id": 0}}
-        trace = _empty_trace([1])
+        btm = [
+            BatchTaskInfo(batch_id="b1", task_ids=[0, 1], request_ids=[1],
+                          entry_type=BatchEntryType.PREFILL, replica_id=0, stage_id=0),
+        ]
+        trace = {"total_layers": 32, **_empty_trace([1])}
 
         analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
         policy = MfsSchedulingPolicy(analysis=analysis)
@@ -224,10 +240,12 @@ class TestRemainingUsTracking:
                   phase=Phase.PREFILL, layer_id=0, deps=[1])
 
         wl = _make_workload([t0, t1, t2])
-        btm = {
-            "b1": {"task_ids": [0, 1], "request_ids": [1], "type": "prefill"},
-            "kv_b1_b2": {"task_ids": [2], "request_ids": [1], "type": "kv_transfer"},
-        }
+        btm = [
+            BatchTaskInfo(batch_id="b1", task_ids=[0, 1], request_ids=[1],
+                          entry_type=BatchEntryType.PREFILL, replica_id=0, stage_id=0),
+            BatchTaskInfo(batch_id="kv_b1_b2", task_ids=[2], request_ids=[1],
+                          entry_type=BatchEntryType.KV_TRANSFER, replica_id=0, stage_id=0),
+        ]
         trace = _empty_trace([1])
 
         analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
@@ -253,10 +271,12 @@ class TestRemainingUsTracking:
                   phase=Phase.PREFILL, layer_id=0, deps=[0])
 
         wl = _make_workload([t0, t1])
-        btm = {
-            "b1": {"task_ids": [0], "request_ids": [1], "type": "prefill"},
-            "kv_b1_b2": {"task_ids": [1], "request_ids": [1], "type": "kv_transfer"},
-        }
+        btm = [
+            BatchTaskInfo(batch_id="b1", task_ids=[0], request_ids=[1],
+                          entry_type=BatchEntryType.PREFILL, replica_id=0, stage_id=0),
+            BatchTaskInfo(batch_id="kv_b1_b2", task_ids=[1], request_ids=[1],
+                          entry_type=BatchEntryType.KV_TRANSFER, replica_id=0, stage_id=0),
+        ]
         trace = _empty_trace([1])
 
         analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
@@ -289,12 +309,16 @@ class TestRemainingUsTracking:
                   phase=Phase.PREFILL, layer_id=0, deps=[2])
 
         wl = _make_workload([t0, t1, t2, t3])
-        btm = {
-            "b1": {"task_ids": [0], "request_ids": [1], "type": "prefill"},
-            "kv_b1_b2": {"task_ids": [1], "request_ids": [1], "type": "kv_transfer"},
-            "b2": {"task_ids": [2], "request_ids": [2], "type": "prefill"},
-            "kv_b3_b4": {"task_ids": [3], "request_ids": [2], "type": "kv_transfer"},
-        }
+        btm = [
+            BatchTaskInfo(batch_id="b1", task_ids=[0], request_ids=[1],
+                          entry_type=BatchEntryType.PREFILL, replica_id=0, stage_id=0),
+            BatchTaskInfo(batch_id="kv_b1_b2", task_ids=[1], request_ids=[1],
+                          entry_type=BatchEntryType.KV_TRANSFER, replica_id=0, stage_id=0),
+            BatchTaskInfo(batch_id="b2", task_ids=[2], request_ids=[2],
+                          entry_type=BatchEntryType.PREFILL, replica_id=0, stage_id=0),
+            BatchTaskInfo(batch_id="kv_b3_b4", task_ids=[3], request_ids=[2],
+                          entry_type=BatchEntryType.KV_TRANSFER, replica_id=0, stage_id=0),
+        ]
         trace = _empty_trace([1, 2])
 
         analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
@@ -331,8 +355,11 @@ class TestDecodePhaseIsolation:
                   deps=[1])
 
         wl = _make_workload([t0, t1, t2])
-        btm = {"b1": {"task_ids": [0, 1, 2], "request_ids": [1], "type": "prefill", "stage_id": 0}}
-        trace = _empty_trace([1])
+        btm = [
+            BatchTaskInfo(batch_id="b1", task_ids=[0, 1, 2], request_ids=[1],
+                          entry_type=BatchEntryType.PREFILL, replica_id=0, stage_id=0),
+        ]
+        trace = {"total_layers": 32, **_empty_trace([1])}
 
         analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)
         policy = MfsSchedulingPolicy(analysis=analysis)
@@ -354,7 +381,10 @@ class TestDecodePhaseIsolation:
                   phase=Phase.DECODE, layer_id=0, deps=[0])
 
         wl = _make_workload([t0, t1])
-        btm = {"d1": {"task_ids": [0, 1], "request_ids": [1], "type": "decode", "stage_id": 0}}
+        btm = [
+            BatchTaskInfo(batch_id="d1", task_ids=[0, 1], request_ids=[1],
+                          entry_type=BatchEntryType.DECODE, replica_id=0, stage_id=0),
+        ]
         trace = _empty_trace([1])
 
         analysis = MfsAnalyzer(topo).analyze(wl, btm, trace=trace)

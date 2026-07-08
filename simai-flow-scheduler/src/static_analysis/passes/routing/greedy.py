@@ -21,6 +21,10 @@ class GreedyRouteTable(RouteTable):
             )
         return list(self.paths[task.task_id])
 
+    def update_routes(self, other: "RouteTable") -> None:
+        if isinstance(other, GreedyRouteTable):
+            self.paths.update(other.paths)
+
 
 class GreedyStrategy(RouteStrategy):
     """Offline greedy routing: least-active-link heuristic among k shortest paths.

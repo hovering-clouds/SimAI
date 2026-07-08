@@ -93,6 +93,7 @@ class InferenceTraceExpander:
     ) -> tuple[P2PWorkload, list[BatchTaskInfo]]:
         """
         Expand trace into P2PWorkload + batch_task_info list.
+        Now internally loops over expand_single_batch() — behaviour unchanged.
 
         Args:
             trace: Parsed trace dict (from JSON).
@@ -104,6 +105,11 @@ class InferenceTraceExpander:
             (P2PWorkload, batch_task_info) where batch_task_info is a list of
             BatchTaskInfo entries, one per trace batch or sub-operation.
         """
+        total_layers = self._get_total_layers(trace)
+        batch_lookup = {b["batch_id"]: b for b in trace["batches"]}
+        resolved_storage_node_ids, request_reuse_info = self._setup_kv_reuse(
+            trace, storage_node_ids)
+
         all_flow_tasks: list[FlowTask] = []
         task_id = 0
         batch_task_info: list[BatchTaskInfo] = []
@@ -112,180 +118,21 @@ class InferenceTraceExpander:
         # (the tasks that the next batch's first tasks should depend on)
         batch_exits: dict[str, dict[int, list[int]]] = {}
 
-        batch_lookup = {b["batch_id"]: b for b in trace["batches"]}
-        total_layers = self._get_total_layers(trace)
-
-        # ── Stage 1 KV reuse setup ───────────────────────────────────────────
-        resolved_storage_node_ids: list[int] = []
-        request_reuse_info: dict[int, dict] = {}
-        reuse_cfg = trace.get("stage1_kv_reuse")
-        if reuse_cfg and reuse_cfg.get("num_storage_nodes", 0) > 0:
-            if storage_node_ids is not None:
-                resolved_storage_node_ids = list(storage_node_ids)
-            else:
-                num_storage = reuse_cfg["num_storage_nodes"]
-                if self._assigned_nodes is not None:
-                    total_gpus = max(self._assigned_nodes) + 1
-                else:
-                    num_replicas = len({b["replica_id"] for b in trace["batches"]})
-                    total_gpus = self._world_size() * num_replicas
-                resolved_storage_node_ids = list(
-                    range(total_gpus, total_gpus + num_storage))
-            # Extract per-request reuse info from trace requests
-            for req_key, req_meta in trace.get("requests", {}).items():
-                hit_ratio = req_meta.get("kv_reuse_hit_ratio")
-                node_idx = req_meta.get("kv_reuse_storage_node_idx")
-                if hit_ratio is not None and hit_ratio > 0 and node_idx is not None:
-                    request_reuse_info[int(req_key)] = {
-                        "hit_ratio": hit_ratio,
-                        "storage_node_idx": node_idx,
-                    }
-
         for batch in trace["batches"]:
-            bid = batch["batch_id"]
-            btype = batch["type"]
-            replica_id = batch["replica_id"]
-            stage_id = batch.get("stage_id", 0)
-
-            # ── Collect predecessor exit tasks ────────────────────────────
-            prev_exits: dict[int, list[int]] = {}
-
-            for dep_id in batch.get("depends_on", []):
-                dep_batch = batch_lookup[dep_id]
-                dep_stage_id = dep_batch.get("stage_id", 0)
-
-                # ── PP inter-stage: dep from a different stage on same replica
-                if (dep_stage_id != stage_id
-                        and dep_batch.get("replica_id") == replica_id):
-                    pp_tasks, pp_exits, task_id = self._expand_pp_communication(
-                        src_stage_id=dep_stage_id,
-                        dst_stage_id=stage_id,
-                        replica_id=replica_id,
-                        total_tokens=sum(batch["num_tokens"]),
-                        job_id=job_id,
-                        task_id_start=task_id,
-                        prev_exits=batch_exits.get(dep_id, {}),
-                        trace=trace,
-                    )
-                    all_flow_tasks.extend(pp_tasks)
-                    btm_key = f"pp_{dep_id}_to_{bid}"
-                    batch_task_info.append(BatchTaskInfo(
-                        batch_id=btm_key,
-                        task_ids=[t.task_id for t in pp_tasks],
-                        entry_type=BatchEntryType.PP_COMM,
-                        replica_id=replica_id,
-                        stage_id=stage_id,
-                        request_ids=[],
-                    ))
-                    for rank, tids in pp_exits.items():
-                        prev_exits.setdefault(rank, []).extend(tids)
-                    continue
-
-                # ── KV transfer: prefill → decode across replicas
-                if dep_batch["type"] == "prefill" and btype == "decode":
-                    kv_tasks, kv_exits, req_task_map, task_id = self._expand_kv_transfer(
-                        request_ids=batch["request_ids"],
-                        kv_cache_bytes=dep_batch.get("kv_cache_bytes") or {},
-                        p_replica_id=dep_batch["replica_id"],
-                        d_replica_id=replica_id,
-                        src_stage_id=dep_stage_id,
-                        dst_stage_id=stage_id,
-                        job_id=job_id,
-                        task_id_start=task_id,
-                        prev_exits=batch_exits.get(dep_id, {}),
-                    )
-                    all_flow_tasks.extend(kv_tasks)
-
-                    for req_id, tids in req_task_map.items():
-                        req_btm_key = f"kv_{dep_id}_to_{bid}_req_{req_id}"
-                        batch_task_info.append(BatchTaskInfo(
-                            batch_id=req_btm_key,
-                            task_ids=tids,
-                            entry_type=BatchEntryType.KV_TRANSFER,
-                            replica_id=replica_id,
-                            stage_id=stage_id,
-                            request_ids=[req_id],
-                        ))
-                    for rank, tids in kv_exits.items():
-                        prev_exits.setdefault(rank, []).extend(tids)
-                else:
-                    # Same-stage or same-replica dependency
-                    for rank, tids in batch_exits.get(dep_id, {}).items():
-                        prev_exits.setdefault(rank, []).extend(tids)
-
-            # ── Select profile by (phase, bs, seq) ─────────────────────────
-            bs = len(batch["request_ids"])
-            if btype == "prefill":
-                seq = sum(batch["num_tokens"])
-            else:
-                kv_lens = batch.get("kv_cache_seq_lens")
-                seq = max(kv_lens) if kv_lens else 1
-            profiles = self._store.get_profile_for_batch(btype, bs, seq)
-
-            # ── Expand batch (per-stage when pp>1) ────────────────────────
-            stage_layer_range = self._layers_for_stage(stage_id, total_layers, self._pp) \
-                if self._pp > 1 else None
-
-            # ── Stage 1 KV reuse flows (prefill batches only) ─────────────
-            reuse_layer_deps = None
-            if btype == "prefill" and request_reuse_info:
-                # Filter to requests in this batch that have reuse info
-                batch_req_ids = batch["request_ids"]
-                batch_reuse = {
-                    rid: request_reuse_info[rid]
-                    for rid in batch_req_ids if rid in request_reuse_info
-                }
-                if batch_reuse:
-                    dest_ranks = self._stage_ranks(replica_id, stage_id) \
-                        if self._pp > 1 else self._replica_ranks(replica_id)
-                    stage_layer_ids = list(stage_layer_range) \
-                        if stage_layer_range is not None \
-                        else list(range(total_layers))
-                    kv_bytes = batch.get("kv_cache_bytes") or {}
-                    reuse_flows, reuse_layer_deps, req_task_map, task_id = \
-                        self._expand_kv_reuse(
-                            storage_node_ids=resolved_storage_node_ids,
-                            dest_ranks=dest_ranks,
-                            kv_cache_bytes=kv_bytes,
-                            stage_layer_ids=stage_layer_ids,
-                            request_reuse_info=batch_reuse,
-                            job_id=job_id,
-                            task_id_start=task_id,
-                            prev_exits=prev_exits,
-                        )
-                    all_flow_tasks.extend(reuse_flows)
-                    for req_key, tids in req_task_map.items():
-                        req_btm_key = f"kv_reuse_{bid}_req_{req_key}"
-                        batch_task_info.append(BatchTaskInfo(
-                            batch_id=req_btm_key,
-                            task_ids=tids,
-                            entry_type=BatchEntryType.KV_REUSE,
-                            replica_id=replica_id,
-                            stage_id=stage_id,
-                            request_ids=[int(req_key)],
-                        ))
-
-            batch_tasks, exits, task_id = self._expand_batch(
+            tasks, exits, infos, task_id = self.expand_single_batch(
                 batch=batch,
-                profiles=profiles,
+                batch_lookup=batch_lookup,
+                batch_exits=batch_exits,
                 job_id=job_id,
                 task_id_start=task_id,
-                prev_exits=prev_exits,
-                stage_id=stage_id,
-                stage_layer_range=stage_layer_range,
-                reuse_layer_deps=reuse_layer_deps,
+                total_layers=total_layers,
+                trace=trace,  # needed by _expand_pp_communication
+                request_reuse_info=request_reuse_info,
+                resolved_storage_node_ids=resolved_storage_node_ids,
             )
-            all_flow_tasks.extend(batch_tasks)
-            batch_exits[bid] = exits
-
-            batch_task_info.append(BatchTaskInfo(
-                batch_id=bid,
-                task_ids=[t.task_id for t in batch_tasks],
-                entry_type=BatchEntryType(btype),
-                replica_id=replica_id,
-                stage_id=stage_id,
-                request_ids=batch["request_ids"],
-            ))
+            all_flow_tasks.extend(tasks)
+            batch_exits[batch["batch_id"]] = exits
+            batch_task_info.extend(infos)
 
         # ── Build P2PWorkload ─────────────────────────────────────────────
         all_ranks: set[int] = set()
@@ -303,6 +150,213 @@ class InferenceTraceExpander:
             tasks=[ft.to_task() for ft in all_flow_tasks],
         )
         return workload, batch_task_info
+
+    # ── Single-batch expansion (for JobExpander in dynamic mode) ───────────
+
+    def expand_single_batch(
+        self,
+        batch: dict,
+        batch_lookup: dict,
+        batch_exits: dict[str, dict[int, list[int]]],
+        job_id: int,
+        task_id_start: int,
+        total_layers: int,
+        trace: dict,
+        request_reuse_info: dict[int, dict],
+        resolved_storage_node_ids: list[int],
+    ) -> tuple[list[FlowTask], dict[int, list[int]], list[BatchTaskInfo], int]:
+        """
+        Expand a single trace batch.
+
+        Args:
+            batch: The batch dict from the trace.
+            batch_lookup: batch_id → batch dict (for resolving deps).
+            batch_exits: Accumulated exit tasks from previous batches.
+            job_id: Job ID for generated tasks.
+            task_id_start: Starting task_id.
+            total_layers: Model total layer count.
+            request_reuse_info: KV reuse config from _setup_kv_reuse().
+            resolved_storage_node_ids: KV storage node IDs.
+
+        Returns:
+            (new_flow_tasks, exits, batch_infos, next_task_id)
+        """
+        bid = batch["batch_id"]
+        btype = batch["type"]
+        replica_id = batch["replica_id"]
+        stage_id = batch.get("stage_id", 0)
+        task_id = task_id_start
+
+        new_flow_tasks: list[FlowTask] = []
+        batch_infos: list[BatchTaskInfo] = []
+
+        # ── Collect predecessor exit tasks ────────────────────────────────
+        prev_exits: dict[int, list[int]] = {}
+
+        for dep_id in batch.get("depends_on", []):
+            dep_batch = batch_lookup[dep_id]
+            dep_stage_id = dep_batch.get("stage_id", 0)
+
+            # PP inter-stage: dep from a different stage on same replica
+            if (dep_stage_id != stage_id
+                    and dep_batch.get("replica_id") == replica_id):
+                pp_tasks, pp_exits, task_id = self._expand_pp_communication(
+                    src_stage_id=dep_stage_id,
+                    dst_stage_id=stage_id,
+                    replica_id=replica_id,
+                    total_tokens=sum(batch["num_tokens"]),
+                    job_id=job_id,
+                    task_id_start=task_id,
+                    prev_exits=batch_exits.get(dep_id, {}),
+                    trace=trace,
+                )
+                new_flow_tasks.extend(pp_tasks)
+                batch_infos.append(BatchTaskInfo(
+                    batch_id=f"pp_{dep_id}_to_{bid}",
+                    task_ids=[t.task_id for t in pp_tasks],
+                    entry_type=BatchEntryType.PP_COMM,
+                    replica_id=replica_id,
+                    stage_id=stage_id,
+                    request_ids=[],
+                ))
+                for rank, tids in pp_exits.items():
+                    prev_exits.setdefault(rank, []).extend(tids)
+                continue
+
+            # KV transfer: prefill → decode across replicas
+            if dep_batch["type"] == "prefill" and btype == "decode":
+                kv_tasks, kv_exits, req_task_map, task_id = self._expand_kv_transfer(
+                    request_ids=batch["request_ids"],
+                    kv_cache_bytes=dep_batch.get("kv_cache_bytes") or {},
+                    p_replica_id=dep_batch["replica_id"],
+                    d_replica_id=replica_id,
+                    src_stage_id=dep_stage_id,
+                    dst_stage_id=stage_id,
+                    job_id=job_id,
+                    task_id_start=task_id,
+                    prev_exits=batch_exits.get(dep_id, {}),
+                )
+                new_flow_tasks.extend(kv_tasks)
+                for req_id, tids in req_task_map.items():
+                    batch_infos.append(BatchTaskInfo(
+                        batch_id=f"kv_{dep_id}_to_{bid}_req_{req_id}",
+                        task_ids=tids,
+                        entry_type=BatchEntryType.KV_TRANSFER,
+                        replica_id=replica_id,
+                        stage_id=stage_id,
+                        request_ids=[req_id],
+                    ))
+                for rank, tids in kv_exits.items():
+                    prev_exits.setdefault(rank, []).extend(tids)
+            else:
+                # Same-stage or same-replica dependency
+                for rank, tids in batch_exits.get(dep_id, {}).items():
+                    prev_exits.setdefault(rank, []).extend(tids)
+
+        # ── Select profile by (phase, bs, seq) ─────────────────────────────
+        bs = len(batch["request_ids"])
+        if btype == "prefill":
+            seq = sum(batch["num_tokens"])
+        else:
+            kv_lens = batch.get("kv_cache_seq_lens")
+            seq = max(kv_lens) if kv_lens else 1
+        profiles = self._store.get_profile_for_batch(btype, bs, seq)
+
+        # ── Expand batch (per-stage when pp>1) ────────────────────────────
+        stage_layer_range = self._layers_for_stage(stage_id, total_layers, self._pp) \
+            if self._pp > 1 else None
+
+        # ── Stage 1 KV reuse flows (prefill batches only) ─────────────────
+        reuse_layer_deps = None
+        if btype == "prefill" and request_reuse_info:
+            batch_req_ids = batch["request_ids"]
+            batch_reuse = {
+                rid: request_reuse_info[rid]
+                for rid in batch_req_ids if rid in request_reuse_info
+            }
+            if batch_reuse:
+                dest_ranks = self._stage_ranks(replica_id, stage_id) \
+                    if self._pp > 1 else self._replica_ranks(replica_id)
+                stage_layer_ids = list(stage_layer_range) \
+                    if stage_layer_range is not None \
+                    else list(range(total_layers))
+                kv_bytes = batch.get("kv_cache_bytes") or {}
+                reuse_flows, reuse_layer_deps, req_task_map, task_id = \
+                    self._expand_kv_reuse(
+                        storage_node_ids=resolved_storage_node_ids,
+                        dest_ranks=dest_ranks,
+                        kv_cache_bytes=kv_bytes,
+                        stage_layer_ids=stage_layer_ids,
+                        request_reuse_info=batch_reuse,
+                        job_id=job_id,
+                        task_id_start=task_id,
+                        prev_exits=prev_exits,
+                    )
+                new_flow_tasks.extend(reuse_flows)
+                for req_key, tids in req_task_map.items():
+                    batch_infos.append(BatchTaskInfo(
+                        batch_id=f"kv_reuse_{bid}_req_{req_key}",
+                        task_ids=tids,
+                        entry_type=BatchEntryType.KV_REUSE,
+                        replica_id=replica_id,
+                        stage_id=stage_id,
+                        request_ids=[int(req_key)],
+                    ))
+
+        batch_tasks, exits, task_id = self._expand_batch(
+            batch=batch,
+            profiles=profiles,
+            job_id=job_id,
+            task_id_start=task_id,
+            prev_exits=prev_exits,
+            stage_id=stage_id,
+            stage_layer_range=stage_layer_range,
+            reuse_layer_deps=reuse_layer_deps,
+        )
+        new_flow_tasks.extend(batch_tasks)
+        batch_infos.append(BatchTaskInfo(
+            batch_id=bid,
+            task_ids=[t.task_id for t in batch_tasks],
+            entry_type=BatchEntryType(btype),
+            replica_id=replica_id,
+            stage_id=stage_id,
+            request_ids=batch["request_ids"],
+        ))
+
+        return new_flow_tasks, exits, batch_infos, task_id
+
+    # ── KV reuse setup (extracted for reuse by both expand and expand_single_batch) ──
+
+    def _setup_kv_reuse(
+        self,
+        trace: dict,
+        storage_node_ids: list[int] | None,
+    ) -> tuple[list[int], dict[int, dict]]:
+        """Set up KV reuse configuration.  Returns (resolved_storage_node_ids, request_reuse_info)."""
+        resolved_storage_node_ids: list[int] = []
+        request_reuse_info: dict[int, dict] = {}
+        reuse_cfg = trace.get("stage1_kv_reuse")
+        if reuse_cfg and reuse_cfg.get("num_storage_nodes", 0) > 0:
+            if storage_node_ids is not None:
+                resolved_storage_node_ids = list(storage_node_ids)
+            else:
+                num_storage = reuse_cfg["num_storage_nodes"]
+                if self._assigned_nodes is not None:
+                    total_gpus = max(self._assigned_nodes) + 1
+                else:
+                    num_replicas = len({b["replica_id"] for b in trace["batches"]})
+                    total_gpus = self._world_size() * num_replicas
+                resolved_storage_node_ids = list(
+                    range(total_gpus, total_gpus + num_storage))
+            for req_key, req_meta in trace.get("requests", {}).items():
+                hit_ratio = req_meta.get("kv_reuse_hit_ratio")
+                node_idx = req_meta.get("kv_reuse_storage_node_idx")
+                if hit_ratio is not None and hit_ratio > 0 and node_idx is not None:
+                    request_reuse_info[int(req_key)] = {
+                        "hit_ratio": hit_ratio,
+                        "storage_node_idx": node_idx,
+                    }
+        return resolved_storage_node_ids, request_reuse_info
 
     @staticmethod
     def load_trace(path: str) -> dict:

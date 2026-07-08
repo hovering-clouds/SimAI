@@ -32,10 +32,10 @@ OUTPUT_DIR = "outputs/mfs_e2e_2p2d"
 WORKLOAD_FILE = "workload_2p2d.json"
 
 # Result file name (default: execution_result.json; for puppeteer: result_route-tte.json, etc.)
-RESULT_FILE = "mfs_execution_result_2p2d.json"
+RESULT_FILE = "default_execution_result_2p2d.json"
 
 # Visualization mode: "verbose" | "compact" | "detail"
-MODE = "detail"
+MODE = "verbose"
 
 # Show dependency arrows (compact mode only)
 SHOW_ARROWS = False
@@ -44,7 +44,7 @@ SHOW_ARROWS = False
 DETAIL_TIME_RANGE = (5625400, 5903810)
 
 # Output file path (None = auto-generate from mode name)
-OUTPUT_FILE = "mfs_execution_timeline_verbose_2p2d.json"
+OUTPUT_FILE = "default_execution_timeline_verbose_2p2d.json"
 
 # ───────────────────────────────────────────────────────────────
 

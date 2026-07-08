@@ -231,3 +231,166 @@ class CppReferenceSerializer(TaskSerializer):
             sub_phase,
             task.item_id,
         )
+
+
+class OneFOneBSerializer(TaskSerializer):
+    """1F1B 排序：每个 GA 步的 backward 紧随其 forward，GA 步间交替。
+
+    对 Stage k (0-indexed)，warmup = pp - 1 - k：
+        1F1B 序列 = [F0 ... F_{warmup-1}]  → warmup
+                    [B0 F_{warmup} B1 F_{warmup+1} ...]  → alternating
+                    [B_{ga-warmup} ... B_{ga-1}]  → cooldown
+
+    排序优先级（从高到低）：
+    1. pre/post：pre 最前，post 最后
+    2. 1F1B 逻辑位置：forward i → i, backward i → warmup + i（经交替展开后）
+    3. layer_id：Forward 正序，Backward 倒序
+    4. sub_phase：ig(0) → wg(1)
+    5. item_id：兜底
+    """
+
+    def __init__(self, pp: int, node_to_stage: dict[int, int]):
+        """
+        Args:
+            pp: 流水线并行度。
+            node_to_stage: 每个 node → stage_id 的映射。
+                从 Job.assigned_nodes + Job.parallelism 推导：
+                stage_id = node_idx // (dp * ep * tp)
+        """
+        self.pp = pp
+        self._node_to_stage = node_to_stage
+        # 缓存 per-stage 的 position map
+        self._position_cache: dict[int, dict[tuple, int]] = {}
+
+    def serialize(self, workload: P2PWorkload) -> ExecutionPlan:
+        """按 1F1B 顺序生成 compute 任务排序。"""
+        ga = self._infer_ga(workload)
+
+        compute_by_node: dict[int, list[Task]] = {}
+        for task in workload.tasks:
+            if task.is_compute():
+                node_id = task.node
+                if node_id not in compute_by_node:
+                    compute_by_node[node_id] = []
+                compute_by_node[node_id].append(task)
+
+        result: dict[int, list[int]] = {}
+        for node_id, tasks in compute_by_node.items():
+            stage_id = self._node_to_stage.get(node_id, 0)
+            position_map = self._get_position_map(ga, stage_id)
+
+            sorted_tasks = sorted(
+                tasks,
+                key=lambda t: self._compute_sort_key(t, position_map, ga),
+            )
+            result[node_id] = [task.task_id for task in sorted_tasks]
+
+        errors = self.validate(workload, result)
+        if errors:
+            raise ValueError(f"ExecutionPlan validation failed: {errors}")
+
+        return ExecutionPlan(compute_order=result)
+
+    def _infer_ga(self, workload: P2PWorkload) -> int:
+        """从 workload 中推断 GA 步数。
+
+        GA 步 iteration 范围 0..ga-1，post items（cross_entropy、optimizer 等）
+        的 iteration = ga 且 forward_compute = 0。
+        """
+        max_iter = max(
+            (t.iteration for t in workload.tasks if t.iteration >= 0),
+            default=0,
+        )
+        # Post items 的 forward 任务 duration_us = 0（cross_entropy/optimizer 无实际计算）
+        has_post = any(
+            t.iteration == max_iter
+            and t.is_compute()
+            and t.duration_us == 0
+            and t.phase == Phase.FORWARD
+            for t in workload.tasks
+        )
+        return max_iter if has_post else max_iter + 1
+
+    def _get_position_map(
+        self, ga: int, stage_id: int
+    ) -> dict[tuple[str, int], int]:
+        """构建 (type, iteration) → 1F1B 时间轴位置的映射。
+
+        type: 'F' = forward, 'B' = backward_input/backward_weight
+        """
+        cache_key = (ga, stage_id)
+        if cache_key in self._position_cache:
+            return self._position_cache[cache_key]
+
+        # warmup = 最少 forward 步数，保证所有 stage 都以 F 开头
+        # 即使最后 stage（k=pp-1）也有 warmup=1（必须先收到前一 stage 的激活）
+        # 注意：cursor 模型不能跳过阻塞位置，所以 warmup 需要覆盖 PP 往返时间
+        # （PP_SEND → 对端 GA 前向 → 对端 GA 反向 → PP_BACKWARD），以 GA 步数为单位。
+        # 基础值 = pp - stage_id，额外 +1 补偿 PP 传输开销。
+        warmup = max(1, self.pp - stage_id)
+        seq: list[tuple[str, int]] = []
+
+        # Warmup phase: first 'warmup' microbatches are all forward
+        for i in range(min(warmup, ga)):
+            seq.append(('F', i))
+
+        # Alternating steady state: B_i, F_{warmup+i}
+        for i in range(ga - warmup):
+            seq.append(('B', i))
+            if warmup + i < ga:
+                seq.append(('F', warmup + i))
+
+        # Cooldown: remaining backwards not yet placed
+        placed_b = {iter_ for typ, iter_ in seq if typ == 'B'}
+        for i in range(ga):
+            if i not in placed_b:
+                seq.append(('B', i))
+
+        result = {key: idx for idx, key in enumerate(seq)}
+        self._position_cache[cache_key] = result
+        return result
+
+    def _compute_sort_key(
+        self,
+        task: Task,
+        position_map: dict[tuple[str, int], int],
+        ga: int,
+    ) -> tuple:
+        """生成 1F1B 排序键。"""
+        # 推理任务按 task_id 保留 expander 创建顺序
+        if task.phase in (Phase.PREFILL, Phase.DECODE):
+            return (2, task.task_id)
+
+        # Pre items: forward 在最前，backward 在所有 GA 之后
+        # DAG 中 Backward Join 有 GA[0].ig → pre[-1].ig，
+        # 所以 pre backward 必须排在 GA backward 之后。
+        # pre backward 的 DAG 链是 layer 高→低（向后传播），
+        # compute_order 也须按 layer 降序排列，否则会造成死锁。
+        if task.iteration == -1:
+            is_backward = task.phase in (Phase.BACKWARD_INPUT, Phase.BACKWARD_WEIGHT)
+            if is_backward:
+                return (999, -task.layer_id, 0, task.item_id)
+            return (-999, task.layer_id, 0, task.item_id)
+
+        # Post items: forward 在 1000+, backward 在 2000+ (layer 降序)
+        # DAG 中 post bridge: post[-1].fwd → post[-1].ig，
+        # 因此 forward 必须在 backward 之前。
+        if task.iteration >= ga:
+            is_backward = task.phase in (Phase.BACKWARD_INPUT, Phase.BACKWARD_WEIGHT)
+            if is_backward:
+                return (2000, -task.layer_id, 0, task.item_id)
+            return (1000, task.layer_id, 0, task.item_id)
+
+        # GA items
+        is_backward = task.phase in (Phase.BACKWARD_INPUT, Phase.BACKWARD_WEIGHT)
+        typ = 'B' if is_backward else 'F'
+        pos = position_map.get((typ, task.iteration), 999999)
+
+        if is_backward:
+            layer_sort = -task.layer_id
+            sub_phase = 0 if task.phase == Phase.BACKWARD_INPUT else 1
+        else:
+            layer_sort = task.layer_id
+            sub_phase = 0
+
+        return (0, pos, layer_sort, sub_phase, task.item_id)
