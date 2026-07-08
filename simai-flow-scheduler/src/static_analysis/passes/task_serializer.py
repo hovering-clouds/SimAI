@@ -294,13 +294,22 @@ class OneFOneBSerializer(TaskSerializer):
     def _infer_ga(self, workload: P2PWorkload) -> int:
         """从 workload 中推断 GA 步数。
 
-        GA 步的 iteration 范围为 0..ga-1，post items 的 iteration = ga，
-        因此 max(iteration) = ga。
+        GA 步 iteration 范围 0..ga-1，post items（cross_entropy、optimizer 等）
+        的 iteration = ga 且 forward_compute = 0。
         """
-        return max(
+        max_iter = max(
             (t.iteration for t in workload.tasks if t.iteration >= 0),
             default=0,
         )
+        # Post items 的 forward 任务 duration_us = 0（cross_entropy/optimizer 无实际计算）
+        has_post = any(
+            t.iteration == max_iter
+            and t.is_compute()
+            and t.duration_us == 0
+            and t.phase == Phase.FORWARD
+            for t in workload.tasks
+        )
+        return max_iter if has_post else max_iter + 1
 
     def _get_position_map(
         self, ga: int, stage_id: int
@@ -313,10 +322,15 @@ class OneFOneBSerializer(TaskSerializer):
         if cache_key in self._position_cache:
             return self._position_cache[cache_key]
 
-        warmup = max(0, self.pp - 1 - stage_id)
+        # warmup = 最少 forward 步数，保证所有 stage 都以 F 开头
+        # 即使最后 stage（k=pp-1）也有 warmup=1（必须先收到前一 stage 的激活）
+        # 注意：cursor 模型不能跳过阻塞位置，所以 warmup 需要覆盖 PP 往返时间
+        # （PP_SEND → 对端 GA 前向 → 对端 GA 反向 → PP_BACKWARD），以 GA 步数为单位。
+        # 基础值 = pp - stage_id，额外 +1 补偿 PP 传输开销。
+        warmup = max(1, self.pp - stage_id)
         seq: list[tuple[str, int]] = []
 
-        # Warmup phase: forwards only (up to warmup microbatches)
+        # Warmup phase: first 'warmup' microbatches are all forward
         for i in range(min(warmup, ga)):
             seq.append(('F', i))
 
@@ -347,13 +361,25 @@ class OneFOneBSerializer(TaskSerializer):
         if task.phase in (Phase.PREFILL, Phase.DECODE):
             return (2, task.task_id)
 
-        # Pre items: 排在最前
+        # Pre items: forward 在最前，backward 在所有 GA 之后
+        # DAG 中 Backward Join 有 GA[0].ig → pre[-1].ig，
+        # 所以 pre backward 必须排在 GA backward 之后。
+        # pre backward 的 DAG 链是 layer 高→低（向后传播），
+        # compute_order 也须按 layer 降序排列，否则会造成死锁。
         if task.iteration == -1:
-            return (-1000, task.layer_id, 0, task.item_id)
+            is_backward = task.phase in (Phase.BACKWARD_INPUT, Phase.BACKWARD_WEIGHT)
+            if is_backward:
+                return (999, -task.layer_id, 0, task.item_id)
+            return (-999, task.layer_id, 0, task.item_id)
 
-        # Post items: 排在最后
+        # Post items: forward 在 1000+, backward 在 2000+ (layer 降序)
+        # DAG 中 post bridge: post[-1].fwd → post[-1].ig，
+        # 因此 forward 必须在 backward 之前。
         if task.iteration >= ga:
-            return (1000 + task.layer_id, 0, 0, task.item_id)
+            is_backward = task.phase in (Phase.BACKWARD_INPUT, Phase.BACKWARD_WEIGHT)
+            if is_backward:
+                return (2000, -task.layer_id, 0, task.item_id)
+            return (1000, task.layer_id, 0, task.item_id)
 
         # GA items
         is_backward = task.phase in (Phase.BACKWARD_INPUT, Phase.BACKWARD_WEIGHT)

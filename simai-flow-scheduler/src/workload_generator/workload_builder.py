@@ -737,6 +737,13 @@ class WorkloadBuilder:
 
         Receiver-based: if source has comm flows, depend on flows where
         sender_rank is receiver (dst); otherwise depend on compute directly.
+
+        In real training with Megatron-style tensor parallelism 
+        (without Sharded Activations), the activation/gradient sent 
+        across PP stages is the POST-ALLREDUCE result — each TP rank 
+        produces a partial output, and only after ALLREDUCE does every 
+        rank hold the complete tensor. Therefore PP_SEND/PP_BACKWARD 
+        must wait for TP ALLREDUCE to finish.
         """
         if src_result.flows:
             received_ids = src_result.receiver_index.get(sender_rank, [])
