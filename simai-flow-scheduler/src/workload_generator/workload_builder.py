@@ -1,4 +1,4 @@
-"""
+﻿"""
 Workload Builder - Converts AICB workloads to P2P Workload format.
 
 Two-phase generation approach:
@@ -13,18 +13,27 @@ Key design principles:
 - Cross-phase deps use receiver-based (dst) flows, not sender-based
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Iterator
 
-from ..workload_format.schema import (
-    P2PWorkload, Task, Job, Meta, Phase, TaskType
-)
-from .aicb_parser import AicbHeader, AicbWorkItem, AicbParser
-from .rank_grouper import RankGrouper
+from ..workload_format.schema import Job, Meta, P2PWorkload, Phase, TaskType
+from .aicb_parser import AicbHeader, AicbParser, AicbWorkItem
 from .collective_expander import (
-    CollectiveExpander, FlowTask,
-    AllReduceExpander, AllGatherExpander,
-    ReduceScatterExpander, AlltoAllExpander,
+    AllGatherExpander,
+    AllReduceExpander,
+    AlltoAllExpander,
+    BroadcastExpander,
+    CollectiveExpander,
+    FlowTask,
+    ReduceScatterExpander,
+)
+from .rank_grouper import RankGrouper
+from .zero_semantics import (
+    ZeroItemKind,
+    classify_zero_item,
+    is_zero_post_item,
+    is_zero_pre_item,
+    is_zero_workload,
 )
 
 
@@ -32,22 +41,26 @@ from .collective_expander import (
 class FlowGroupResult:
     """Result of expanding a collective communication into P2P flows.
 
-    receiver_index tracks which flows each rank receives (as dst),
-    incrementally maintained during flow generation for O(1) per-flow lookup.
+    receiver_index tracks data-ready receiver flows. completion_index tracks
+    event completion for each rank; the two differ for broadcast roots.
     """
     flows: list[FlowTask]
-    receiver_index: dict[int, list[int]]  # rank → task_ids where rank is dst
+    receiver_index: dict[int, list[int]]  # rank 鈫?task_ids where rank is dst
+    completion_index: dict[int, list[int]]
 
     @staticmethod
     def empty() -> "FlowGroupResult":
-        return FlowGroupResult(flows=[], receiver_index={})
+        return FlowGroupResult(flows=[], receiver_index={}, completion_index={})
 
     def add_flow(self, flow: FlowTask):
-        """Add a flow and update receiver index."""
+        """Add a flow and update default receiver/completion indices."""
         self.flows.append(flow)
-        if flow.dst not in self.receiver_index:
-            self.receiver_index[flow.dst] = []
-        self.receiver_index[flow.dst].append(flow.task_id)
+        self.receiver_index.setdefault(flow.dst, []).append(flow.task_id)
+        self.completion_index.setdefault(flow.dst, []).append(flow.task_id)
+
+    def add_completion(self, rank: int, task_ids: list[int]):
+        """Record non-receiver completion work, used by broadcast roots."""
+        self.completion_index.setdefault(rank, []).extend(task_ids)
 
 
 @dataclass
@@ -77,6 +90,13 @@ class PPFlowResult:
     all_flows: list[FlowTask]
 
 
+@dataclass
+class ZeroBuildState:
+    """Per-GA dependency state for ZeRO/FSDP-style synchronization."""
+
+    bucket_wg_computes: dict[int, list[FlowTask]] = field(default_factory=dict)
+
+
 class WorkloadBuilder:
     """Convert AICB workload to P2P Workload using two-phase generation."""
 
@@ -98,6 +118,7 @@ class WorkloadBuilder:
             "ALLGATHER": AllGatherExpander(),
             "REDUCESCATTER": ReduceScatterExpander(),
             "ALLTOALL": AlltoAllExpander(),
+            "BROADCAST": BroadcastExpander(),
         }
 
     def build_from_aicb(
@@ -113,6 +134,19 @@ class WorkloadBuilder:
         1. Generate all tasks (compute + flow) for all items
         2. Wire dependencies following Forward/Backward/WG ordering
         """
+        if is_zero_workload(aicb_items):
+            return self._build_zero_from_aicb(aicb_header, aicb_items, job, comm_algo)
+
+        return self._build_generic_from_aicb(aicb_header, aicb_items, job, comm_algo)
+
+    def _build_generic_from_aicb(
+        self,
+        aicb_header: AicbHeader,
+        aicb_items: list[AicbWorkItem],
+        job: Job,
+        comm_algo: str = "ring",
+    ) -> P2PWorkload:
+        """Original generic AICB expansion path."""
         grouper = RankGrouper(job.assigned_nodes, job.parallelism)
 
         # Validate structure
@@ -232,6 +266,182 @@ class WorkloadBuilder:
         )
         return workload
 
+    def _build_zero_from_aicb(
+        self,
+        aicb_header: AicbHeader,
+        aicb_items: list[AicbWorkItem],
+        job: Job,
+        comm_algo: str = "ring",
+    ) -> P2PWorkload:
+        """Build a P2P workload for DeepSpeed ZeRO/FSDP-like SimAI rows.
+
+        This path keeps the public IR unchanged and only changes dependency
+        direction for ZeRO parameter all-gather and gradient reduce-scatter.
+        """
+        grouper = RankGrouper(job.assigned_nodes, job.parallelism)
+        num_pre_items = self._count_zero_pre_items(aicb_items)
+        num_post_items = self._count_zero_post_items(aicb_items)
+        ga_item_indices = self._split_zero_ga_item_indices(
+            aicb_items, num_pre_items, num_post_items, aicb_header.ga)
+        ga_item_locations = {
+            item_idx: (ga_index, layer_id)
+            for ga_index, group in enumerate(ga_item_indices)
+            for layer_id, item_idx in enumerate(group)
+        }
+
+        all_flow_tasks: list[FlowTask] = []
+        item_tasks_list: list[ItemTasks] = []
+        task_id_counter = 0
+        ranks = job.assigned_nodes
+
+        for item_idx, item in enumerate(aicb_items):
+            if item_idx < num_pre_items:
+                iteration = -1
+                layer_id = item_idx
+            elif item_idx >= len(aicb_items) - num_post_items:
+                iteration = aicb_header.ga
+                layer_id = item_idx - (len(aicb_items) - num_post_items)
+            else:
+                iteration, layer_id = ga_item_locations.get(item_idx, (0, 0))
+
+            item_tasks, task_id_counter = self._create_zero_item_tasks(
+                item=item,
+                ranks=ranks,
+                grouper=grouper,
+                layer_id=layer_id,
+                iteration=iteration,
+                item_id=item_idx,
+                job_id=job.job_id,
+                task_id_counter=task_id_counter,
+                comm_algo=comm_algo,
+            )
+            all_flow_tasks.extend(item_tasks.fwd_computes.values())
+            all_flow_tasks.extend(item_tasks.ig_computes.values())
+            all_flow_tasks.extend(item_tasks.wg_computes.values())
+            all_flow_tasks.extend(item_tasks.fwd_result.flows)
+            all_flow_tasks.extend(item_tasks.ig_result.flows)
+            all_flow_tasks.extend(item_tasks.wg_result.flows)
+            item_tasks_list.append(item_tasks)
+
+        pre_items = item_tasks_list[:num_pre_items]
+        post_items = item_tasks_list[len(aicb_items) - num_post_items:]
+        ga_groups = [
+            [item_tasks_list[item_idx] for item_idx in group]
+            for group in ga_item_indices
+        ]
+        self._wire_zero_dependencies(pre_items, ga_groups, post_items)
+
+        if grouper.pp > 1 and aicb_header.pp_comm_size > 0:
+            items_per_ga = max((len(group) for group in ga_groups), default=0)
+            pp_result, task_id_counter = self._generate_pp_flows(
+                grouper, aicb_header, ga_groups, items_per_ga,
+                job.job_id, task_id_counter)
+            all_flow_tasks.extend(pp_result.all_flows)
+            self._wire_zero_pp_dependencies(pp_result, ga_groups, grouper)
+
+        return P2PWorkload(
+            version="1.0",
+            meta=Meta(num_jobs=1, num_nodes=len(job.assigned_nodes)),
+            jobs=[job],
+            tasks=[t.to_task() for t in all_flow_tasks],
+        )
+
+    def _create_zero_item_tasks(
+        self,
+        item: AicbWorkItem,
+        ranks: list[int],
+        grouper: RankGrouper,
+        layer_id: int,
+        iteration: int,
+        item_id: int,
+        job_id: int,
+        task_id_counter: int,
+        comm_algo: str,
+    ) -> tuple[ItemTasks, int]:
+        """Create tasks for one ZeRO row without generic dp_comm ordering."""
+        kind = classify_zero_item(item.name)
+        item_tasks = ItemTasks()
+
+        if kind is ZeroItemKind.FWD_PARAM_ALLGATHER:
+            if item.dp_comm != "NONE":
+                item_tasks.fwd_result, task_id_counter = self._expand_comm_all_groups(
+                    item.dp_comm, item.dp_comm_size, grouper, Phase.FORWARD,
+                    layer_id, iteration, item_id, job_id, task_id_counter,
+                    comm_algo, default_context="dp")
+            return item_tasks, task_id_counter
+
+        if kind is ZeroItemKind.BWD_PARAM_ALLGATHER:
+            if item.dp_comm != "NONE":
+                item_tasks.ig_result, task_id_counter = self._expand_comm_all_groups(
+                    item.dp_comm, item.dp_comm_size, grouper, Phase.BACKWARD_INPUT,
+                    layer_id, iteration, item_id, job_id, task_id_counter,
+                    comm_algo, default_context="dp")
+            return item_tasks, task_id_counter
+
+        if kind in {
+            ZeroItemKind.GRAD_REDUCESCATTER,
+            ZeroItemKind.STEP_GRAD_REDUCESCATTER,
+            ZeroItemKind.GRAD_SYNC,
+        }:
+            if item.dp_comm != "NONE":
+                item_tasks.wg_result, task_id_counter = self._expand_comm_all_groups(
+                    item.dp_comm, item.dp_comm_size, grouper, Phase.BACKWARD_WEIGHT,
+                    layer_id, iteration, item_id, job_id, task_id_counter,
+                    comm_algo, default_context="dp")
+            return item_tasks, task_id_counter
+
+        if kind in {ZeroItemKind.STEP, ZeroItemKind.INIT} and item.dp_comm != "NONE":
+            phase = Phase.OPTIMIZER if kind is ZeroItemKind.STEP else Phase.FORWARD
+            item_tasks.wg_result, task_id_counter = self._expand_comm_all_groups(
+                item.dp_comm, item.dp_comm_size, grouper, phase,
+                layer_id, iteration, item_id, job_id, task_id_counter,
+                comm_algo, default_context="dp")
+            return item_tasks, task_id_counter
+
+        if item.forward_compute_time > 0:
+            item_tasks.fwd_computes, task_id_counter = \
+                self._create_compute_tasks_for_phase(
+                    ranks, item.forward_compute_time, Phase.FORWARD,
+                    layer_id, iteration, item_id, job_id, task_id_counter)
+        if item.forward_comm != "NONE":
+            item_tasks.fwd_result, task_id_counter = self._expand_comm_all_groups(
+                item.forward_comm, item.forward_comm_size, grouper, Phase.FORWARD,
+                layer_id, iteration, item_id, job_id, task_id_counter,
+                comm_algo, default_context="tp")
+            self._wire_compute_to_flows(item_tasks.fwd_computes, item_tasks.fwd_result)
+
+        if item.backward_compute_time > 0:
+            phase = (
+                Phase.BACKWARD_WEIGHT
+                if kind is ZeroItemKind.BWD_WEIGHT_COMPUTE
+                else Phase.BACKWARD_INPUT
+            )
+            target = "wg_computes" if phase is Phase.BACKWARD_WEIGHT else "ig_computes"
+            computes, task_id_counter = self._create_compute_tasks_for_phase(
+                ranks, item.backward_compute_time, phase,
+                layer_id, iteration, item_id, job_id, task_id_counter)
+            setattr(item_tasks, target, computes)
+        if item.backward_comm != "NONE":
+            item_tasks.ig_result, task_id_counter = self._expand_comm_all_groups(
+                item.backward_comm, item.backward_comm_size, grouper,
+                Phase.BACKWARD_INPUT, layer_id, iteration, item_id, job_id,
+                task_id_counter, comm_algo, default_context="tp")
+            self._wire_compute_to_flows(item_tasks.ig_computes, item_tasks.ig_result)
+
+        if item.dp_compute_time > 0:
+            item_tasks.wg_computes, task_id_counter = \
+                self._create_compute_tasks_for_phase(
+                    ranks, item.dp_compute_time, Phase.BACKWARD_WEIGHT,
+                    layer_id, iteration, item_id, job_id, task_id_counter)
+        if item.dp_comm != "NONE":
+            item_tasks.wg_result, task_id_counter = self._expand_comm_all_groups(
+                item.dp_comm, item.dp_comm_size, grouper, Phase.BACKWARD_WEIGHT,
+                layer_id, iteration, item_id, job_id, task_id_counter,
+                comm_algo, default_context="dp")
+            self._wire_compute_to_flows(item_tasks.wg_computes, item_tasks.wg_result)
+
+        return item_tasks, task_id_counter
+
     # ------------------------------------------------------------------
     # Phase 1 helpers: Task generation
     # ------------------------------------------------------------------
@@ -311,6 +521,10 @@ class WorkloadBuilder:
                     flow.iteration = iteration
                     flow.item_id = item_id
                     result.add_flow(flow)
+                if base_type == "BROADCAST" and flows:
+                    # The root has no incoming flow, but its broadcast event is
+                    # complete only after it has sent to every peer.
+                    result.add_completion(subgroup[0], [flow.task_id for flow in flows])
                 task_id_counter += len(flows)
 
         return result, task_id_counter
@@ -365,6 +579,9 @@ class WorkloadBuilder:
                 ranks, comm_size, algo, job_id, task_id_start, context)
         elif base_type == "ALLTOALL":
             return expander.expand_alltoall(
+                ranks, comm_size, job_id, task_id_start, context)
+        elif base_type == "BROADCAST":
+            return expander.expand_broadcast(
                 ranks, comm_size, job_id, task_id_start, context)
         else:
             raise ValueError(f"Unsupported base type: {base_type}")
@@ -576,6 +793,189 @@ class WorkloadBuilder:
             ga_groups.append(ga_group)
         return ga_groups
 
+    def _wire_zero_dependencies(
+        self,
+        pre_items: list[ItemTasks],
+        ga_groups: list[list[ItemTasks]],
+        post_items: list[ItemTasks],
+    ):
+        """Wire ZeRO/FSDP all-gather-before-compute dependencies."""
+        initial_fwd_deps = self._wire_zero_event_sequence(pre_items, {})
+        ga_forward_outputs: list[dict[int, list[int]]] = []
+        ga_backward_outputs: list[dict[int, list[int]]] = []
+        for ga_group in ga_groups:
+            fwd_output = self._wire_zero_forward_group(ga_group, initial_fwd_deps)
+            ga_forward_outputs.append(fwd_output)
+            bwd_output = self._wire_zero_backward_group(ga_group, fwd_output)
+            ga_backward_outputs.append(bwd_output)
+
+        if post_items:
+            self._wire_zero_event_sequence(
+                post_items, self._merge_rank_deps(ga_backward_outputs))
+
+    def _wire_zero_forward_group(
+        self,
+        ga_group: list[ItemTasks],
+        initial_deps: dict[int, list[int]],
+    ) -> dict[int, list[int]]:
+        current_deps = {rank: deps[:] for rank, deps in initial_deps.items()}
+
+        for item_tasks in ga_group:
+            if item_tasks.fwd_result.flows and not item_tasks.fwd_computes:
+                self._wire_rank_deps_to_flows(current_deps, item_tasks.fwd_result)
+                current_deps = self._result_output_by_rank(item_tasks.fwd_result)
+                continue
+            if not item_tasks.fwd_computes:
+                continue
+
+            self._add_rank_deps(item_tasks.fwd_computes, current_deps)
+            current_deps = self._phase_output_by_rank(
+                item_tasks.fwd_computes, item_tasks.fwd_result)
+
+        return current_deps
+
+    def _wire_zero_backward_group(
+        self,
+        ga_group: list[ItemTasks],
+        initial_deps: dict[int, list[int]],
+    ) -> dict[int, list[int]]:
+        state = ZeroBuildState()
+        current_deps = {rank: deps[:] for rank, deps in initial_deps.items()}
+        latest_ig_output: dict[int, list[int]] = {}
+        terminal_deps: dict[int, list[int]] = {}
+
+        for item_tasks in ga_group:
+            if item_tasks.ig_result.flows and not item_tasks.ig_computes:
+                self._wire_rank_deps_to_flows(current_deps, item_tasks.ig_result)
+                current_deps = self._result_output_by_rank(item_tasks.ig_result)
+                continue
+
+            if item_tasks.ig_computes:
+                self._add_rank_deps(item_tasks.ig_computes, current_deps)
+                latest_ig_output = self._phase_output_by_rank(
+                    item_tasks.ig_computes, item_tasks.ig_result)
+                current_deps = latest_ig_output
+
+            if item_tasks.wg_computes:
+                wg_deps = latest_ig_output or current_deps
+                self._add_rank_deps(item_tasks.wg_computes, wg_deps)
+                for rank, compute in item_tasks.wg_computes.items():
+                    state.bucket_wg_computes.setdefault(rank, []).append(compute)
+
+            if item_tasks.wg_result.flows and not item_tasks.wg_computes:
+                if state.bucket_wg_computes:
+                    self._wire_bucket_wg_to_flows(
+                        state.bucket_wg_computes, item_tasks.wg_result)
+                else:
+                    # Parameter-level AICB omits standalone compute rows for
+                    # norm-like 1D parameters. Their gradient bucket still
+                    # belongs after the most recent backward computation.
+                    self._wire_rank_deps_to_flows(current_deps, item_tasks.wg_result)
+                terminal_deps = self._merge_rank_deps(
+                    [terminal_deps, self._result_output_by_rank(item_tasks.wg_result)])
+                state.bucket_wg_computes.clear()
+
+        pending_wg_deps = {
+            rank: [compute.task_id for compute in computes]
+            for rank, computes in state.bucket_wg_computes.items()
+        }
+        return self._merge_rank_deps([current_deps, terminal_deps, pending_wg_deps])
+
+    def _wire_zero_event_sequence(
+        self,
+        items: list[ItemTasks],
+        initial_deps: dict[int, list[int]],
+    ) -> dict[int, list[int]]:
+        """Wire ordered init/step/post events and return their completions."""
+        current_deps = {rank: deps[:] for rank, deps in initial_deps.items()}
+        for item_tasks in items:
+            comm_result = self._zero_comm_only_result(item_tasks)
+            if comm_result is not None:
+                self._wire_rank_deps_to_flows(current_deps, comm_result)
+                current_deps = self._result_output_by_rank(comm_result)
+                continue
+
+            if item_tasks.fwd_computes:
+                self._add_rank_deps(item_tasks.fwd_computes, current_deps)
+                current_deps = self._phase_output_by_rank(
+                    item_tasks.fwd_computes, item_tasks.fwd_result)
+            if item_tasks.ig_computes:
+                self._add_rank_deps(item_tasks.ig_computes, current_deps)
+                self._wire_per_node_phase_transition(
+                    item_tasks.ig_result, item_tasks.ig_computes,
+                    item_tasks.wg_computes)
+        return current_deps
+
+    @staticmethod
+    def _zero_comm_only_result(item_tasks: ItemTasks) -> FlowGroupResult | None:
+        if item_tasks.fwd_computes or item_tasks.ig_computes or item_tasks.wg_computes:
+            return None
+        for result in (
+            item_tasks.fwd_result, item_tasks.ig_result, item_tasks.wg_result,
+        ):
+            if result.flows:
+                return result
+        return None
+
+    @staticmethod
+    def _merge_rank_deps(
+        outputs: list[dict[int, list[int]]],
+    ) -> dict[int, list[int]]:
+        merged: dict[int, list[int]] = {}
+        for output in outputs:
+            for rank, deps in output.items():
+                merged.setdefault(rank, []).extend(dep for dep in deps if dep not in merged[rank])
+        return merged
+
+    @staticmethod
+    def _wire_rank_deps_to_flows(
+        deps_by_rank: dict[int, list[int]],
+        result: FlowGroupResult,
+    ):
+        for flow in result.flows:
+            for dep in deps_by_rank.get(flow.src, []):
+                if dep not in flow.deps:
+                    flow.deps.append(dep)
+
+    @staticmethod
+    def _wire_bucket_wg_to_flows(
+        wg_by_rank: dict[int, list[FlowTask]],
+        result: FlowGroupResult,
+    ):
+        for flow in result.flows:
+            for compute in wg_by_rank.get(flow.src, []):
+                if compute.task_id not in flow.deps:
+                    flow.deps.append(compute.task_id)
+
+    @staticmethod
+    def _result_output_by_rank(result: FlowGroupResult) -> dict[int, list[int]]:
+        return {rank: deps[:] for rank, deps in result.completion_index.items()}
+
+    def _phase_output_by_rank(
+        self,
+        computes: dict[int, FlowTask],
+        result: FlowGroupResult,
+    ) -> dict[int, list[int]]:
+        if result.flows:
+            return {rank: deps[:] for rank, deps in result.completion_index.items()}
+        return {rank: [task.task_id] for rank, task in computes.items()}
+
+    def _add_rank_deps(
+        self,
+        computes: dict[int, FlowTask],
+        deps_by_rank: dict[int, list[int]],
+    ):
+        for rank, compute in computes.items():
+            compute.deps.extend(deps_by_rank.get(rank, []))
+
+    def _add_receiver_deps(
+        self,
+        computes: dict[int, FlowTask],
+        result: FlowGroupResult,
+    ):
+        for rank, compute in computes.items():
+            compute.deps.extend(result.receiver_index.get(rank, []))
+
     # ------------------------------------------------------------------
     # Utility methods
     # ------------------------------------------------------------------
@@ -599,6 +999,64 @@ class WorkloadBuilder:
             else:
                 break
         return count
+
+    def _count_zero_pre_items(self, items: list[AicbWorkItem]) -> int:
+        count = 0
+        for item in items:
+            if is_zero_pre_item(item.name):
+                count += 1
+            else:
+                break
+        return count
+
+    def _count_zero_post_items(self, items: list[AicbWorkItem]) -> int:
+        count = 0
+        for item in reversed(items):
+            if item.name in self.POST_LAYER_NAMES or is_zero_post_item(item.name):
+                count += 1
+            else:
+                break
+
+        return count
+
+    def _split_zero_ga_item_indices(
+        self,
+        items: list[AicbWorkItem],
+        num_pre_items: int,
+        num_post_items: int,
+        ga: int,
+    ) -> list[list[int]]:
+        """Split ZeRO layer rows by explicit GA markers or legacy uniform size."""
+        body_end = len(items) - num_post_items
+        body_indices = list(range(num_pre_items, body_end))
+        boundary_indices = [
+            item_idx for item_idx in body_indices
+            if classify_zero_item(items[item_idx].name) is ZeroItemKind.GA_BOUNDARY
+        ]
+        if boundary_indices:
+            groups: list[list[int]] = [[]]
+            for item_idx in body_indices:
+                if item_idx in boundary_indices:
+                    groups.append([])
+                else:
+                    groups[-1].append(item_idx)
+            if len(groups) != ga or any(not group for group in groups):
+                raise ValueError(
+                    "Invalid ZeRO GA boundary layout: "
+                    f"groups={len(groups)}, ga={ga}, boundaries={boundary_indices}"
+                )
+            return groups
+
+        if ga < 1 or len(body_indices) % ga != 0:
+            raise ValueError(
+                "ZeRO workload has non-uniform GA items but no "
+                "zero{stage}_ga_boundary metadata; regenerate the AICB workload."
+            )
+        items_per_ga = len(body_indices) // ga
+        return [
+            body_indices[index * items_per_ga:(index + 1) * items_per_ga]
+            for index in range(ga)
+        ]
 
     # ------------------------------------------------------------------
     # PP flow generation and wiring
@@ -746,8 +1204,54 @@ class WorkloadBuilder:
         must wait for TP ALLREDUCE to finish.
         """
         if src_result.flows:
-            received_ids = src_result.receiver_index.get(sender_rank, [])
-            flow.deps.extend(received_ids)
+            completion_ids = src_result.completion_index.get(sender_rank, [])
+            flow.deps.extend(completion_ids)
         else:
             if sender_rank in src_computes:
                 flow.deps.append(src_computes[sender_rank].task_id)
+
+    def _wire_zero_pp_dependencies(
+        self,
+        pp_result: "PPFlowResult",
+        ga_groups: list[list[ItemTasks]],
+        grouper: RankGrouper,
+    ):
+        """Wire PP dependencies for ZeRO groups with explicit comm-only rows."""
+        for ga_idx, ga_group in enumerate(ga_groups):
+            fwd_items = [item for item in ga_group if item.fwd_computes]
+            ig_items = [item for item in ga_group if item.ig_computes]
+            if not fwd_items or not ig_items:
+                continue
+
+            first_fwd_item = fwd_items[0]
+            last_fwd_item = fwd_items[-1]
+            last_model_ig_item = ig_items[0]
+            first_model_ig_item = ig_items[-1]
+
+            for pp_boundary in range(grouper.pp - 1):
+                fwd_flows = pp_result.forward_flows[(ga_idx, pp_boundary)]
+                bwd_flows = pp_result.backward_flows[(ga_idx, pp_boundary)]
+
+                for dp_idx in range(grouper.dp):
+                    for ep_idx in range(grouper.ep):
+                        for tp_idx in range(grouper.tp):
+                            src_rank = grouper.get_pp_rank(
+                                pp_boundary, dp_idx, ep_idx, tp_idx)
+                            dst_rank = grouper.get_pp_rank(
+                                pp_boundary + 1, dp_idx, ep_idx, tp_idx)
+
+                            fwd_pp = fwd_flows[src_rank]
+                            self._wire_to_flow_sender(
+                                fwd_pp, last_fwd_item.fwd_computes,
+                                last_fwd_item.fwd_result, src_rank)
+                            if dst_rank in first_fwd_item.fwd_computes:
+                                first_fwd_item.fwd_computes[dst_rank].deps.append(
+                                    fwd_pp.task_id)
+
+                            bwd_pp = bwd_flows[dst_rank]
+                            self._wire_to_flow_sender(
+                                bwd_pp, first_model_ig_item.ig_computes,
+                                first_model_ig_item.ig_result, dst_rank)
+                            if src_rank in last_model_ig_item.ig_computes:
+                                last_model_ig_item.ig_computes[src_rank].deps.append(
+                                    bwd_pp.task_id)
