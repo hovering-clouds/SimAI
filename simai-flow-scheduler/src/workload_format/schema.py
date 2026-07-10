@@ -41,6 +41,7 @@ class CommType(str, Enum):
     DP_ALLGATHER = "dp_allgather"
     DP_REDUCESCATTER = "dp_reducescatter"
     DP_ALLTOALL = "dp_alltoall"
+    DP_BROADCAST = "dp_broadcast"
     # Expert Parallel
     EP_ALLTOALL = "ep_alltoall"
     # Pipeline Parallel

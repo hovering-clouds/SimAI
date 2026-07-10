@@ -28,6 +28,7 @@ _COMM_TYPE_MAP: dict[tuple[str, str], CommType] = {
     ("ALLGATHER", "dp"): CommType.DP_ALLGATHER,
     ("REDUCESCATTER", "dp"): CommType.DP_REDUCESCATTER,
     ("ALLTOALL", "dp"): CommType.DP_ALLTOALL,
+    ("BROADCAST", "dp"): CommType.DP_BROADCAST,
     # context="ep"
     ("ALLTOALL", "ep"): CommType.EP_ALLTOALL,
 }
@@ -675,3 +676,48 @@ class AlltoAllExpander(CollectiveExpander):
 
     def expand_reducescatter(self, ranks, data_size, algo="ring", job_id=0, task_id_start=0):
         raise NotImplementedError("Use ReduceScatterExpander for ReduceScatter")
+
+
+class BroadcastExpander(CollectiveExpander):
+    """Expand a broadcast into direct root-to-peer P2P flows."""
+
+    def expand_broadcast(
+        self,
+        ranks: list[int],
+        data_size: int,
+        job_id: int = 0,
+        task_id_start: int = 0,
+        context: str = "dp",
+    ) -> list[FlowTask]:
+        if len(ranks) < 2:
+            return []
+
+        root = ranks[0]
+        comm = _make_comm_type("BROADCAST", context)
+        return [
+            FlowTask(
+                task_id=task_id_start + index,
+                job_id=job_id,
+                type=TaskType.FLOW,
+                src=root,
+                dst=dst,
+                size_bytes=data_size,
+                comm_type=comm,
+                chunk_id=0,
+                num_chunks=1,
+                deps=[],
+            )
+            for index, dst in enumerate(ranks[1:])
+        ]
+
+    def expand_allreduce(self, ranks, data_size, algo="ring", job_id=0, task_id_start=0):
+        raise NotImplementedError("Use AllReduceExpander for AllReduce")
+
+    def expand_allgather(self, ranks, data_size, algo="ring", job_id=0, task_id_start=0):
+        raise NotImplementedError("Use AllGatherExpander for AllGather")
+
+    def expand_reducescatter(self, ranks, data_size, algo="ring", job_id=0, task_id_start=0):
+        raise NotImplementedError("Use ReduceScatterExpander for ReduceScatter")
+
+    def expand_alltoall(self, ranks, data_size, job_id=0, task_id_start=0):
+        raise NotImplementedError("Use AlltoAllExpander for AlltoAll")

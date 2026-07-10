@@ -11,13 +11,10 @@ Covers:
 7. Edge cases (single GPU, multi-phase communication)
 """
 
-import pytest
-from src.workload_generator.workload_builder import (
-    WorkloadBuilder, FlowGroupResult, ItemTasks,
-)
+from src.workload_format.schema import CommType, Job, ParallelismConfig, Phase
 from src.workload_generator.aicb_parser import AicbHeader, AicbWorkItem
-from src.workload_format.schema import Job, ParallelismConfig, TaskType, Phase
-
+from src.workload_generator.rank_grouper import RankGrouper
+from src.workload_generator.workload_builder import WorkloadBuilder
 
 # ===========================================================================
 # Helper functions
@@ -97,7 +94,7 @@ class TestPerRankCompute:
         assert len(compute_tasks) == 12  # 4 ranks × 3 phases
 
         # Each rank should have compute tasks in all 3 phases
-        ranks_with_tasks = set(t.node for t in compute_tasks)
+        ranks_with_tasks = {t.node for t in compute_tasks}
         assert ranks_with_tasks == {0, 1, 2, 3}
 
     def test_compute_task_assigned_to_correct_node(self):
@@ -303,7 +300,7 @@ class TestGAIteration:
         builder = WorkloadBuilder()
         workload = builder.build_from_aicb(header, items, job)
 
-        iterations = sorted(set(t.iteration for t in workload.tasks))
+        iterations = sorted({t.iteration for t in workload.tasks})
         assert 0 in iterations
         assert 1 in iterations
 
@@ -502,7 +499,7 @@ class TestEdgeCases:
         flow_tasks = [t for t in workload.tasks if t.is_flow()]
         assert len(flow_tasks) > 0
 
-        phases_with_flows = set(t.phase for t in flow_tasks)
+        phases_with_flows = {t.phase for t in flow_tasks}
         assert len(phases_with_flows) >= 2
 
     def test_compute_to_all_src_flows(self):
@@ -769,3 +766,591 @@ class TestPipelineParallelism:
         pp_flows = [t for t in workload.tasks
                     if t.is_flow() and t.comm_type == CommType.PP_SEND]
         assert all(t.size_bytes == pp_comm_size for t in pp_flows)
+
+
+# ===========================================================================
+# TestZeroWorkloadBuilder - DeepSpeed ZeRO/FSDP DAG semantics
+# ===========================================================================
+
+def build_zero_workload(
+    items: list[AicbWorkItem],
+    ga: int = 1,
+    dp: int = 2,
+    pp: int = 1,
+    pp_comm_size: int = 0,
+):
+    header = AicbHeader(
+        tp=1, ep=1, pp=pp, vpp=len(items), ga=ga,
+        all_gpus=dp * pp, pp_comm_size=pp_comm_size,
+    )
+    job = Job(
+        job_id=0,
+        assigned_nodes=list(range(dp * pp)),
+        parallelism=ParallelismConfig(tp=1, dp=dp, pp=pp, ep=1),
+    )
+    builder = WorkloadBuilder()
+    return builder.build_from_aicb(header, items, job)
+
+
+def zero_comm_item(name: str, comm: str, size: int) -> AicbWorkItem:
+    return create_dummy_item(
+        name=name,
+        fwd_compute=0,
+        bwd_compute=0,
+        dp_compute=0,
+        dp_comm=comm,
+        dp_comm_size=size,
+    )
+
+
+class TestZeroWorkloadBuilder:
+    def _task_map(self, workload):
+        return {task.task_id: task for task in workload.tasks}
+
+    def test_zero3_forward_allgather_precedes_forward_compute(self):
+        items = [
+            zero_comm_item("zero3_forward_param_allgather", "ALLGATHER", 1024),
+            create_dummy_item(
+                name="zero3_forward_param_0",
+                fwd_compute=1000,
+                bwd_compute=0,
+                dp_compute=0,
+            ),
+            create_dummy_item(
+                name="zero3_backward_param_0",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+        ]
+        workload = build_zero_workload(items)
+
+        ag_flows = [
+            task for task in workload.tasks
+            if task.is_flow() and task.comm_type == CommType.DP_ALLGATHER
+            and task.phase == Phase.FORWARD
+        ]
+        assert ag_flows
+
+        task_map = self._task_map(workload)
+        for rank in [0, 1]:
+            fwd = next(
+                task for task in workload.tasks
+                if task.is_compute() and task.phase == Phase.FORWARD
+                and task.node == rank
+            )
+            dep_tasks = [task_map[dep] for dep in fwd.deps]
+            assert any(
+                dep.is_flow() and dep.comm_type == CommType.DP_ALLGATHER
+                and dep.phase == Phase.FORWARD and dep.dst == rank
+                for dep in dep_tasks
+            )
+
+    def test_zero3_backward_allgather_precedes_backward_compute(self):
+        items = [
+            create_dummy_item(
+                name="zero3_forward_param_0",
+                fwd_compute=1000,
+                bwd_compute=0,
+                dp_compute=0,
+            ),
+            zero_comm_item("zero3_backward_param_allgather", "ALLGATHER", 1024),
+            create_dummy_item(
+                name="zero3_backward_param_0",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+        ]
+        workload = build_zero_workload(items)
+
+        task_map = self._task_map(workload)
+        for rank in [0, 1]:
+            bwd = next(
+                task for task in workload.tasks
+                if task.is_compute() and task.phase == Phase.BACKWARD_INPUT
+                and task.node == rank
+            )
+            dep_tasks = [task_map[dep] for dep in bwd.deps]
+            assert any(
+                dep.is_flow() and dep.comm_type == CommType.DP_ALLGATHER
+                and dep.phase == Phase.BACKWARD_INPUT and dep.dst == rank
+                for dep in dep_tasks
+            )
+
+    def test_zero3_first_backward_allgather_waits_for_forward_tail(self):
+        items = [
+            create_dummy_item(
+                name="zero3_forward_param_0",
+                fwd_compute=1000,
+                bwd_compute=0,
+                dp_compute=0,
+            ),
+            zero_comm_item("zero3_backward_param_allgather", "ALLGATHER", 1024),
+            create_dummy_item(
+                name="zero3_backward_param_0",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+        ]
+        workload = build_zero_workload(items)
+        task_map = self._task_map(workload)
+
+        for flow in (
+            task for task in workload.tasks
+            if task.is_flow()
+            and task.comm_type == CommType.DP_ALLGATHER
+            and task.phase == Phase.BACKWARD_INPUT
+        ):
+            assert any(
+                task_map[dep].is_compute()
+                and task_map[dep].phase == Phase.FORWARD
+                and task_map[dep].node == flow.src
+                for dep in flow.deps
+            )
+
+    def test_zero3_reduce_scatter_follows_weight_gradient_compute(self):
+        items = [
+            create_dummy_item(
+                name="zero3_forward_param_0",
+                fwd_compute=1000,
+                bwd_compute=0,
+                dp_compute=0,
+            ),
+            create_dummy_item(
+                name="zero3_backward_param_0",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+            create_dummy_item(
+                name="zero3_backward_param_0_weight_grad",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+            zero_comm_item(
+                "zero3_step_grad_reduce_scatter", "REDUCESCATTER", 1024
+            ),
+        ]
+        workload = build_zero_workload(items)
+        task_map = self._task_map(workload)
+
+        rs_flows = [
+            task for task in workload.tasks
+            if task.is_flow() and task.comm_type == CommType.DP_REDUCESCATTER
+            and task.phase == Phase.BACKWARD_WEIGHT
+        ]
+        assert rs_flows
+        for flow in rs_flows:
+            dep_tasks = [task_map[dep] for dep in flow.deps]
+            assert any(
+                dep.is_compute() and dep.phase == Phase.BACKWARD_WEIGHT
+                and dep.node == flow.src
+                for dep in dep_tasks
+            )
+
+    def test_zero3_reduce_scatter_waits_for_every_weight_gradient_in_bucket(self):
+        items = [
+            create_dummy_item(
+                name="zero3_forward_param_0",
+                fwd_compute=1000,
+                bwd_compute=0,
+                dp_compute=0,
+            ),
+            create_dummy_item(
+                name="zero3_backward_param_0",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+            create_dummy_item(
+                name="zero3_backward_param_0_weight_grad",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+            create_dummy_item(
+                name="zero3_backward_param_1",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+            create_dummy_item(
+                name="zero3_backward_param_1_weight_grad",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+            zero_comm_item("zero3_grad_reduce_scatter", "REDUCESCATTER", 2048),
+        ]
+        workload = build_zero_workload(items)
+        task_map = self._task_map(workload)
+
+        for flow in (
+            task for task in workload.tasks
+            if task.is_flow() and task.comm_type == CommType.DP_REDUCESCATTER
+        ):
+            weight_grad_deps = [
+                task_map[dep] for dep in flow.deps
+                if task_map[dep].is_compute()
+                and task_map[dep].phase == Phase.BACKWARD_WEIGHT
+                and task_map[dep].node == flow.src
+            ]
+            assert len(weight_grad_deps) == 2
+
+    def test_zero3_compute_less_reduce_scatter_waits_for_backward_compute(self):
+        items = [
+            create_dummy_item(
+                name="zero3_forward_param_0",
+                fwd_compute=1000,
+                bwd_compute=0,
+                dp_compute=0,
+            ),
+            create_dummy_item(
+                name="zero3_backward_param_0",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+            zero_comm_item("zero3_grad_reduce_scatter", "REDUCESCATTER", 1024),
+        ]
+        workload = build_zero_workload(items)
+        task_map = self._task_map(workload)
+
+        for flow in (
+            task for task in workload.tasks
+            if task.is_flow() and task.comm_type == CommType.DP_REDUCESCATTER
+        ):
+            assert any(
+                task_map[dep].is_compute()
+                and task_map[dep].phase == Phase.BACKWARD_INPUT
+                and task_map[dep].node == flow.src
+                for dep in flow.deps
+            )
+
+    def test_zero3_layer_allgather_precedes_layer_compute(self):
+        items = [
+            zero_comm_item("zero3_forward_allgather_attention_layer", "ALLGATHER", 1024),
+            create_dummy_item(
+                name="attention_layer",
+                fwd_compute=1000,
+                bwd_compute=0,
+                dp_compute=0,
+            ),
+        ]
+        workload = build_zero_workload(items)
+        task_map = self._task_map(workload)
+        fwd = next(
+            task for task in workload.tasks
+            if task.is_compute() and task.phase == Phase.FORWARD and task.node == 0
+        )
+        assert any(
+            task_map[dep].is_flow()
+            and task_map[dep].comm_type == CommType.DP_ALLGATHER
+            for dep in fwd.deps
+        )
+
+    def test_zero2_grad_sync_keeps_post_weight_gradient_order(self):
+        items = [
+            create_dummy_item(
+                name="zero2_backward_param_0",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+            create_dummy_item(
+                name="zero2_backward_param_0_weight_grad",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+            zero_comm_item("zero2_grad_sync", "ALLREDUCE", 1024),
+        ]
+        workload = build_zero_workload(items)
+        task_map = self._task_map(workload)
+        sync_flows = [
+            task for task in workload.tasks
+            if task.is_flow() and task.comm_type == CommType.DP_ALLREDUCE
+        ]
+        assert sync_flows
+        for flow in sync_flows:
+            assert any(
+                task_map[dep].is_compute()
+                and task_map[dep].phase == Phase.BACKWARD_WEIGHT
+                and task_map[dep].node == flow.src
+                for dep in flow.deps
+            )
+
+    def test_zero_ga_with_step_and_post_items_groups_correctly(self):
+        ga_items = [
+            create_dummy_item(
+                name="zero3_forward_param_0",
+                fwd_compute=1000,
+                bwd_compute=0,
+                dp_compute=0,
+            ),
+            create_dummy_item(
+                name="zero3_backward_param_0",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+        ]
+        items = ga_items + ga_items + [
+            zero_comm_item("zero3_has_overflow", "ALLREDUCE", 1),
+            zero_comm_item("zero3_grad_norm", "ALLREDUCE", 8),
+            create_dummy_item(name="cross_entropy1"),
+            create_dummy_item(name="cross_entropy2"),
+            create_dummy_item(name="cross_entropy3"),
+            create_dummy_item(name="optimizer1"),
+            create_dummy_item(name="optimizer2"),
+            create_dummy_item(name="optimizer3"),
+            create_dummy_item(name="optimizer4"),
+        ]
+        workload = build_zero_workload(items, ga=2)
+        assert not workload.validate()
+
+        layer_iterations = {
+            task.iteration for task in workload.tasks
+            if task.is_compute() and task.item_id < 4
+        }
+        assert layer_iterations == {0, 1}
+
+    def test_zero_step_collectives_and_post_compute_are_serialized(self):
+        items = [
+            create_dummy_item(
+                name="zero3_forward_param_0",
+                fwd_compute=1000,
+                bwd_compute=0,
+                dp_compute=0,
+            ),
+            create_dummy_item(
+                name="zero3_backward_param_0",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+            create_dummy_item(
+                name="zero3_backward_param_0_weight_grad",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+            zero_comm_item("zero3_grad_reduce_scatter", "REDUCESCATTER", 1024),
+            zero_comm_item("zero3_has_overflow", "ALLREDUCE", 1),
+            zero_comm_item("zero3_grad_norm", "ALLREDUCE", 8),
+            zero_comm_item(
+                "zero3_step_persistent_param_allgather", "ALLGATHER", 1024
+            ),
+            create_dummy_item(name="cross_entropy1"),
+        ]
+        workload = build_zero_workload(items)
+        task_map = self._task_map(workload)
+
+        step_item_ids = [4, 5, 6]
+        for index in range(len(step_item_ids) - 1):
+            previous_id = step_item_ids[index]
+            current_id = step_item_ids[index + 1]
+            for flow in (
+                task for task in workload.tasks
+                if task.is_flow() and task.item_id == current_id
+            ):
+                assert any(task_map[dep].item_id == previous_id for dep in flow.deps)
+
+        for compute in (
+            task for task in workload.tasks
+            if task.is_compute() and task.item_id == 7 and task.phase == Phase.FORWARD
+        ):
+            assert any(
+                task_map[dep].is_flow()
+                and task_map[dep].item_id == 6
+                and task_map[dep].dst == compute.node
+                for dep in compute.deps
+            )
+
+    def test_zero_init_broadcast_is_expanded_and_gates_forward(self):
+        items = [
+            zero_comm_item("zero3_init_broadcast_model", "BROADCAST", 1024),
+            zero_comm_item("zero3_init_param_allgather", "ALLGATHER", 1024),
+            create_dummy_item(
+                name="zero3_forward_param_0",
+                fwd_compute=1000,
+                bwd_compute=0,
+                dp_compute=0,
+            ),
+        ]
+        workload = build_zero_workload(items)
+        task_map = self._task_map(workload)
+        broadcast_flows = [
+            task for task in workload.tasks
+            if task.is_flow() and task.comm_type == CommType.DP_BROADCAST
+        ]
+        assert broadcast_flows
+        assert not workload.validate()
+
+        init_allgather = [
+            task for task in workload.tasks
+            if task.is_flow()
+            and task.comm_type == CommType.DP_ALLGATHER
+            and task.item_id == 1
+        ]
+        assert all(
+            any(task_map[dep].comm_type == CommType.DP_BROADCAST for dep in flow.deps)
+            for flow in init_allgather
+        )
+
+    def test_broadcast_root_uses_completion_not_receiver_index(self):
+        grouper = RankGrouper(
+            [0, 1], ParallelismConfig(tp=1, dp=2, pp=1, ep=1)
+        )
+        result, _ = WorkloadBuilder()._expand_comm_all_groups(
+            "BROADCAST", 1024, grouper, Phase.FORWARD,
+            layer_id=0, iteration=-1, item_id=0, job_id=0,
+            task_id_counter=0, default_context="dp",
+        )
+        assert 0 not in result.receiver_index
+        assert result.completion_index[0] == [flow.task_id for flow in result.flows]
+        assert result.completion_index[1] == result.receiver_index[1]
+
+    def test_zero3_step_flush_is_post_not_a_ga_layer_item(self):
+        ga_items = [
+            create_dummy_item(
+                name="zero3_forward_param_0",
+                fwd_compute=1000,
+                bwd_compute=0,
+                dp_compute=0,
+            ),
+            create_dummy_item(
+                name="zero3_backward_param_0",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+        ]
+        items = ga_items + ga_items + [
+            zero_comm_item(
+                "zero3_step_grad_reduce_scatter", "REDUCESCATTER", 1024
+            ),
+            zero_comm_item("zero3_has_overflow", "ALLREDUCE", 1),
+            create_dummy_item(name="cross_entropy1"),
+        ]
+        workload = build_zero_workload(items, ga=2)
+        assert not workload.validate()
+        assert {
+            task.iteration for task in workload.tasks
+            if task.is_compute() and task.item_id < len(ga_items) * 2
+        } == {0, 1}
+
+    def test_zero_ga_boundaries_support_nonuniform_prefetch_rows(self):
+        ga_compute_items = [
+            create_dummy_item(
+                name="zero3_forward_param_0",
+                fwd_compute=1000,
+                bwd_compute=0,
+                dp_compute=0,
+            ),
+            create_dummy_item(
+                name="zero3_backward_param_0",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+        ]
+        items = ga_compute_items + [
+            zero_comm_item("zero3_ga_boundary", "NONE", 0),
+            *ga_compute_items,
+            zero_comm_item("zero3_grad_reduce_scatter", "REDUCESCATTER", 1024),
+            zero_comm_item("zero3_has_overflow", "ALLREDUCE", 1),
+            create_dummy_item(name="cross_entropy1"),
+        ]
+        workload = build_zero_workload(items, ga=2)
+        assert not workload.validate()
+        assert {
+            task.iteration for task in workload.tasks
+            if task.is_compute() and task.item_id < 5
+        } == {0, 1}
+
+    def test_zero1_and_zero2_step_chains_gate_post_compute(self):
+        for stage in (1, 2):
+            step_items = [
+                zero_comm_item(f"zero{stage}_has_overflow", "ALLREDUCE", 1),
+            ]
+            if stage == 2:
+                step_items.append(zero_comm_item("zero2_grad_norm", "ALLREDUCE", 8))
+            step_items.append(
+                zero_comm_item(f"zero{stage}_param_allgather", "ALLGATHER", 1024)
+            )
+            items = [
+                create_dummy_item(
+                    name=f"zero{stage}_forward_param_0",
+                    fwd_compute=1000,
+                    bwd_compute=0,
+                    dp_compute=0,
+                ),
+                create_dummy_item(
+                    name=f"zero{stage}_backward_param_0",
+                    fwd_compute=0,
+                    bwd_compute=1000,
+                    dp_compute=0,
+                ),
+                create_dummy_item(
+                    name=f"zero{stage}_backward_param_0_weight_grad",
+                    fwd_compute=0,
+                    bwd_compute=1000,
+                    dp_compute=0,
+                ),
+                zero_comm_item(f"zero{stage}_grad_sync", "ALLREDUCE", 1024),
+                *step_items,
+                create_dummy_item(name="cross_entropy1"),
+            ]
+            workload = build_zero_workload(items)
+            task_map = self._task_map(workload)
+            first_post_compute = next(
+                task for task in workload.tasks
+                if task.is_compute() and task.item_id == len(items) - 1
+                and task.phase == Phase.FORWARD and task.node == 0
+            )
+            final_step_item_id = len(items) - 2
+            assert any(
+                task_map[dep].is_flow()
+                and task_map[dep].item_id == final_step_item_id
+                and task_map[dep].dst == first_post_compute.node
+                for dep in first_post_compute.deps
+            )
+
+    def test_zero_pp_dependencies_preserve_communication_before_compute(self):
+        items = [
+            zero_comm_item("zero3_forward_param_allgather", "ALLGATHER", 1024),
+            create_dummy_item(
+                name="zero3_forward_param_0",
+                fwd_compute=1000,
+                bwd_compute=0,
+                dp_compute=0,
+            ),
+            zero_comm_item("zero3_backward_param_allgather", "ALLGATHER", 1024),
+            create_dummy_item(
+                name="zero3_backward_param_0",
+                fwd_compute=0,
+                bwd_compute=1000,
+                dp_compute=0,
+            ),
+        ]
+        workload = build_zero_workload(items, dp=1, pp=2, pp_comm_size=1024)
+        task_map = self._task_map(workload)
+        pp_flows = [
+            task for task in workload.tasks
+            if task.is_flow() and task.comm_type == CommType.PP_SEND
+        ]
+        assert pp_flows
+        assert all(flow.deps for flow in pp_flows)
+
+        stage_one_forward = next(
+            task for task in workload.tasks
+            if task.is_compute() and task.phase == Phase.FORWARD and task.node == 1
+        )
+        assert any(
+            task_map[dep].is_flow() and task_map[dep].comm_type == CommType.PP_SEND
+            for dep in stage_one_forward.deps
+        )
