@@ -149,63 +149,87 @@ def print_report(static_cp, actual_cp, tte_info, result):
 
 # ── Chrome Trace export with critical-path annotation ───────────
 
-def export_critical_path_trace(workload, result, cp_info, path):
-    """Chrome Trace JSON where critical-path events get cat='critical_path'."""
-    task_map = {t.task_id: t for t in workload.tasks}
-    crit_set = set(cp_info.critical_tasks)
-    events = []
+def export_critical_path_trace(workload, result, static_cp, actual_cp, path):
+    """Chrome Trace JSON with three pids:
 
-    # lane helpers
-    def compute_lane(tid):
+    - pid=0: ALL tasks (reference)
+    - pid=1: Static CPM critical tasks (predicted bottleneck)
+    - pid=2: Actual CPM critical tasks (true bottleneck)
+    """
+    task_map = {t.task_id: t for t in workload.tasks}
+    timings = result.per_task
+    events: list[dict] = []
+
+    def lane(tid):
         task = task_map[tid]
-        t = result.per_task[tid]
+        t = timings[tid]
         if task.is_compute():
             return t.node * 2 + 1
         return (task.src or 0) * 2 + 2
 
-    # metadata
-    seen_pid = set()
-    seen_tid = set()
-    for tid in result.per_task:
-        task = task_map.get(tid)
+    # (pid, label, set_of_critical_task_ids)
+    pid_configs = [
+        (1, "Static CPM", set(static_cp.critical_tasks)),
+        (2, "Actual CPM", set(actual_cp.critical_tasks)),
+    ]
+
+    def add_metadata(pid, label, tracks):
+        events.append(dict(name="process_name", ph="M", pid=pid, tid=0,
+                           args=dict(name=f"{label}")))
+        for (t, node, lbl) in sorted(tracks, key=lambda x: x[0]):
+            events.append(dict(name="thread_name", ph="M", pid=pid, tid=t,
+                               args=dict(name=f"Node {node} ({lbl})")))
+
+    # ── Collect track info ──
+    all_tracks: set[tuple[int, int, str]] = set()
+    crit_tracks: dict[int, set[tuple[int, int, str]]] = {p: set() for p, _, _ in pid_configs}
+
+    for tid_ in timings:
+        task = task_map.get(tid_)
         if task is None:
             continue
-        pid = task.job_id
-        lid = compute_lane(tid)
-        if pid not in seen_pid:
-            seen_pid.add(pid)
-            events.append(dict(name="process_name", ph="M", pid=pid, tid=0,
-                               args=dict(name=f"Job {pid}")))
-        if (pid, lid) not in seen_tid:
-            seen_tid.add((pid, lid))
-            label = "Compute" if task.is_compute() else "Comm"
-            events.append(dict(name="thread_name", ph="M", pid=pid, tid=lid,
-                               args=dict(name=f"Node {result.per_task[tid].node} ({label})")))
+        t_ = timings[tid_]
+        l = lane(tid_)
+        lbl = "Compute" if task.is_compute() else "Comm"
+        all_tracks.add((l, t_.node, lbl))
+        for pid, _, cset in pid_configs:
+            if tid_ in cset:
+                crit_tracks[pid].add((l, t_.node, lbl))
 
-    # task slices
-    for tid, t in result.per_task.items():
+    add_metadata(0, "All Tasks", all_tracks)
+    for pid, label, _ in pid_configs:
+        add_metadata(pid, label, crit_tracks[pid])
+
+    # ── Task slices ──
+    for tid, t in timings.items():
         task = task_map.get(tid)
         if task is None:
             continue
         dur = t.end_time_us - t.start_time_us
         if dur == 0:
             continue
-        lid = compute_lane(tid)
-        if task.is_compute():
-            name = f"L{task.layer_id} {task.phase.value}"
-        else:
-            name = f"{task.comm_type.value} {task.src}->{task.dst}"
-        events.append(dict(
-            name=name,
-            cat="critical_path" if tid in crit_set else "normal",
-            ph="X", ts=t.start_time_us, dur=dur,
-            pid=task.job_id, tid=lid,
-            args=dict(task_id=tid, is_critical=tid in crit_set,
-                      type="compute" if task.is_compute() else "flow"),
-        ))
+        l = lane(tid)
+        cat = "compute" if task.is_compute() else "flow"
+        name = f"L{task.layer_id} {task.phase.value}" if task.is_compute() \
+            else f"{task.comm_type.value} {task.src}->{task.dst}"
+
+        # pid=0: all tasks
+        events.append(dict(name=name, cat=cat, ph="X",
+                           ts=t.start_time_us, dur=dur, pid=0, tid=l))
+
+        # pid=1: static CPM critical, pid=2: actual CPM critical
+        for pid, _, cset in pid_configs:
+            if tid in cset:
+                events.append(dict(name=name, cat=cat, ph="X",
+                                   ts=t.start_time_us, dur=dur, pid=pid, tid=l))
 
     with open(path, "w", encoding="utf-8") as f:
         json.dump(events, f, indent=2)
+
+    n_s = len(pid_configs[0][2])
+    n_a = len(pid_configs[1][2])
+    print(f"  [trace] {len(events)} events — "
+          f"pid=0: ALL, pid=1: static({n_s}), pid=2: actual({n_a})")
     print(f"  [trace] {path}")
 
 
@@ -497,7 +521,7 @@ def main():
         os.path.join(OUTPUT_DIR, "flow_inflation_scatter.svg"),
     )
     export_critical_path_trace(
-        workload, result, actual_cp,
+        workload, result, static_cp, actual_cp,
         os.path.join(OUTPUT_DIR, "trace_critical.json"),
     )
 
