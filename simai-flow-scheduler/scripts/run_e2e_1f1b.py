@@ -8,6 +8,7 @@ Usage:
     uv run python scripts/run_e2e_1f1b.py
 """
 
+import argparse
 import sys
 import os
 
@@ -29,12 +30,21 @@ from src.workload_format.writer import WorkloadWriter
 from src.executor.analytical import AnalyticalExecutor
 from src.executor.policies.default_policy import DefaultSchedulingPolicy
 
+DEFAULT_AICB = "inputs/aicb-workload/A100-gpt_7B_ws4_pp2-world_size4-tp2-pp2-ep1-gbs32-mbs4-seq4096-MOE-False-GEMM-False-flash_attn-True.txt"
+DEFAULT_TOPO = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100"
+
 
 def main():
-    # --- Paths ---
-    aicb_file = "inputs/aicb-workload/A100-gpt_7B_ws4_pp2-world_size4-tp2-pp2-ep1-gbs32-mbs4-seq4096-MOE-False-GEMM-False-flash_attn-True.txt"
-    topo_file = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100"
-    output_dir = "outputs/e2e_1f1b"
+    parser = argparse.ArgumentParser(description="1F1B end-to-end simulation")
+    parser.add_argument("--aicb", default=DEFAULT_AICB, help="AICB workload file")
+    parser.add_argument("--topo", default=DEFAULT_TOPO, help="Topology file")
+    parser.add_argument("--output", "-o", default=None, help="Output directory")
+    args = parser.parse_args()
+
+    aicb_file = args.aicb
+    topo_file = args.topo
+    output_dir = args.output or os.path.join(
+        "outputs", os.path.splitext(os.path.basename(aicb_file))[0] + "_1f1b")
     os.makedirs(output_dir, exist_ok=True)
 
     # ============================================================
