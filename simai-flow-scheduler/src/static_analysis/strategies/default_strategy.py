@@ -9,6 +9,7 @@ from ..passes.routing import BfsRouteTable, BfsStrategy, RouteTable
 from ..passes.topology_loader import NetworkTopology
 from ..passes.task_serializer import CppReferenceSerializer, OneFOneBSerializer, ExecutionPlan
 from ...workload_format.schema import P2PWorkload
+from ...workload_generator.rank_grouper import RankGrouper
 
 
 @dataclass
@@ -79,40 +80,48 @@ class LightweightAnalyzer:
 
 
 class OneFOneBAnalyzer:
-    """1F1B 分析器 — 只构建 compute_order，不做 CPM/BFS。
+    """1F1B 分析器 — 路由 + 1F1B compute_order。
 
-    与 LightweightAnalyzer 相同，但使用 OneFOneBSerializer 而非
-    CppReferenceSerializer，生成 1F1B 交替的 compute 执行顺序。
-
-    用于 DynamicExecutor 的动态场景：每个 iteration 展开时生成
-    1F1B compute_order，通过 SchedulingPolicy.update_analysis()
-    增量合并到 policy 中。
+    与 DefaultAnalyzer 类似：从 workload 的 Job 中推导 PP 映射，
+    同时做 BFS 路由和 1F1B compute_order。
     """
 
-    def __init__(self, pp: int, node_to_stage: dict[int, int]):
+    def __init__(self, topology: NetworkTopology):
         """
         Args:
-            pp: 流水线并行度（pipeline stages）。
-            node_to_stage: 每个 node → stage_id 的映射。
-                从 Job.assigned_nodes + Job.parallelism 推导：
-                stage_id = node_idx // (dp * ep * tp)
+            topology: 网络拓扑（用于 BFS 路由）。
         """
-        self._serializer = OneFOneBSerializer(pp=pp, node_to_stage=node_to_stage)
+        self.topology = topology
 
     def analyze(self, workload: P2PWorkload) -> DefaultAnalysisResult:
-        """构建 1F1B compute_order，路由表留空。
+        """构建路由表 + 1F1B compute_order。
 
         Args:
-            workload: 单个 iteration 展开后的 P2PWorkload。
+            workload: P2PWorkload（需包含 jobs 信息用于推导 PP 映射）。
 
         Returns:
-            DefaultAnalysisResult:
-                route_table: 空 BfsRouteTable。
-                execution_plan: 含 1F1B compute_order。
+            DefaultAnalysisResult: 含路由表和 1F1B compute_order。
         """
-        plan = self._serializer.serialize(workload)
+        # 从 workload 的 job 推导 node_to_stage 映射
+        node_to_stage: dict[int, int] = {}
+        pp = 1
+        for job in workload.jobs:
+            grouper = RankGrouper(job.assigned_nodes, job.parallelism)
+            pp = grouper.pp
+            stage_size = grouper.dp * grouper.ep * grouper.tp
+            for stage_id in range(grouper.pp):
+                for i in range(stage_size):
+                    node = grouper.nodes[stage_id * stage_size + i]
+                    node_to_stage[node] = stage_id
+
+        # BFS 路由
+        route_table = BfsStrategy().compute_routes(workload, self.topology)
+
+        # 1F1B compute_order
+        serializer = OneFOneBSerializer(pp=pp, node_to_stage=node_to_stage)
+        execution_plan = serializer.serialize(workload)
 
         return DefaultAnalysisResult(
-            route_table=BfsRouteTable(None),
-            execution_plan=plan,
+            route_table=route_table,
+            execution_plan=execution_plan,
         )
