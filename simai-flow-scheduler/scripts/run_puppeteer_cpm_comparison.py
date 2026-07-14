@@ -50,21 +50,44 @@ K_PATHS = 4
 
 # ── Core analysis ───────────────────────────────────────────────
 
-def compute_actual_critical_path(workload, result):
-    """Run CPM on actual execution durations from ExecutionResult.
+def compute_cpm_with_plan(workload, result_or_static_cp, execution_plan, use_actual=True):
+    # type: (...) -> CriticalPathInfo
+    """CPM forward/backward pass that INCLUDES compute-order implicit edges.
 
-    Returns CriticalPathInfo where slack=0 tasks are the true bottleneck chain.
+    Args:
+        workload: P2PWorkload
+        result_or_static_cp: ExecutionResult (if use_actual=True) or
+            static CriticalPathInfo (if use_actual=False).
+        execution_plan: ExecutionPlan with compute_order per node.
+        use_actual: If True, durations come from result.per_task actual
+            timings.  If False, they come from result_or_static_cp's
+            task_timings (static ideal durations).
+
+    Returns:
+        CriticalPathInfo with slack=0 marking the true bottleneck chain.
     """
     task_map = {t.task_id: t for t in workload.tasks}
-    timings = result.per_task
 
-    def actual_dur(tid):
-        t = timings[tid]
-        return t.end_time_us - t.start_time_us
+    if use_actual:
+        result_exec = result_or_static_cp  # ExecutionResult
+        def duration(tid):
+            t = result_exec.per_task[tid]
+            return t.end_time_us - t.start_time_us
+    else:
+        static_tt = result_or_static_cp.task_timings  # CriticalPathInfo.task_timings
+        def duration(tid):
+            st = static_tt.get(tid)
+            return (st.earliest_finish_us - st.earliest_start_us) if st else 0
 
-    # topological order
-    sorted_tids = []
-    visited = set()
+    # Build compute-order predecessor edges (from ExecutionPlan)
+    compute_pred: dict[int, int] = {}
+    for node, tids in execution_plan.compute_order.items():
+        for i in range(len(tids) - 1):
+            compute_pred[tids[i + 1]] = tids[i]
+
+    # topological sort (DAG deps + compute-order edges)
+    sorted_tids: list[int] = []
+    visited: set[int] = set()
 
     def dfs(tid):
         if tid in visited:
@@ -72,32 +95,40 @@ def compute_actual_critical_path(workload, result):
         visited.add(tid)
         for dep in task_map[tid].deps:
             dfs(dep)
+        pred = compute_pred.get(tid)
+        if pred is not None:
+            dfs(pred)
         sorted_tids.append(tid)
 
     for t in workload.tasks:
         dfs(t.task_id)
 
-    # forward pass
+    # Forward pass
     es, ef = {}, {}
     for tid in sorted_tids:
-        pred = [ef[d] for d in task_map[tid].deps if d in ef]
-        es[tid] = max(pred) if pred else 0
-        ef[tid] = es[tid] + actual_dur(tid)
+        pred_finishes = [ef[d] for d in task_map[tid].deps if d in ef]
+        pred = compute_pred.get(tid)
+        if pred is not None and pred in ef:
+            pred_finishes.append(ef[pred])
+        es[tid] = max(pred_finishes) if pred_finishes else 0
+        ef[tid] = es[tid] + duration(tid)
 
     makespan = max(ef.values()) if ef else 0
 
-    # successors for backward pass
-    successors = defaultdict(list)
+    # Successors for backward pass
+    successors: dict[int, list[int]] = defaultdict(list)
     for t in workload.tasks:
         for dep in t.deps:
             successors[dep].append(t.task_id)
+    for pred, succ in compute_pred.items():
+        successors[succ].append(pred)  # reverse edge for backward pass
 
-    # backward pass
+    # Backward pass
     ls, lf = {}, {}
     for tid in reversed(sorted_tids):
         children = successors.get(tid, [])
         lf[tid] = makespan if not children else min(ls[c] for c in children)
-        ls[tid] = lf[tid] - actual_dur(tid)
+        ls[tid] = lf[tid] - duration(tid)
 
     task_timings, critical_tasks = {}, []
     for tid in sorted_tids:
@@ -115,7 +146,12 @@ def compute_actual_critical_path(workload, result):
         if is_crit:
             critical_tasks.append(tid)
 
-    return CriticalPathInfo(task_timings, critical_tasks, makespan, "actual_cpm")
+    return CriticalPathInfo(
+        task_timings, critical_tasks, makespan,
+        f"{'actual' if use_actual else 'static'}_cpm_with_plan",
+    )
+
+
 
 
 # ── Console report ──────────────────────────────────────────────
@@ -521,8 +557,15 @@ def main():
     print("Critical path analysis")
     print("=" * 60)
 
-    static_cp = analyze_cpm(workload, pa_result.route_table, topology)
-    actual_cp = compute_actual_critical_path(workload, result)
+    # Static CPM: ideal durations first, then add compute-order edges
+    static_ideal = analyze_cpm(workload, pa_result.route_table, topology)
+    static_cp = compute_cpm_with_plan(
+        workload, static_ideal, pa_result.execution_plan, use_actual=False,
+    )
+    # Actual CPM: actual durations + compute-order edges
+    actual_cp = compute_cpm_with_plan(
+        workload, result, pa_result.execution_plan, use_actual=True,
+    )
     print(f"  Static CPM:  {len(static_cp.critical_tasks)} critical tasks, "
           f"predicted makespan={static_cp.makespan_us} us")
     print(f"  Actual CPM:  {len(actual_cp.critical_tasks)} critical tasks, "
