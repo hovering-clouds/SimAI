@@ -8,6 +8,8 @@ into point-to-point flow tasks.
 Reference: MockNcclGroup.cc in astra-sim-alibabacloud
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
@@ -119,8 +121,8 @@ class CollectiveExpander(ABC):
     Reference implementation: MockNcclGroup.cc
 
     Concrete implementations:
-    - AllReduceExpander: expand_allreduce with algo dispatch (ring, tree, nvls)
-    - AllGatherExpander: expand_allgather with algo dispatch (ring, tree)
+    - AllReduceExpander: ring, tree, double-binary-tree, and halving-doubling
+    - AllGatherExpander: ring, tree, double-binary-tree, and halving-doubling
     """
 
     @abstractmethod
@@ -139,7 +141,7 @@ class CollectiveExpander(ABC):
         Args:
             ranks: List of global ranks participating in the collective.
             data_size: Total data size in bytes.
-            algo: Algorithm to use ("ring", "tree", "nvls").
+            algo: "ring", "tree", "double_binary_tree", or "halving_doubling".
             job_id: Job ID to assign to generated tasks.
             task_id_start: Starting task ID.
             context: Parallelism context ("tp", "dp", "ep").
@@ -165,7 +167,7 @@ class CollectiveExpander(ABC):
         Args:
             ranks: List of global ranks participating in the collective.
             data_size: Total data size in bytes.
-            algo: Algorithm to use ("ring", "tree").
+            algo: "ring", "tree", "double_binary_tree", or "halving_doubling".
             job_id: Job ID to assign to generated tasks.
             task_id_start: Starting task ID.
             context: Parallelism context ("tp", "dp", "ep").
@@ -191,7 +193,7 @@ class CollectiveExpander(ABC):
         Args:
             ranks: List of global ranks participating in the collective.
             data_size: Total data size in bytes.
-            algo: Algorithm to use ("ring", "tree").
+            algo: "ring", "tree", "double_binary_tree", or "halving_doubling".
             job_id: Job ID to assign to generated tasks.
             task_id_start: Starting task ID.
             context: Parallelism context ("tp", "dp", "ep").
@@ -232,6 +234,9 @@ class AllReduceExpander(CollectiveExpander):
 
     Supported algorithms:
     - "ring": Ring AllReduce (MockNcclGroup.cc::genAllReduceRingFlowModels)
+    - "tree": Logical binary-tree AllReduce
+    - "double_binary_tree": Two shifted binary trees with split chunks
+    - "halving_doubling": Recursive-doubling AllReduce (power-of-two ranks)
     """
 
     def expand_allreduce(
@@ -245,6 +250,22 @@ class AllReduceExpander(CollectiveExpander):
     ) -> list[FlowTask]:
         if algo == "ring":
             return self._expand_ring(ranks, data_size, job_id, task_id_start, context)
+        comm = _make_algorithm_comm_type("ALLREDUCE", context, algo)
+        if algo == "tree":
+            return _expand_tree_collective(
+                ranks=ranks, data_size=data_size, base="ALLREDUCE", comm_type=comm,
+                job_id=job_id, task_id_start=task_id_start,
+            )
+        if algo == "double_binary_tree":
+            return _expand_double_binary_tree_collective(
+                ranks=ranks, data_size=data_size, base="ALLREDUCE", comm_type=comm,
+                job_id=job_id, task_id_start=task_id_start,
+            )
+        if algo == "halving_doubling":
+            return _expand_halving_doubling_collective(
+                ranks=ranks, data_size=data_size, base="ALLREDUCE", comm_type=comm,
+                job_id=job_id, task_id_start=task_id_start,
+            )
         raise ValueError(f"AllReduceExpander: unsupported algo '{algo}'")
 
     def _expand_ring(
@@ -391,6 +412,9 @@ class AllGatherExpander(CollectiveExpander):
 
     Supported algorithms:
     - "ring": Ring AllGather (MockNcclGroup.cc::genAllGatherFlowModels)
+    - "tree": Logical tree gather followed by tree broadcast
+    - "double_binary_tree": Two shifted tree gathers with split chunks
+    - "halving_doubling": Recursive-doubling AllGather (power-of-two ranks)
     """
 
     def expand_allgather(
@@ -404,6 +428,22 @@ class AllGatherExpander(CollectiveExpander):
     ) -> list[FlowTask]:
         if algo == "ring":
             return self._expand_ring(ranks, data_size, job_id, task_id_start, context)
+        comm = _make_algorithm_comm_type("ALLGATHER", context, algo)
+        if algo == "tree":
+            return _expand_tree_collective(
+                ranks=ranks, data_size=data_size, base="ALLGATHER", comm_type=comm,
+                job_id=job_id, task_id_start=task_id_start,
+            )
+        if algo == "double_binary_tree":
+            return _expand_double_binary_tree_collective(
+                ranks=ranks, data_size=data_size, base="ALLGATHER", comm_type=comm,
+                job_id=job_id, task_id_start=task_id_start,
+            )
+        if algo == "halving_doubling":
+            return _expand_halving_doubling_collective(
+                ranks=ranks, data_size=data_size, base="ALLGATHER", comm_type=comm,
+                job_id=job_id, task_id_start=task_id_start,
+            )
         raise ValueError(f"AllGatherExpander: unsupported algo '{algo}'")
 
     def _expand_ring(
@@ -500,6 +540,9 @@ class ReduceScatterExpander(CollectiveExpander):
 
     Supported algorithms:
     - "ring": Ring ReduceScatter (MockNcclGroup.cc::genReduceScatterFlowModels)
+    - "tree": Logical tree reduction followed by subtree scatter
+    - "double_binary_tree": Two shifted tree reductions with split chunks
+    - "halving_doubling": Recursive-halving ReduceScatter (power-of-two ranks)
     """
 
     def expand_reducescatter(
@@ -513,6 +556,22 @@ class ReduceScatterExpander(CollectiveExpander):
     ) -> list[FlowTask]:
         if algo == "ring":
             return self._expand_ring(ranks, data_size, job_id, task_id_start, context)
+        comm = _make_algorithm_comm_type("REDUCESCATTER", context, algo)
+        if algo == "tree":
+            return _expand_tree_collective(
+                ranks=ranks, data_size=data_size, base="REDUCESCATTER", comm_type=comm,
+                job_id=job_id, task_id_start=task_id_start,
+            )
+        if algo == "double_binary_tree":
+            return _expand_double_binary_tree_collective(
+                ranks=ranks, data_size=data_size, base="REDUCESCATTER", comm_type=comm,
+                job_id=job_id, task_id_start=task_id_start,
+            )
+        if algo == "halving_doubling":
+            return _expand_halving_doubling_collective(
+                ranks=ranks, data_size=data_size, base="REDUCESCATTER", comm_type=comm,
+                job_id=job_id, task_id_start=task_id_start,
+            )
         raise ValueError(f"ReduceScatterExpander: unsupported algo '{algo}'")
 
     def _expand_ring(
@@ -721,3 +780,310 @@ class BroadcastExpander(CollectiveExpander):
 
     def expand_alltoall(self, ranks, data_size, job_id=0, task_id_start=0):
         raise NotImplementedError("Use AlltoAllExpander for AlltoAll")
+
+
+
+def _make_algorithm_comm_type(base: str, context: str, algo: str) -> CommType:
+    """Return the existing tree CommType for every non-ring TP algorithm.
+
+    The workload schema distinguishes ring and tree communication for tensor
+    parallelism, but intentionally has no separate enum values for double
+    binary tree or halving-doubling.  Keeping those algorithms under the
+    existing ``*_TREE`` values avoids changing executors and trace consumers.
+    """
+    if context == "tp" and algo != "ring":
+        return {
+            "ALLREDUCE": CommType.TP_ALLREDUCE_TREE,
+            "ALLGATHER": CommType.TP_ALLGATHER_TREE,
+            "REDUCESCATTER": CommType.TP_REDUCESCATTER_TREE,
+        }[base]
+    return _make_comm_type(base, context)
+
+
+def _validate_ranks(ranks: list[int], algo: str) -> None:
+    """Validate the rank list required by newly added logical algorithms."""
+    if len(set(ranks)) != len(ranks):
+        raise ValueError(f"{algo}: ranks must be unique")
+
+
+def _split_bytes(total: int, pieces: int, description: str) -> list[int]:
+    """Split bytes exactly and deterministically, rejecting zero-byte flows."""
+    if total <= 0:
+        raise ValueError(f"{description}: data_size must be positive")
+    if pieces <= 0 or total < pieces:
+        raise ValueError(
+            f"{description}: data_size ({total}) must provide at least one byte "
+            f"for each of {pieces} partitions"
+        )
+    base, remainder = divmod(total, pieces)
+    return [base + (1 if index < remainder else 0) for index in range(pieces)]
+
+
+def _build_binary_tree(
+    ranks: list[int],
+) -> tuple[int, dict[int, int | None], dict[int, list[int]]]:
+    """Build a deterministic complete binary tree from rank-list order.
+
+    Astra-Sim obtains ``up``/``down`` relationships from its channel and node
+    topology.  The Python expander receives only a rank list, so rank-list
+    order is the logical topology contract.  This also supports non-contiguous
+    global rank IDs.
+    """
+    root = ranks[0]
+    parents: dict[int, int | None] = {root: None}
+    children: dict[int, list[int]] = {rank: [] for rank in ranks}
+    for index, rank in enumerate(ranks[1:], start=1):
+        parent = ranks[(index - 1) // 2]
+        parents[rank] = parent
+        children[parent].append(rank)
+    return root, parents, children
+
+
+def _postorder(root: int, children: dict[int, list[int]]) -> list[int]:
+    """Return children before parents, used by tree gather/reduce."""
+    result: list[int] = []
+
+    def visit(rank: int) -> None:
+        for child in children[rank]:
+            visit(child)
+        result.append(rank)
+
+    visit(root)
+    return result
+
+
+def _expand_tree_collective(
+    *,
+    ranks: list[int],
+    data_size: int,
+    base: str,
+    comm_type: CommType,
+    job_id: int,
+    task_id_start: int,
+    chunk_id: int = 0,
+    num_chunks: int = 1,
+) -> list[FlowTask]:
+    """Expand one logical binary-tree chunk into endpoint FLOW tasks.
+
+    This is the FLOW-DAG counterpart of MockNcclGroup's tree ``up`` and
+    ``down`` passes.  It deliberately omits C++ channel, packet, and stream
+    state while preserving the parent/child communication dependencies.
+
+    ``data_size`` means a full per-rank tensor for AllReduce and
+    ReduceScatter, and a full gathered output for AllGather.
+    """
+    if len(ranks) < 2:
+        return []
+    _validate_ranks(ranks, f"{base.lower()} tree")
+
+    root, parents, children = _build_binary_tree(ranks)
+    order = _postorder(root, children)
+    rank_to_index = {rank: index for index, rank in enumerate(ranks)}
+    task_id = task_id_start
+    tasks: list[FlowTask] = []
+    up_ready: dict[int, list[int]] = {rank: [] for rank in ranks}
+
+    if base == "ALLGATHER":
+        own_sizes = dict(
+            zip(ranks, _split_bytes(data_size, len(ranks), "tree allgather"))
+        )
+
+        def up_size(rank: int) -> int:
+            return subtree_sizes[rank]
+    else:
+        own_sizes = {}
+        up_size = lambda _rank: data_size
+
+    subtree_sizes: dict[int, int] = {}
+    if base == "ALLGATHER":
+        for rank in order:
+            subtree_sizes[rank] = own_sizes[rank] + sum(
+                subtree_sizes[child] for child in children[rank]
+            )
+
+    # Upward gather/reduce.  A sender waits until all flows from its children
+    # have completed, matching the C++ nodeprevs dependency construction.
+    for rank in order:
+        if rank == root:
+            continue
+        parent = parents[rank]
+        assert parent is not None
+        task = FlowTask(
+            task_id=task_id,
+            job_id=job_id,
+            type=TaskType.FLOW,
+            src=rank,
+            dst=parent,
+            size_bytes=up_size(rank),
+            comm_type=comm_type,
+            chunk_id=chunk_id,
+            num_chunks=num_chunks,
+            deps=list(up_ready[rank]),
+        )
+        tasks.append(task)
+        up_ready[parent].append(task_id)
+        task_id += 1
+
+    # Downward broadcast/scatter.  Root can start only after all reductions or
+    # gathered subtrees have arrived; every other node waits for its parent.
+    down_ready: dict[int, list[int]] = {root: list(up_ready[root])}
+    output_sizes = (
+        _split_bytes(data_size, len(ranks), "tree reducescatter")
+        if base == "REDUCESCATTER"
+        else []
+    )
+    queue = [root]
+    while queue:
+        parent = queue.pop(0)
+        for child in children[parent]:
+            if base == "REDUCESCATTER":
+                down_size = sum(
+                    output_sizes[rank_to_index[rank]]
+                    for rank in _subtree_ranks(child, children)
+                )
+            else:
+                down_size = data_size
+            task = FlowTask(
+                task_id=task_id,
+                job_id=job_id,
+                type=TaskType.FLOW,
+                src=parent,
+                dst=child,
+                size_bytes=down_size,
+                comm_type=comm_type,
+                chunk_id=chunk_id,
+                num_chunks=num_chunks,
+                deps=list(down_ready[parent]),
+            )
+            tasks.append(task)
+            down_ready[child] = [task_id]
+            task_id += 1
+            queue.append(child)
+    return tasks
+
+
+def _subtree_ranks(root: int, children: dict[int, list[int]]) -> list[int]:
+    """Return the ranks in a subtree in deterministic preorder."""
+    result = [root]
+    for child in children[root]:
+        result.extend(_subtree_ranks(child, children))
+    return result
+
+
+def _expand_halving_doubling_collective(
+    *,
+    ranks: list[int],
+    data_size: int,
+    base: str,
+    comm_type: CommType,
+    job_id: int,
+    task_id_start: int,
+) -> list[FlowTask]:
+    """Build the hypercube FLOW DAG used by Halving-Doubling.
+
+    This follows HalvingDoubling.cc's ``rank_offset`` and message-size
+    evolution, at FLOW granularity.  Like the C++ implementation, it requires
+    a power-of-two participant count.
+    """
+    n = len(ranks)
+    if n < 2:
+        return []
+    _validate_ranks(ranks, f"{base.lower()} halving_doubling")
+    if n & (n - 1):
+        raise ValueError("halving_doubling requires a power-of-two rank count")
+    if data_size <= 0 or data_size % n:
+        raise ValueError(
+            f"halving_doubling {base.lower()}: data_size must be positive and divisible by rank count"
+        )
+
+    stages = n.bit_length() - 1
+    task_id = task_id_start
+    tasks: list[FlowTask] = []
+    previous_by_src: dict[int, int] = {}
+    stage_id = 0
+
+    def append_stage(
+        step: int,
+        size_bytes: int,
+        previous_partner_offset: int | None,
+    ) -> None:
+        nonlocal task_id, previous_by_src, stage_id
+        current_by_src: dict[int, int] = {}
+        for index, src in enumerate(ranks):
+            partner = ranks[index ^ (1 << step)]
+            if previous_partner_offset is None:
+                deps = []
+            else:
+                previous_partner = ranks[index ^ previous_partner_offset]
+                deps = [previous_by_src[previous_partner]]
+            tasks.append(
+                FlowTask(
+                    task_id=task_id,
+                    job_id=job_id,
+                    type=TaskType.FLOW,
+                    src=src,
+                    dst=partner,
+                    size_bytes=size_bytes,
+                    comm_type=comm_type,
+                    chunk_id=stage_id,
+                    num_chunks=(2 * stages if base == "ALLREDUCE" else stages),
+                    deps=deps,
+                )
+            )
+            current_by_src[src] = task_id
+            task_id += 1
+        previous_by_src = current_by_src
+        stage_id += 1
+
+    if base in {"REDUCESCATTER", "ALLREDUCE"}:
+        for step in range(stages):
+            previous_offset = None if step == 0 else 1 << (step - 1)
+            append_stage(step, data_size // (1 << (step + 1)), previous_offset)
+    if base == "ALLREDUCE":
+        for step in range(stages):
+            previous_offset = 1 << (stages - 1) if step == 0 else 1 << (step - 1)
+            append_stage(step, data_size // n * (1 << step), previous_offset)
+    elif base == "ALLGATHER":
+        for step in range(stages):
+            previous_offset = None if step == 0 else 1 << (step - 1)
+            append_stage(step, data_size // n * (1 << step), previous_offset)
+    return tasks
+
+
+def _expand_double_binary_tree_collective(
+    *,
+    ranks: list[int],
+    data_size: int,
+    base: str,
+    comm_type: CommType,
+    job_id: int,
+    task_id_start: int,
+) -> list[FlowTask]:
+    """Split a collective over two shifted logical binary trees.
+
+    DoubleBinaryTreeTopology alternates root-min and root-max trees.  With no
+    physical topology input in this expander, a cyclic rank shift provides the
+    corresponding second tree with different root/intermediate roles.
+    """
+    if len(ranks) < 2:
+        return []
+    _validate_ranks(ranks, f"{base.lower()} double_binary_tree")
+    chunk_sizes = _split_bytes(data_size, 2, f"double_binary_tree {base.lower()}")
+    tasks: list[FlowTask] = []
+    next_task_id = task_id_start
+    for chunk_id, (tree_ranks, chunk_size) in enumerate(
+        ((ranks, chunk_sizes[0]), (ranks[1:] + ranks[:1], chunk_sizes[1]))
+    ):
+        chunk_tasks = _expand_tree_collective(
+            ranks=tree_ranks,
+            data_size=chunk_size,
+            base=base,
+            comm_type=comm_type,
+            job_id=job_id,
+            task_id_start=next_task_id,
+            chunk_id=chunk_id,
+            num_chunks=2,
+        )
+        tasks.extend(chunk_tasks)
+        next_task_id += len(chunk_tasks)
+    return tasks
