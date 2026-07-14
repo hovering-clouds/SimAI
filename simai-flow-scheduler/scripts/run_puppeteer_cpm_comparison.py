@@ -10,6 +10,7 @@ Usage:
     uv run python scripts/run_puppeteer_cpm_comparison.py
 """
 
+import argparse
 import json
 import os
 import sys
@@ -30,16 +31,20 @@ from src.executor.analytical import AnalyticalExecutor
 from src.executor.policies.puppeteer_policy import PuppeteerSchedulingPolicy
 
 
-# ── Config ──────────────────────────────────────────────────────
+# ── Default configs ─────────────────────────────────────────────
 
-AICB_FILE = (
-    "inputs/aicb-workload/"
-    "A100-gpt_7B_ws4_pp1-world_size4-tp4-pp1-ep1-gbs2-mbs2-seq4096-"
-    "MOE-False-GEMM-False-flash_attn-True.txt"
-)
-TOPO_FILE = "inputs/topologies/Cassini_Fig10_24g_l1-6_l2-4_l3-3_nv4_400Gbps_A100"
-OUTPUT_DIR = "outputs/puppeteer_cpm"
-DP = 3
+_CFG = {
+    "cpp": {
+        "aicb": "inputs/aicb-workload/A100-gpt_7B_ws4_pp1-world_size4-tp4-pp1-ep1-gbs2-mbs2-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
+        "topo": "inputs/topologies/Cassini_Fig10_24g_l1-6_l2-4_l3-3_nv4_400Gbps_A100",
+        "dp": 3,  # override DP beyond header for more traffic
+    },
+    "1f1b": {
+        "aicb": "inputs/aicb-workload/A100-gpt_7B_ws4_pp2-world_size4-tp2-pp2-ep1-gbs32-mbs4-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
+        "topo": "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100",
+    },
+}
+DEFAULT_SERIALIZER = "cpp"
 K_PATHS = 4
 
 
@@ -429,24 +434,43 @@ def plot_flow_inflation(workload, static_cp, actual_cp, tte_info, flow_timing, r
 # ── Main ────────────────────────────────────────────────────────
 
 def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    parser = argparse.ArgumentParser(
+        description="Puppeteer CPM comparison: verify static vs actual critical path")
+    parser.add_argument("--mode", choices=["cpp", "1f1b"], default="cpp",
+                        help="1F1B uses pp=2 workload + AlibabaHPN topology")
+    parser.add_argument("--aicb", default=None,
+                        help="Override AICB workload file")
+    parser.add_argument("--topo", default=None,
+                        help="Override topology file")
+    parser.add_argument("--output", "-o", default=None,
+                        help="Override output directory")
+    args = parser.parse_args()
+
+    mode = args.mode
+    cfg = _CFG[mode]
+    aicb_file = args.aicb or cfg["aicb"]
+    topo_file = args.topo or cfg["topo"]
+    output_dir = args.output or f"outputs/puppeteer_cpm"
+
+    os.makedirs(output_dir, exist_ok=True)
 
     # ── Load workload ───────────────────────────────────────────
     print("=" * 60)
     print("Loading AICB workload")
     print("=" * 60)
-    parser = AicbParser()
-    header, items = parser.parse(AICB_FILE)
+    ap = AicbParser()
+    header, items = ap.parse(aicb_file)
     tp, pp, ep = header.tp, header.pp, header.ep
-    required_gpus = tp * DP * pp * ep
-    print(f"  model: {os.path.basename(AICB_FILE)}")
-    print(f"  tp={tp} dp={DP} pp={pp} ep={ep}  gpus={required_gpus}")
+    dp = cfg.get("dp") or (header.all_gpus // (tp * pp * ep))
+    total_gpus = tp * dp * pp * ep
+    print(f"  model: {os.path.basename(aicb_file)}")
+    print(f"  tp={tp} dp={dp} pp={pp} ep={ep}  gpus={total_gpus}")
 
     job = Job(
         job_id=0,
-        name="puppeteer-cpm-compare",
-        assigned_nodes=list(range(required_gpus)),
-        parallelism=ParallelismConfig(tp=tp, dp=DP, pp=pp, ep=ep),
+        name=f"puppeteer-{mode}",
+        assigned_nodes=list(range(total_gpus)),
+        parallelism=ParallelismConfig(tp=tp, dp=dp, pp=pp, ep=ep),
     )
     builder = WorkloadBuilder()
     workload = builder.build_from_aicb(header, items, job, comm_algo="ring")
@@ -459,20 +483,20 @@ def main():
     print("=" * 60)
     print("Loading topology")
     print("=" * 60)
-    topology = TopologyLoader().load(TOPO_FILE)
+    topology = TopologyLoader().load(topo_file)
     print(f"  nodes={topology.total_nodes}  gpus={topology.gpu_count}  "
           f"switches={topology.switch_count}")
-    if required_gpus > topology.gpu_count:
-        raise ValueError(f"need {required_gpus} GPUs, only {topology.gpu_count} available")
+    if total_gpus > topology.gpu_count:
+        raise ValueError(f"need {total_gpus} GPUs, only {topology.gpu_count} available")
 
-    # ── Run full Puppeteer ──────────────────────────────────────
+    # ── Puppeteer pipeline ─────────────────────────────────────
     print()
     print("=" * 60)
-    print("Running: full Puppeteer (greedy routing + TTE + co-start)")
+    print(f"Running: {mode} + Puppeteer (greedy routing + TTE + co-start)")
     print("=" * 60)
 
     t0 = time.time()
-    puppet = PuppeteerAnalyzer(topology, k_paths=K_PATHS)
+    puppet = PuppeteerAnalyzer(topology, k_paths=K_PATHS, serializer=mode)
     pa_result = puppet.analyze(workload)
 
     policy = PuppeteerSchedulingPolicy(
@@ -486,7 +510,8 @@ def main():
     result = executor.execute(workload)
     elapsed = time.time() - t0
 
-    result.to_json(os.path.join(OUTPUT_DIR, "result_full.json"))
+    result.to_json(os.path.join(output_dir, "result_full.json"))
+    print(f"  schedule: {mode}  pp={pp}")
     print(f"  makespan: {result.makespan_us} us ({result.makespan_us/1000:.1f} ms)")
     print(f"  completed in {elapsed:.2f}s")
 
@@ -513,16 +538,16 @@ def main():
 
     plot_makespan_breakdown(
         workload, static_cp, actual_cp, pa_result.tte_info, result,
-        os.path.join(OUTPUT_DIR, "makespan_breakdown.svg"),
+        os.path.join(output_dir, "makespan_breakdown.svg"),
     )
     plot_flow_inflation(
         workload, static_cp, actual_cp, pa_result.tte_info,
         pa_result.flow_timing, result,
-        os.path.join(OUTPUT_DIR, "flow_inflation_scatter.svg"),
+        os.path.join(output_dir, "flow_inflation_scatter.svg"),
     )
     export_critical_path_trace(
         workload, result, static_cp, actual_cp,
-        os.path.join(OUTPUT_DIR, "trace_critical.json"),
+        os.path.join(output_dir, "trace_critical.json"),
     )
 
     # ── Save report ─────────────────────────────────────────────
@@ -536,12 +561,12 @@ def main():
         "tte_critical_count": len(pa_result.tte_info or {}),
         "elapsed_s": elapsed,
     }
-    report_path = os.path.join(OUTPUT_DIR, "cpm_comparison.json")
+    report_path = os.path.join(output_dir, "cpm_comparison.json")
     with open(report_path, "w") as f:
         json.dump({
-            "workload": AICB_FILE,
-            "topology": TOPO_FILE,
-            "config": {"dp": DP, "k_paths": K_PATHS},
+            "workload": aicb_file,
+            "topology": topo_file,
+            "config": {"mode": mode, "tp": tp, "dp": dp, "pp": pp, "k_paths": K_PATHS},
             "metrics": metrics,
         }, f, indent=2)
     print(f"\n  report -> {report_path}")
