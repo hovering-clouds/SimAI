@@ -29,6 +29,9 @@ CONFIG_KEYS = {
     "workload", "aicb", "topology", "topo", "dp", "ep_mode", "pipeline",
     "modes", "k_paths", "variant", "output",
 }
+CONFIG_PIPELINES = {"gpipe", "1f1b"}
+CONFIG_MODES = {"default", "puppeteer", "hermod"}
+CONFIG_VARIANTS = {variant.value for variant in HermodScheduleVariant}
 
 
 def load_config(path: str) -> dict:
@@ -39,14 +42,36 @@ def load_config(path: str) -> dict:
     unknown = set(data) - CONFIG_KEYS
     if unknown:
         raise ValueError(f"Unknown Hermod config keys: {', '.join(sorted(unknown))}")
+    for friendly, internal in (("workload", "aicb"), ("topology", "topo")):
+        if friendly in data and internal in data:
+            raise ValueError(f"Hermod config cannot contain both {friendly!r} and {internal!r}")
     if "workload" in data:
         data["aicb"] = data.pop("workload")
     if "topology" in data:
         data["topo"] = data.pop("topology")
+    for key in ("aicb", "topo", "output"):
+        if key in data and not isinstance(data[key], str):
+            raise ValueError(f"Hermod config {key!r} must be a string")
+    for key in ("dp", "k_paths"):
+        if key in data and (not isinstance(data[key], int) or isinstance(data[key], bool) or data[key] < 1):
+            raise ValueError(f"Hermod config {key!r} must be a positive integer")
+    if "pipeline" in data and data["pipeline"] not in CONFIG_PIPELINES:
+        raise ValueError(f"Unsupported Hermod pipeline: {data['pipeline']!r}")
+    if "variant" in data and data["variant"] not in CONFIG_VARIANTS:
+        raise ValueError(f"Unsupported Hermod variant: {data['variant']!r}")
+    if "ep_mode" in data and data["ep_mode"] != HermodEpMode.REJECT.value:
+        raise ValueError("Hermod EP is not implemented; ep_mode must be 'reject'")
+    if "modes" in data:
+        if not isinstance(data["modes"], list) or not all(
+            isinstance(mode, str) and mode in CONFIG_MODES for mode in data["modes"]
+        ):
+            raise ValueError("Hermod config modes must be a list of default/puppeteer/hermod")
     return data
 
 
 def build_workload(aicb_path: str, dp_override: int | None, ep_mode: HermodEpMode):
+    if ep_mode != HermodEpMode.REJECT:
+        raise NotImplementedError("Hermod EP experiments are not implemented")
     header, items = AicbParser().parse(aicb_path)
     header_dp = header.all_gpus // (header.tp * header.pp * header.ep)
     dp = dp_override if dp_override is not None else header_dp
@@ -79,8 +104,8 @@ def main():
                         help="Override AICB header DP to synthesize DP collectives (as in Puppeteer experiments).")
     parser.add_argument("--pipeline", choices=["gpipe", "1f1b"], default="1f1b",
                         help="Compute pipeline serializer; add future modes in HermodAnalyzer.")
-    parser.add_argument("--ep-mode", choices=[mode.value for mode in HermodEpMode], default="reject",
-                        help="EP availability. Keep reject until the EP path is separately validated.")
+    parser.add_argument("--ep-mode", choices=[HermodEpMode.REJECT.value], default="reject",
+                        help="EP is intentionally unavailable until its separate path is validated.")
     parser.add_argument("--modes", nargs="+", choices=["default", "puppeteer", "hermod"],
                         default=["default", "puppeteer", "hermod"])
     parser.add_argument("--k-paths", type=int, default=4)

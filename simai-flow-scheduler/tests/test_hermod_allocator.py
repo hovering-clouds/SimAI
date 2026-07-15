@@ -37,3 +37,28 @@ def test_disjoint_links_do_not_block_lower_priority_coflow():
     low = ActiveFlow(2, 2, 3, 100, 100, [2, 3], 0, 0)
     result = HermodAllocator(make_analysis()).allocate([active(1), low], topo)
     assert result == {1: 100, 2: 100}
+
+
+def test_partial_path_overlap_uses_progressive_filling():
+    tasks = [
+        Task(task_id, 0, TaskType.FLOW, src=0, dst=1, size_bytes=100,
+             comm_type=CommType.PP_SEND, coflow_id="pp", microbatch_id=0,
+             logical_layer_id=0)
+        for task_id in (1, 2, 3)
+    ]
+    analysis = HermodPriorityAnalysis.from_workload(
+        P2PWorkload("1", Meta(0, 4), tasks=tasks)
+    )
+    topo = NetworkTopology()
+    topo.add_link(Link(0, 1, 10, 1, 0))
+    topo.add_link(Link(1, 2, 10, 1, 0))
+    topo.add_link(Link(1, 3, 5, 1, 0))
+    flows = [
+        ActiveFlow(1, 0, 2, 100, 100, [0, 1, 2], 0, 0),
+        ActiveFlow(2, 0, 3, 100, 100, [0, 1, 3], 0, 0),
+        ActiveFlow(3, 0, 3, 100, 100, [0, 1, 3], 0, 0),
+    ]
+    result = HermodAllocator(analysis).allocate(flows, topo)
+    assert result == pytest.approx({1: 5, 2: 2.5, 3: 2.5})
+    reversed_result = HermodAllocator(analysis).allocate(list(reversed(flows)), topo)
+    assert reversed_result == pytest.approx(result)

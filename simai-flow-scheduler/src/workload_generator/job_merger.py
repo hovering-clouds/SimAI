@@ -150,6 +150,11 @@ class JobMerger:
             # Create new tasks with both task_id and job_id remapped
             new_tasks = []
             for task in workload.tasks:
+                missing_deps = [dep for dep in task.deps if dep not in task_old_to_new]
+                if missing_deps:
+                    raise ValueError(
+                        f"Task {task.task_id} references missing dependencies: {missing_deps}"
+                    )
                 new_task = Task(
                     task_id=task_old_to_new[task.task_id],
                     job_id=job_old_to_new[task.job_id],
@@ -170,7 +175,7 @@ class JobMerger:
                     comm_type=task.comm_type,
                     chunk_id=task.chunk_id,
                     num_chunks=task.num_chunks,
-                    deps=[task_old_to_new[dep] for dep in task.deps if dep in task_old_to_new],
+                    deps=[task_old_to_new[dep] for dep in task.deps],
                 )
                 new_tasks.append(new_task)
 

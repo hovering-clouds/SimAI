@@ -51,6 +51,19 @@ def test_adapter_and_analysis_reject_ep_by_default():
     assert HermodPriorityAnalysis.from_workload(wl, ep_mode=HermodEpMode.ENABLE).coflows
 
 
+def test_adapter_explicitly_rejects_unimplemented_ep_enable_mode():
+    with pytest.raises(NotImplementedError, match="EP metadata"):
+        HermodAicbMetadataAdapter(_header(), reject_ep=False)
+
+
+def test_adapter_rejects_unmapped_negative_layer_id():
+    wl = P2PWorkload("1", Meta(0, 2), tasks=[
+        _flow(1, CommType.PP_SEND, "pp", 0, -1),
+    ])
+    with pytest.raises(ValueError, match="layer position"):
+        HermodAicbMetadataAdapter(_header()).apply(wl)
+
+
 def test_job_merger_preserves_and_namespaces_hermod_metadata():
     task = _flow(1, CommType.PP_SEND, "pp0", 0, 0)
     task.microbatch_id = 0

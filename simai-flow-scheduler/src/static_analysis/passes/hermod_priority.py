@@ -1,10 +1,11 @@
 """Hermod §4.1 coflow-priority analysis.
 
-This pass models only inter-coflow priority.  It intentionally does not
-implement Hermod §4.2's matching-based intra-coflow flow allocation.
+This pass models only inter-coflow priority. It intentionally excludes §4.2's
+matching-based intra-coflow flow allocation.
 """
 from dataclasses import dataclass
 from enum import Enum
+from itertools import combinations
 
 from ...workload_format.schema import CommType, P2PWorkload
 
@@ -45,19 +46,18 @@ def classify_coflow_type(comm_type: CommType) -> HermodCoflowType | None:
 
 
 class HermodPriorityAnalysis:
-    """Validate Hermod metadata and rank the currently competing coflows.
+    """Validate Hermod metadata and rank currently competing coflows.
 
-    MID is the default first factor.  For the §4.1.2 cross-iteration
-    DP-versus-EP/PP exception, LID becomes the first factor.  The exception is
-    selected from the *active candidate set*, so unrelated, inactive coflows
-    cannot perturb a decision.  The final coflow id is only a deterministic
-    tie-breaker, never a paper priority factor.
+    The default §4.1 order is MID, CType, then LID. The §4.1.2 Case III
+    exception is pair-specific, so an unrelated active coflow cannot change
+    another pair's ordering.
     """
 
     def __init__(
-        self, coflows: dict[str, HermodCoflowInfo],
+        self,
+        coflows: dict[str, HermodCoflowInfo],
         variant: HermodScheduleVariant = HermodScheduleVariant.CONVENTIONAL_1F1B,
-        ep_mode: HermodEpMode = HermodEpMode.ENABLE,
+        ep_mode: HermodEpMode = HermodEpMode.REJECT,
     ):
         self.coflows = coflows
         self.variant = variant
@@ -71,14 +71,14 @@ class HermodPriorityAnalysis:
     def from_workload(
         cls, workload: P2PWorkload,
         variant: HermodScheduleVariant = HermodScheduleVariant.CONVENTIONAL_1F1B,
-        ep_mode: HermodEpMode = HermodEpMode.ENABLE,
+        ep_mode: HermodEpMode = HermodEpMode.REJECT,
     ) -> "HermodPriorityAnalysis":
         grouped: dict[str, list] = {}
         for task in workload.get_flow_tasks():
-            ctype = classify_coflow_type(task.comm_type)
-            if ctype is None:
-                continue  # TP/unknown traffic is outside the §4.1 policy.
-            if ctype == HermodCoflowType.EP and ep_mode == HermodEpMode.REJECT:
+            coflow_type = classify_coflow_type(task.comm_type)
+            if coflow_type is None:
+                continue
+            if coflow_type == HermodCoflowType.EP and ep_mode == HermodEpMode.REJECT:
                 raise ValueError(
                     f"Hermod EP is disabled: task {task.task_id} is {task.comm_type.value}"
                 )
@@ -98,11 +98,17 @@ class HermodPriorityAnalysis:
         coflows: dict[str, HermodCoflowInfo] = {}
         for coflow_id, tasks in grouped.items():
             first = tasks[0]
-            signature = (first.microbatch_id, first.logical_layer_id,
-                         classify_coflow_type(first.comm_type))
+            signature = (
+                first.microbatch_id,
+                first.logical_layer_id,
+                classify_coflow_type(first.comm_type),
+            )
             for task in tasks[1:]:
-                actual = (task.microbatch_id, task.logical_layer_id,
-                          classify_coflow_type(task.comm_type))
+                actual = (
+                    task.microbatch_id,
+                    task.logical_layer_id,
+                    classify_coflow_type(task.comm_type),
+                )
                 if actual != signature:
                     raise ValueError(
                         f"Hermod coflow {coflow_id!r} has inconsistent priority metadata"
@@ -123,22 +129,64 @@ class HermodPriorityAnalysis:
             return 0 if self.variant == HermodScheduleVariant.CONVENTIONAL_1F1B else 1
         return 2
 
-    def priority_order(self, active_task_ids: list[int]) -> list[str]:
-        """Return active coflow ids from high to low priority."""
-        active = {self.task_to_coflow[tid] for tid in active_task_ids
-                  if tid in self.task_to_coflow}
-        infos = [self.coflows[cid] for cid in active]
-        # §4.1.2: competing DP and EP/PP from different LIDs use LID first.
-        has_cross_iteration_dp_conflict = any(
-            a.coflow_type == HermodCoflowType.DP
-            and b.coflow_type != HermodCoflowType.DP
-            and a.logical_layer_id != b.logical_layer_id
-            for a in infos for b in infos
+    def _default_key(self, coflow: HermodCoflowInfo) -> tuple[int, int, int, str]:
+        return (
+            coflow.microbatch_id,
+            self._ctype_rank(coflow.coflow_type),
+            coflow.logical_layer_id,
+            coflow.coflow_id,
         )
-        if has_cross_iteration_dp_conflict:
-            key = lambda c: (c.logical_layer_id, c.microbatch_id,
-                             self._ctype_rank(c.coflow_type), c.coflow_id)
-        else:
-            key = lambda c: (c.microbatch_id, self._ctype_rank(c.coflow_type),
-                             c.logical_layer_id, c.coflow_id)
-        return [c.coflow_id for c in sorted(infos, key=key)]
+
+    @staticmethod
+    def _is_case_iii_pair(a: HermodCoflowInfo, b: HermodCoflowInfo) -> bool:
+        """Identify the DP-later/MID-higher and LID-earlier Case III pair."""
+        dp, non_dp = (a, b) if a.coflow_type == HermodCoflowType.DP else (b, a)
+        return (
+            dp.coflow_type == HermodCoflowType.DP
+            and non_dp.coflow_type != HermodCoflowType.DP
+            and dp.microbatch_id > non_dp.microbatch_id
+            and dp.logical_layer_id < non_dp.logical_layer_id
+        )
+
+    def _pair_winner(self, a: HermodCoflowInfo, b: HermodCoflowInfo) -> str:
+        if self._is_case_iii_pair(a, b):
+            return a.coflow_id if a.logical_layer_id < b.logical_layer_id else b.coflow_id
+        return a.coflow_id if self._default_key(a) < self._default_key(b) else b.coflow_id
+
+    def priority_order(self, active_task_ids: list[int]) -> list[str]:
+        """Return active coflow IDs from high to low priority.
+
+        The pairwise rules are topologically sorted. A cycle means that the
+        metadata describes an unreachable/ambiguous paper case and is rejected
+        rather than hidden by an arbitrary global key.
+        """
+        active = {
+            self.task_to_coflow[task_id] for task_id in active_task_ids
+            if task_id in self.task_to_coflow
+        }
+        infos = [self.coflows[coflow_id] for coflow_id in active]
+        by_id = {info.coflow_id: info for info in infos}
+        successors = {coflow_id: set() for coflow_id in by_id}
+        indegree = {coflow_id: 0 for coflow_id in by_id}
+        for a, b in combinations(infos, 2):
+            winner = self._pair_winner(a, b)
+            loser = b.coflow_id if winner == a.coflow_id else a.coflow_id
+            successors[winner].add(loser)
+            indegree[loser] += 1
+
+        ordered: list[str] = []
+        ready = [coflow_id for coflow_id, degree in indegree.items() if degree == 0]
+        while ready:
+            ready.sort(key=lambda coflow_id: self._default_key(by_id[coflow_id]))
+            winner = ready.pop(0)
+            ordered.append(winner)
+            for loser in successors[winner]:
+                indegree[loser] -= 1
+                if indegree[loser] == 0:
+                    ready.append(loser)
+        if len(ordered) != len(infos):
+            raise ValueError(
+                "Hermod active coflows create a cyclic §4.1 priority relation; "
+                "the MID/LID metadata does not represent a reachable training DAG"
+            )
+        return ordered

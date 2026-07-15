@@ -3,7 +3,8 @@
 ## 目的与范围
 
 本实现复现 Hermod 论文 §4.1 的 **inter-coflow strict-priority** 思想：在共享链路上，
-按 PP/DP coflow 的 Hermod 优先级分层服务；同一优先级层内保持逐链路公平共享。
+按 PP/DP coflow 的 Hermod 优先级分层服务；同一优先级层内使用 progressive-filling
+max-min fair 分配，避免多链路 flow 的瓶颈造成可用容量闲置。
 
 不在范围内：论文 §4.2 的 matching-based intra-coflow scheduling、EP 专用流量分配、
 交换机 DSCP/队列部署、动态路由，以及生产集群参数拟合。
@@ -51,11 +52,11 @@ AICB workload + JSON experiment config
 
 ## 配置文件与运行
 
-示例：[`examples/hermod_e2e_config.json`](../../../examples/hermod_e2e_config.json)。
+示例：[`scripts/hermod_e2e_config.json`](../../../scripts/hermod_e2e_config.json)。
 
 ```powershell
 cd D:\Code\SimAI\simai-flow-scheduler
-python scripts/run_hermod_e2e.py --config examples/hermod_e2e_config.json
+python scripts/run_hermod_e2e.py --config scripts/hermod_e2e_config.json
 ```
 
 配置是 JSON object：
@@ -77,7 +78,7 @@ python scripts/run_hermod_e2e.py --config examples/hermod_e2e_config.json
 CLI 参数覆盖配置，例如：
 
 ```powershell
-python scripts/run_hermod_e2e.py --config examples/hermod_e2e_config.json `
+python scripts/run_hermod_e2e.py --config scripts/hermod_e2e_config.json `
   --pipeline gpipe --modes default hermod
 ```
 
@@ -102,8 +103,9 @@ GPU 数。
 
 本入口当前使用静态 `AnalyticalExecutor`。`DynamicExecutor` 面向按 job/iteration 的按需展开与
 注入；Hermod 尚未实现动态任务的增量 metadata/priority analysis/update-analysis，因此不能
-把 dynamic mode 作为这个单 iteration 实验的替代。将来支持 dynamic Hermod 前，必须保证每
-批注入任务都有 MID/LID/coflow metadata，并能安全更新 policy 的 priority analysis。
+把 dynamic mode 作为这个单 iteration 实验的替代。`HermodSchedulingPolicy.update_analysis()`
+会显式拒绝动态注入，避免新任务静默退化为 background 流量。将来支持 dynamic Hermod 前，必须
+保证每批注入任务都有 MID/LID/coflow metadata，并能安全更新 policy 的 priority analysis。
 
 ## 已验证配置与限制
 
@@ -111,8 +113,10 @@ GPU 数。
 覆盖运行。该运行生成 4 个 PP coflow 与 16 个 DP coflow，并成功运行 Default、Puppeteer、
 Hermod 三种模式；同一配置下 GPipe 与 1F1B 分支也可完成运行。
 
-Hermod priority、allocator、AICB metadata、builder 与 job merger 的定向测试通过（94 tests）。
+Hermod priority、allocator、AICB metadata、builder 与 job merger 的定向测试通过（46 tests）。
 全量测试中 Spectrum-X 相关的既有测试仍依赖仓库外缺失的旧拓扑文件；这与 Hermod 无关。
 
-当前实现的结论应限制为 PP/DP 的 §4.1 流级严格优先实验。EP 与 §4.2 完成前，不应报告为
-完整 Hermod 端到端复现。
+当前实现的结论应限制为 PP/DP 的 §4.1 流级严格优先实验。AICB 当前只提供 GA 块内的扁平
+item 位置，adapter 将其作为可审计的兼容 LID；它不是已由输入证实的论文逻辑模型层 ID。因此，
+Case III 的真实层语义仍需含显式模型层标识的输入验证。EP 与 §4.2 完成前，不应报告为完整
+Hermod 端到端复现。

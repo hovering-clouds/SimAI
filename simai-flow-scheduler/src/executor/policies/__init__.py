@@ -4,6 +4,7 @@ from .cassini_policy import CassiniSchedulingPolicy
 from .default_policy import DefaultSchedulingPolicy
 from .puppeteer_policy import PuppeteerSchedulingPolicy
 from .mfs_policy import MfsSchedulingPolicy
+from .hermod_policy import HermodSchedulingPolicy
 
 __all__ = [
     "SchedulingPolicy",
@@ -11,4 +12,5 @@ __all__ = [
     "DefaultSchedulingPolicy",
     "PuppeteerSchedulingPolicy",
     "MfsSchedulingPolicy",
+    "HermodSchedulingPolicy",
 ]

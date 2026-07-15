@@ -107,6 +107,12 @@ class TestJobMergerBasic:
         with pytest.raises(ValueError, match="Cannot merge empty"):
             merger.merge([])
 
+    def test_missing_dependency_is_rejected_instead_of_dropped(self):
+        workload = create_simple_workload(job_id=0, num_tasks=1)
+        workload.tasks[0].deps = [999]
+        with pytest.raises(ValueError, match="missing dependencies"):
+            JobMerger().merge([workload])
+
     def test_merge_multi_job_workload(self):
         """Merging a workload with multiple jobs should succeed with job_id remapping."""
         job0 = Job(

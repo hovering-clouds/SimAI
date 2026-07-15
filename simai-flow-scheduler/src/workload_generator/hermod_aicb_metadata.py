@@ -28,6 +28,10 @@ class HermodAicbMetadataAdapter:
     def __init__(self, header: AicbHeader, *, reject_ep: bool = True):
         if header.ga < 1:
             raise ValueError("Hermod AICB adapter requires header.ga >= 1")
+        if not reject_ep:
+            raise NotImplementedError(
+                "Hermod EP metadata is not implemented; EP experiments remain disabled"
+            )
         self.header = header
         self.reject_ep = reject_ep
 
@@ -39,8 +43,6 @@ class HermodAicbMetadataAdapter:
         ]
         if not layer_task_ids:
             raise ValueError("AICB workload contains no GA-layer tasks for Hermod")
-        max_layer_id = max(layer_task_ids)
-
         for task in workload.get_flow_tasks():
             coflow_type = classify_coflow_type(task.comm_type)
             if coflow_type is None:
@@ -50,8 +52,6 @@ class HermodAicbMetadataAdapter:
                     f"Hermod EP is disabled: task {task.task_id} is {task.comm_type.value}. "
                     "Use a validated EP path before enabling it."
                 )
-            if coflow_type == HermodCoflowType.EP:
-                continue
             if not task.coflow_id:
                 raise ValueError(f"Hermod task {task.task_id} has no coflow_id")
 
@@ -70,7 +70,11 @@ class HermodAicbMetadataAdapter:
 
             # builder.layer_id is a flattened AICB item position.  Persist it
             # in a separate field so the generic IR meaning remains untouched.
-            lid = task.layer_id if task.layer_id >= 0 else max_layer_id + 1
+            if task.layer_id < 0:
+                raise ValueError(
+                    f"Hermod task {task.task_id} has no AICB layer position for LID mapping"
+                )
+            lid = task.layer_id
             task.microbatch_id = mid
             task.logical_layer_id = lid
             records.append(HermodMetadataRecord(
