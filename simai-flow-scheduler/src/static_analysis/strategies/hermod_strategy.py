@@ -50,3 +50,26 @@ class HermodAnalyzer:
             priority_analysis=HermodPriorityAnalysis.from_workload(
                 workload, self.variant, self.ep_mode),
         )
+
+
+class HermodDynamicAnalyzer(HermodAnalyzer):
+    """Hermod analyzer for DynamicExecutor mini-workloads.
+
+    DynamicExecutor supplies tasks without their Job objects.  Retaining a
+    registry lets the 1F1B serializer recover each injected job's PP stages.
+    """
+
+    def __init__(self, topology: NetworkTopology, jobs_by_id: dict[int, object],
+                 variant: HermodScheduleVariant = HermodScheduleVariant.CONVENTIONAL_1F1B,
+                 ep_mode: HermodEpMode = HermodEpMode.REJECT,
+                 pipeline_mode: str = "1f1b"):
+        super().__init__(topology, variant, ep_mode, pipeline_mode)
+        self.jobs_by_id = jobs_by_id
+
+    def analyze(self, workload: P2PWorkload) -> HermodAnalysisResult:
+        job_ids = {task.job_id for task in workload.tasks}
+        missing = sorted(job_ids - self.jobs_by_id.keys())
+        if missing:
+            raise ValueError(f"Hermod dynamic analysis lacks jobs for task job IDs: {missing}")
+        workload.jobs = [self.jobs_by_id[job_id] for job_id in sorted(job_ids)]
+        return super().analyze(workload)

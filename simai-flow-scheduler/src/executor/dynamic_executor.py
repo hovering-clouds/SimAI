@@ -253,7 +253,8 @@ class DynamicExecutor(AnalyticalExecutor):
         for t in ej.tasks:
             self._task_meta[t.task_id] = {
                 k: getattr(t, k, None)
-                for k in ("phase", "layer_id", "comm_type", "src", "dst", "node", "job_id")
+                for k in ("phase", "layer_id", "comm_type", "src", "dst", "node", "job_id",
+                          "coflow_id", "microbatch_id", "logical_layer_id")
             }
 
         # 3. Inject tasks (with delay if applicable)

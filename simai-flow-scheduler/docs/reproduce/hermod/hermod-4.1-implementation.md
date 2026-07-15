@@ -93,6 +93,7 @@ GPU 数。
 - `workload.json`：带 Hermod metadata 的 P2P DAG；
 - `hermod_metadata.json`：每个范围内 flow 的 MID/LID/coflow 来源 sidecar；
 - `<mode>_execution_result.json`：每个已运行策略的 task 时间；
+- `<mode>_task_meta.json`：dynamic 入口输出的 task Hermod metadata；
 - `summary.json`：输入、并行度、coflow 表、类型计数与 makespan。
 
 `default` 与 `hermod` 共享 BFS 路由和同一 compute execution plan，以隔离 Hermod allocator
@@ -101,11 +102,34 @@ GPU 数。
 
 ## Dynamic executor
 
-本入口当前使用静态 `AnalyticalExecutor`。`DynamicExecutor` 面向按 job/iteration 的按需展开与
-注入；Hermod 尚未实现动态任务的增量 metadata/priority analysis/update-analysis，因此不能
-把 dynamic mode 作为这个单 iteration 实验的替代。`HermodSchedulingPolicy.update_analysis()`
-会显式拒绝动态注入，避免新任务静默退化为 background 流量。将来支持 dynamic Hermod 前，必须
-保证每批注入任务都有 MID/LID/coflow metadata，并能安全更新 policy 的 priority analysis。
+`scripts/run_hermod_dynamic_e2e.py` 支持按需展开多 job、多 iteration 的 AICB 训练实验。
+配置示例为 [`scripts/hermod_dynamic_e2e_config.json`](../../../scripts/hermod_dynamic_e2e_config.json)：
+
+```powershell
+python scripts/run_hermod_dynamic_e2e.py --config scripts/hermod_dynamic_e2e_config.json
+```
+
+动态配置使用与 Cassini 一致的 `workloads` 列表，每项独立指定 `aicb`、`dp`、`num_jobs` 和
+`num_iters`，例如：
+
+```json
+{
+  "workloads": [
+    {"aicb": "inputs/aicb-workload/model-a.txt", "dp": 2, "num_jobs": 2, "num_iters": 5},
+    {"aicb": "inputs/aicb-workload/model-b.txt", "dp": 1, "num_jobs": 1, "num_iters": 3}
+  ]
+}
+```
+
+每个 spec 会生成 `num_jobs * num_iters` 个动态 job；同一逻辑 job 的 iteration 保持串行依赖，
+所有 spec 的不同 job 则共享拓扑并可并发注入，因此可建模异构 workload 的网络竞争。每个按需展开
+batch 都先完成 AICB Hermod metadata 标注，随后
+`HermodSchedulingPolicy.update_analysis()` 合并路由、compute order、task-to-coflow 映射和
+priority analysis；输出还包含 `<mode>_task_meta.json`，可审计每个动态任务的 MID/LID/coflow。
+Hermod mode 还会写入聚合的 `hermod_metadata.json`，与静态入口的 sidecar 命名保持一致。
+
+该 dynamic 路径不支持 EP；配置没有 `ep_mode`，固定为 `reject`。它也不替代单 iteration
+静态复现，而是用于避免一次性物化大量训练 iteration，并研究多 job 竞争。
 
 ## 已验证配置与限制
 
