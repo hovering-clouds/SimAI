@@ -1,21 +1,15 @@
 {
-  "topology": "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100",
+  "topology": "inputs/topologies/Cassini_64g_l1-16_l2-14_l3-12_400Gbps_A100",
   "workloads": [
     {
-      "aicb": "inputs/aicb-workload/A100-gpt_13B_ws8_pp2-world_size8-tp4-pp2-ep1-gbs2-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
-      "dp": 2,
+      "aicb": "inputs/aicb-workload/A100-gpt_13B_ws16_pp4-world_size16-tp4-pp4-ep1-gbs32-mbs4-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
+      "dp": 4,
       "num_jobs": 1,
-      "num_iters": 2
-    },
-    {
-      "aicb": "inputs/aicb-workload/A100-gpt_13B_ws8_pp1-world_size8-tp8-pp1-ep1-gbs1-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
-      "dp": 1,
-      "num_jobs": 1,
-      "num_iters": 1
+      "num_iters": 10
     }
   ],
   "pipeline": "1f1b",
   "variant": "conventional_1f1b",
   "modes": ["default", "hermod"],
-  "output": "outputs/hermod_dynamic_e2e"
+  "output": "outputs/hermod_dynamic_e2e_1"
 }

@@ -6,8 +6,8 @@ from src.static_analysis.passes.hermod_priority import (
 from src.workload_format.schema import CommType, Meta, P2PWorkload, Task, TaskType
 
 
-def flow(tid, coflow, comm_type, mid=0, lid=0):
-    return Task(task_id=tid, job_id=0, type=TaskType.FLOW, src=0, dst=1,
+def flow(tid, coflow, comm_type, mid=0, lid=0, job_id=0):
+    return Task(task_id=tid, job_id=job_id, type=TaskType.FLOW, src=0, dst=1,
                 size_bytes=100, comm_type=comm_type, coflow_id=coflow,
                 microbatch_id=mid, logical_layer_id=lid)
 
@@ -56,6 +56,17 @@ def test_case_iii_does_not_reorder_an_unrelated_coflow_pair():
                  flow(2, "pp-late", CommType.PP_SEND, mid=1, lid=5),
                  flow(3, "pp-early", CommType.PP_SEND, mid=0, lid=0))
     assert a.priority_order([1, 2, 3]) == ["pp-early", "dp", "pp-late"]
+
+
+def test_multiple_jobs_do_not_compare_job_local_mid_lid_with_case_iii():
+    """Dynamic jobs restart MID/LID, so cross-job order must be stable."""
+    a = analysis(
+        flow(1, "j0-dp", CommType.DP_ALLREDUCE, mid=2, lid=1, job_id=0),
+        flow(2, "j0-pp", CommType.PP_SEND, mid=1, lid=5, job_id=0),
+        flow(3, "j1-pp", CommType.PP_SEND, mid=0, lid=0, job_id=1),
+        flow(4, "j1-dp", CommType.DP_ALLREDUCE, mid=2, lid=1, job_id=1),
+    )
+    assert a.priority_order([1, 2, 3, 4]) == ["j0-dp", "j0-pp", "j1-pp", "j1-dp"]
 
 
 def test_pp_dp_case_ii_gives_pp_priority_over_dp():

@@ -30,6 +30,7 @@ class HermodEpMode(str, Enum):
 class HermodCoflowInfo:
     coflow_id: str
     task_ids: tuple[int, ...]
+    job_id: int
     microbatch_id: int
     logical_layer_id: int
     coflow_type: HermodCoflowType
@@ -99,12 +100,14 @@ class HermodPriorityAnalysis:
         for coflow_id, tasks in grouped.items():
             first = tasks[0]
             signature = (
+                first.job_id,
                 first.microbatch_id,
                 first.logical_layer_id,
                 classify_coflow_type(first.comm_type),
             )
             for task in tasks[1:]:
                 actual = (
+                    task.job_id,
                     task.microbatch_id,
                     task.logical_layer_id,
                     classify_coflow_type(task.comm_type),
@@ -116,9 +119,10 @@ class HermodPriorityAnalysis:
             coflows[coflow_id] = HermodCoflowInfo(
                 coflow_id=coflow_id,
                 task_ids=tuple(sorted(task.task_id for task in tasks)),
+                job_id=first.job_id,
                 microbatch_id=first.microbatch_id,
                 logical_layer_id=first.logical_layer_id,
-                coflow_type=signature[2],
+                coflow_type=signature[3],
             )
         return cls(coflows, variant, ep_mode)
 
@@ -129,8 +133,9 @@ class HermodPriorityAnalysis:
             return 0 if self.variant == HermodScheduleVariant.CONVENTIONAL_1F1B else 1
         return 2
 
-    def _default_key(self, coflow: HermodCoflowInfo) -> tuple[int, int, int, str]:
+    def _default_key(self, coflow: HermodCoflowInfo) -> tuple[int, int, int, int, str]:
         return (
+            coflow.job_id,
             coflow.microbatch_id,
             self._ctype_rank(coflow.coflow_type),
             coflow.logical_layer_id,
@@ -149,6 +154,13 @@ class HermodPriorityAnalysis:
         )
 
     def _pair_winner(self, a: HermodCoflowInfo, b: HermodCoflowInfo) -> str:
+        # MID/LID are local to one training job. In a dynamic multi-job run
+        # they restart at zero for every Job, so applying Case III across Jobs
+        # can create a non-transitive relation. Hermod §4.1 does not define a
+        # cross-job comparison; use the dynamic scheduler's stable Job order
+        # at that boundary and apply the paper rules only within a Job.
+        if a.job_id != b.job_id:
+            return a.coflow_id if a.job_id < b.job_id else b.coflow_id
         if self._is_case_iii_pair(a, b):
             return a.coflow_id if a.logical_layer_id < b.logical_layer_id else b.coflow_id
         return a.coflow_id if self._default_key(a) < self._default_key(b) else b.coflow_id

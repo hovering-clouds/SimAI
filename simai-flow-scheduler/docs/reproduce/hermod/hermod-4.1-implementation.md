@@ -102,6 +102,15 @@ GPU 数。
 
 ## Dynamic executor
 
+### Multi-job priority boundary
+
+MID and LID restart for every dynamic training job. Hermod §4.1 priority
+rules, including Case III, are therefore applied only between coflows of the
+same `job_id`. For coflows from different jobs, the dynamic runner uses stable
+ascending `job_id` order. This is a deterministic multi-job composition rule,
+not a priority policy claimed by the Hermod paper. It prevents incomparable
+per-job MID/LID values from creating a cyclic priority graph.
+
 `scripts/run_hermod_dynamic_e2e.py` 支持按需展开多 job、多 iteration 的 AICB 训练实验。
 配置示例为 [`scripts/hermod_dynamic_e2e_config.json`](../../../scripts/hermod_dynamic_e2e_config.json)：
 
@@ -138,6 +147,10 @@ Hermod mode 还会写入聚合的 `hermod_metadata.json`，与静态入口的 si
 Hermod 三种模式；同一配置下 GPipe 与 1F1B 分支也可完成运行。
 
 Hermod priority、allocator、AICB metadata、builder 与 job merger 的定向测试通过（46 tests）。
+Dynamic Hermod 审查修复后，两个不同 AICB spec（第一项 `dp=2,num_jobs=1,num_iters=2`，第二项
+`dp=1,num_jobs=1,num_iters=1`）在 16-GPU AlibabaHPN 上完成混合 E2E：共 3 个动态 job、27,416
+个任务；Default/Hermod makespan 分别为 1,525,671 / 1,534,909 us。`hermod_metadata.json` 已验证
+包含每个范围内 flow 的 `coflow_id`、MID 与 LID。
 全量测试中 Spectrum-X 相关的既有测试仍依赖仓库外缺失的旧拓扑文件；这与 Hermod 无关。
 
 当前实现的结论应限制为 PP/DP 的 §4.1 流级严格优先实验。AICB 当前只提供 GA 块内的扁平
