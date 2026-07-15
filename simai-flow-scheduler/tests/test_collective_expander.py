@@ -24,7 +24,7 @@ from src.workload_generator.collective_expander import (
     AlltoAllExpander,
     FlowTask,
 )
-from src.workload_format.schema import TaskType, CommType
+from src.workload_format.schema import CommType, Job, Meta, P2PWorkload, TaskType
 
 
 class TestAllReduceExpander:
@@ -809,7 +809,7 @@ class TestReduceScatterExpander:
     def test_unsupported_algo(self):
         expander = ReduceScatterExpander()
         with pytest.raises(ValueError, match="unsupported algo"):
-            expander.expand_reducescatter([0, 1], 1024, algo="tree")
+            expander.expand_reducescatter([0, 1], 1024, algo="unknown")
 
 
 # ─── AlltoAll Expander Tests ─────────────────────────────────────────────────
@@ -880,3 +880,91 @@ class TestAlltoAllExpander:
         expander = AlltoAllExpander()
         flows = expander.expand_alltoall([0, 1, 2, 3], 1024)
         assert [f.task_id for f in flows] == list(range(12))
+
+
+@pytest.mark.parametrize(
+    ("expander_cls", "method", "comm_type"),
+    [
+        (AllReduceExpander, "expand_allreduce", CommType.TP_ALLREDUCE_TREE),
+        (AllGatherExpander, "expand_allgather", CommType.TP_ALLGATHER_TREE),
+        (ReduceScatterExpander, "expand_reducescatter", CommType.TP_REDUCESCATTER_TREE),
+    ],
+)
+class TestAdditionalCollectiveAlgorithms:
+    """FLOW-DAG tests for tree, double-binary-tree, and halving-doubling."""
+
+    def _expand(self, expander_cls, method, algo, ranks=(0, 1, 2, 3), data_size=1024, start=100):
+        return getattr(expander_cls(), method)(
+            list(ranks), data_size, algo=algo, task_id_start=start
+        )
+
+    def test_tree_exact_edges_dependencies_and_sizes(self, expander_cls, method, comm_type):
+        flows = self._expand(expander_cls, method, "tree")
+        assert [(flow.src, flow.dst) for flow in flows] == [
+            (3, 1), (1, 0), (2, 0), (0, 1), (0, 2), (1, 3),
+        ]
+        assert [flow.deps for flow in flows] == [[], [100], [], [101, 102], [101, 102], [103]]
+        assert [flow.task_id for flow in flows] == list(range(100, 106))
+        assert all(flow.chunk_id == 0 and flow.num_chunks == 1 for flow in flows)
+        assert all(flow.comm_type == comm_type for flow in flows)
+
+        if method == "expand_allreduce":
+            assert [flow.size_bytes for flow in flows] == [1024] * 6
+        elif method == "expand_allgather":
+            assert [flow.size_bytes for flow in flows] == [256, 512, 256, 1024, 1024, 1024]
+        else:
+            assert [flow.size_bytes for flow in flows] == [1024, 1024, 1024, 512, 256, 256]
+
+    def test_tree_non_contiguous_and_unbalanced_ranks(self, expander_cls, method, comm_type):
+        ranks = [3, 11, 24]
+        flows = self._expand(expander_cls, method, "tree", ranks=ranks)
+        assert [(flow.src, flow.dst) for flow in flows] == [(11, 3), (24, 3), (3, 11), (3, 24)]
+        assert {flow.src for flow in flows} | {flow.dst for flow in flows} == set(ranks)
+        assert all(flow.comm_type == comm_type for flow in flows)
+
+    def test_double_binary_tree_uses_two_shifted_chunks(self, expander_cls, method, comm_type):
+        flows = self._expand(expander_cls, method, "double_binary_tree")
+        assert len(flows) == 12
+        assert [flow.task_id for flow in flows] == list(range(100, 112))
+        assert [flow.chunk_id for flow in flows] == [0] * 6 + [1] * 6
+        assert all(flow.num_chunks == 2 and flow.comm_type == comm_type for flow in flows)
+        # Tree B is built from [1, 2, 3, 0], not a duplicate of tree A.
+        assert (flows[0].src, flows[0].dst) == (3, 1)
+        assert (flows[6].src, flows[6].dst) == (0, 2)
+
+    def test_halving_doubling_exact_stage_sizes_and_dependencies(self, expander_cls, method, comm_type):
+        flows = self._expand(expander_cls, method, "halving_doubling")
+        expected_count = 16 if method == "expand_allreduce" else 8
+        assert len(flows) == expected_count
+        assert all(flow.comm_type == comm_type for flow in flows)
+        assert [(flow.src, flow.dst) for flow in flows[:4]] == [
+            (0, 1), (1, 0), (2, 3), (3, 2),
+        ]
+        assert [(flow.src, flow.dst) for flow in flows[4:8]] == [
+            (0, 2), (1, 3), (2, 0), (3, 1),
+        ]
+        assert [flow.deps for flow in flows[:4]] == [[], [], [], []]
+        assert [flow.deps for flow in flows[4:8]] == [[101], [100], [103], [102]]
+
+        if method == "expand_allreduce":
+            assert [flow.size_bytes for flow in flows] == [512] * 4 + [256] * 4 + [256] * 4 + [512] * 4
+            assert [flow.chunk_id for flow in flows] == [0] * 4 + [1] * 4 + [2] * 4 + [3] * 4
+        elif method == "expand_allgather":
+            assert [flow.size_bytes for flow in flows] == [256] * 4 + [512] * 4
+        else:
+            assert [flow.size_bytes for flow in flows] == [512] * 4 + [256] * 4
+
+    def test_halving_doubling_rejects_non_power_of_two(self, expander_cls, method, comm_type):
+        with pytest.raises(ValueError, match="power-of-two"):
+            self._expand(expander_cls, method, "halving_doubling", ranks=(0, 1, 2))
+
+    @pytest.mark.parametrize("algo", ["tree", "double_binary_tree", "halving_doubling"])
+    def test_generated_flows_form_a_valid_workload(self, expander_cls, method, comm_type, algo):
+        flows = self._expand(expander_cls, method, algo, ranks=(3, 11, 24, 40), start=7)
+        workload = P2PWorkload(
+            version="1.0",
+            meta=Meta(num_jobs=1, num_nodes=4),
+            jobs=[Job(job_id=0)],
+            tasks=[flow.to_task() for flow in flows],
+        )
+        assert workload.validate() == []

@@ -4,7 +4,7 @@
 	branch = master
 [submodule "aicb"]
 	path = aicb
-	url = git@github.com:hovering-clouds/aicb
+	url = https://github.com/violetandevergarden/aicb.git
 	branch = hc-dev
 [submodule "ns-3-alibabacloud"]
 	path = ns-3-alibabacloud
