@@ -158,6 +158,10 @@ class JobMerger:
                     phase=task.phase,
                     layer_id=task.layer_id,
                     item_id=task.item_id,
+                    coflow_id=(f"job{job_old_to_new[task.job_id]}:{task.coflow_id}"
+                               if task.coflow_id is not None else None),
+                    microbatch_id=task.microbatch_id,
+                    logical_layer_id=task.logical_layer_id,
                     node=task.node,
                     duration_us=task.duration_us,
                     src=task.src,

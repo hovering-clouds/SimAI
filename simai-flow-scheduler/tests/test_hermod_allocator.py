@@ -9,12 +9,12 @@ from src.workload_format.schema import CommType, Meta, P2PWorkload, Task, TaskTy
 
 def make_analysis():
     tasks = [
-        Task(1, 0, TaskType.FLOW, src=0, dst=1, size_bytes=100, comm_type=CommType.EP_ALLTOALL,
-             coflow_id="ep", microbatch_id=0, logical_layer_id=0),
+        Task(1, 0, TaskType.FLOW, src=0, dst=1, size_bytes=100, comm_type=CommType.PP_SEND,
+             coflow_id="pp", microbatch_id=0, logical_layer_id=0),
         Task(2, 0, TaskType.FLOW, src=0, dst=1, size_bytes=100, comm_type=CommType.DP_ALLREDUCE,
              coflow_id="dp", microbatch_id=0, logical_layer_id=0),
-        Task(3, 0, TaskType.FLOW, src=0, dst=1, size_bytes=100, comm_type=CommType.EP_ALLTOALL,
-             coflow_id="ep", microbatch_id=0, logical_layer_id=0),
+        Task(3, 0, TaskType.FLOW, src=0, dst=1, size_bytes=100, comm_type=CommType.PP_SEND,
+             coflow_id="pp", microbatch_id=0, logical_layer_id=0),
     ]
     return HermodPriorityAnalysis.from_workload(P2PWorkload("1", Meta(0, 2), tasks=tasks))
 

@@ -44,6 +44,18 @@ def test_case_iii_cross_iteration_dp_conflict_uses_lid_before_mid():
     assert a.priority_order([1, 2]) == ["ep", "dp"]
 
 
+def test_pp_dp_case_ii_gives_pp_priority_over_dp():
+    a = analysis(flow(1, "pp", CommType.PP_SEND, mid=1, lid=3),
+                 flow(2, "dp", CommType.DP_ALLREDUCE, mid=1, lid=3))
+    assert a.priority_order([2, 1]) == ["pp", "dp"]
+
+
+def test_pp_dp_case_iii_uses_lid_before_mid():
+    a = analysis(flow(1, "dp", CommType.DP_ALLREDUCE, mid=0, lid=5),
+                 flow(2, "pp", CommType.PP_SEND, mid=2, lid=1))
+    assert a.priority_order([1, 2]) == ["pp", "dp"]
+
+
 def test_missing_required_metadata_fails_fast():
     bad = Task(task_id=1, job_id=0, type=TaskType.FLOW, src=0, dst=1,
                size_bytes=1, comm_type=CommType.EP_ALLTOALL, coflow_id="ep")

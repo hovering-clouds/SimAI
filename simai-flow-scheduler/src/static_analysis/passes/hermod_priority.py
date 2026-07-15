@@ -20,6 +20,11 @@ class HermodScheduleVariant(str, Enum):
     INTERLEAVED_1F1B = "interleaved_1f1b"
 
 
+class HermodEpMode(str, Enum):
+    REJECT = "reject"
+    ENABLE = "enable"
+
+
 @dataclass(frozen=True)
 class HermodCoflowInfo:
     coflow_id: str
@@ -52,9 +57,11 @@ class HermodPriorityAnalysis:
     def __init__(
         self, coflows: dict[str, HermodCoflowInfo],
         variant: HermodScheduleVariant = HermodScheduleVariant.CONVENTIONAL_1F1B,
+        ep_mode: HermodEpMode = HermodEpMode.ENABLE,
     ):
         self.coflows = coflows
         self.variant = variant
+        self.ep_mode = ep_mode
         self.task_to_coflow = {
             task_id: info.coflow_id
             for info in coflows.values() for task_id in info.task_ids
@@ -64,12 +71,17 @@ class HermodPriorityAnalysis:
     def from_workload(
         cls, workload: P2PWorkload,
         variant: HermodScheduleVariant = HermodScheduleVariant.CONVENTIONAL_1F1B,
+        ep_mode: HermodEpMode = HermodEpMode.ENABLE,
     ) -> "HermodPriorityAnalysis":
         grouped: dict[str, list] = {}
         for task in workload.get_flow_tasks():
             ctype = classify_coflow_type(task.comm_type)
             if ctype is None:
                 continue  # TP/unknown traffic is outside the §4.1 policy.
+            if ctype == HermodCoflowType.EP and ep_mode == HermodEpMode.REJECT:
+                raise ValueError(
+                    f"Hermod EP is disabled: task {task.task_id} is {task.comm_type.value}"
+                )
             missing = [
                 name for name, value in (
                     ("coflow_id", task.coflow_id),
@@ -102,7 +114,7 @@ class HermodPriorityAnalysis:
                 logical_layer_id=first.logical_layer_id,
                 coflow_type=signature[2],
             )
-        return cls(coflows, variant)
+        return cls(coflows, variant, ep_mode)
 
     def _ctype_rank(self, coflow_type: HermodCoflowType) -> int:
         if coflow_type == HermodCoflowType.EP:
