@@ -510,7 +510,7 @@ class WorkloadBuilder:
         base_type, context = AicbParser.parse_comm_type(comm_type_str, default_context)
         result = FlowGroupResult.empty()
 
-        for subgroup in self._iter_subgroups(context, grouper):
+        for subgroup_index, subgroup in enumerate(self._iter_subgroups(context, grouper)):
             if len(subgroup) >= 2:
                 flows = self._call_expander(
                     base_type, subgroup, comm_size,
@@ -520,6 +520,15 @@ class WorkloadBuilder:
                     flow.layer_id = layer_id
                     flow.iteration = iteration
                     flow.item_id = item_id
+                    # A collective invocation in one parallel subgroup is one
+                    # Hermod coflow.  MID/LID are intentionally not inferred
+                    # here: AICB's GA-step/layer fields have different IR
+                    # semantics and must be enriched by a verified trace or
+                    # sidecar before running Hermod.
+                    flow.coflow_id = (
+                        f"collective:j{job_id}:i{iteration}:item{item_id}:"
+                        f"{phase.value}:{context}:g{subgroup_index}"
+                    )
                     result.add_flow(flow)
                 if base_type == "BROADCAST" and flows:
                     # The root has no incoming flow, but its broadcast event is
@@ -1106,6 +1115,9 @@ class WorkloadBuilder:
                                 phase=Phase.FORWARD,
                                 layer_id=items_per_ga - 1,
                                 iteration=ga_idx,
+                                coflow_id=(
+                                    f"pp:j{job_id}:mid{ga_idx}:boundary{pp_boundary}:forward"
+                                ),
                             )
                             fwd_flows[src_rank] = fwd_flow
                             all_flows.append(fwd_flow)
@@ -1122,6 +1134,9 @@ class WorkloadBuilder:
                                 phase=Phase.BACKWARD_INPUT,
                                 layer_id=0,
                                 iteration=ga_idx,
+                                coflow_id=(
+                                    f"pp:j{job_id}:mid{ga_idx}:boundary{pp_boundary}:backward"
+                                ),
                             )
                             bwd_flows[dst_rank] = bwd_flow
                             all_flows.append(bwd_flow)

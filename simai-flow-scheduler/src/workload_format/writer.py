@@ -122,6 +122,7 @@ class WorkloadWriter:
             "iteration": task.iteration,
             "phase": task.phase.value,
             "layer_id": task.layer_id,
+            "item_id": task.item_id,
             "deps": task.deps,
         }
 
@@ -135,6 +136,15 @@ class WorkloadWriter:
             result["comm_type"] = task.comm_type.value
             result["chunk_id"] = task.chunk_id
             result["num_chunks"] = task.num_chunks
+
+        # Hermod metadata is meaningful for flow tasks, but keeping this
+        # generic makes sidecar-enriched compute/flow traces round-trip too.
+        if task.coflow_id is not None:
+            result["coflow_id"] = task.coflow_id
+        if task.microbatch_id is not None:
+            result["microbatch_id"] = task.microbatch_id
+        if task.logical_layer_id is not None:
+            result["logical_layer_id"] = task.logical_layer_id
 
         return result
 
@@ -235,6 +245,10 @@ class WorkloadReader:
                 iteration=task_data.get("iteration", 0),
                 phase=task_data.get("phase", "forward"),
                 layer_id=task_data.get("layer_id", 0),
+                item_id=task_data.get("item_id", 0),
+                coflow_id=task_data.get("coflow_id"),
+                microbatch_id=task_data.get("microbatch_id"),
+                logical_layer_id=task_data.get("logical_layer_id"),
                 deps=task_data.get("deps", []),
                 node=task_data.get("node"),
                 duration_us=task_data.get("duration_us"),
