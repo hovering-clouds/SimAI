@@ -19,7 +19,9 @@ from src.static_analysis.passes.hermod_priority import (
 from src.static_analysis.passes.routing import BfsRouteTable
 from src.static_analysis.passes.task_serializer import ExecutionPlan
 from src.static_analysis.passes.topology_loader import TopologyLoader
-from src.static_analysis.strategies.default_strategy import DefaultAnalysisResult, DefaultAnalyzer
+from src.static_analysis.strategies.default_strategy import (
+    DefaultAnalysisResult, DefaultAnalyzer, OneFOneBAnalyzer,
+)
 from src.static_analysis.strategies.hermod_strategy import (
     HermodAnalysisResult, HermodDynamicAnalyzer,
 )
@@ -144,7 +146,12 @@ def run_mode(mode: str, compact: CompactWorkload, topology, args):
     if mode == "default":
         analysis = DefaultAnalysisResult(BfsRouteTable(topology), ExecutionPlan())
         policy = DefaultSchedulingPolicy(analysis)
-        analyzer = DefaultAnalyzer(topology)
+        if args.pipeline == "1f1b":
+            analyzer = OneFOneBAnalyzer(
+                topology, {job.job_id: job for job in compact.jobs},
+            )
+        else:
+            analyzer = DefaultAnalyzer(topology)
     else:
         variant = HermodScheduleVariant(args.variant)
         empty = HermodAnalysisResult(
