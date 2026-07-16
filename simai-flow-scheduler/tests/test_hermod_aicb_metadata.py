@@ -3,7 +3,7 @@ import pytest
 from src.static_analysis.passes.hermod_priority import HermodEpMode, HermodPriorityAnalysis
 from src.workload_format.schema import CommType, Meta, P2PWorkload, Task, TaskType
 from src.workload_format.schema import Job
-from src.workload_generator.aicb_parser import AicbHeader
+from src.workload_generator.aicb_parser import AicbHeader, AicbWorkItem
 from src.workload_generator.hermod_aicb_metadata import HermodAicbMetadataAdapter
 from src.workload_generator.job_merger import JobMerger
 
@@ -36,6 +36,26 @@ def test_post_ga_dp_is_assigned_to_last_microbatch():
     records = HermodAicbMetadataAdapter(_header()).apply(wl)
     assert records[1].microbatch_id == 1
     assert records[1].provenance == "aicb_dp_post_ga"
+
+
+def test_adapter_recovers_one_lid_for_an_attention_mlp_transformer_layer():
+    items = [
+        AicbWorkItem("embedding_layer", 0, "NONE", 0, 0, "NONE", 0, 0, "NONE", 0, 0),
+        AicbWorkItem("attention_layer", 0, "NONE", 0, 0, "NONE", 0, 0, "NONE", 0, 0),
+        AicbWorkItem("mlp_layer", 0, "NONE", 0, 0, "NONE", 0, 0, "NONE", 0, 0),
+    ]
+    wl = P2PWorkload("1", Meta(0, 2), tasks=[
+        _flow(1, CommType.DP_ALLREDUCE, "embed", 0, 0),
+        _flow(2, CommType.DP_ALLREDUCE, "attention", 0, 1),
+        _flow(3, CommType.DP_ALLREDUCE, "mlp", 0, 2),
+    ])
+    for task in wl.tasks:
+        task.item_id = task.layer_id
+    records = HermodAicbMetadataAdapter(_header(), items).apply(wl)
+    assert [record.logical_layer_id for record in records] == [0, 1, 1]
+    assert records[1].mapping_rule == "attention_mlp_transformer_layer"
+    assert records[2].source_operation == "mlp_layer"
+    assert wl.tasks[2].hermod_lid_mapping_rule == "attention_mlp_transformer_layer"
 
 
 def test_adapter_and_analysis_reject_ep_by_default():

@@ -75,6 +75,12 @@ def test_pp_dp_case_ii_gives_pp_priority_over_dp():
     assert a.priority_order([2, 1]) == ["pp", "dp"]
 
 
+def test_equal_paper_priority_coflows_share_one_tier():
+    a = analysis(flow(1, "dp-a", CommType.DP_ALLREDUCE, mid=1, lid=3),
+                 flow(2, "dp-b", CommType.DP_ALLREDUCE, mid=1, lid=3))
+    assert a.priority_tiers([2, 1]) == [["dp-a", "dp-b"]]
+
+
 def test_pp_dp_case_iii_uses_lid_before_mid():
     a = analysis(flow(1, "dp", CommType.DP_ALLREDUCE, mid=2, lid=1),
                  flow(2, "pp", CommType.PP_SEND, mid=1, lid=5))

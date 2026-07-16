@@ -84,15 +84,16 @@ class HermodAllocator(BandwidthAllocator):
                 if link not in link_rem:
                     obj = topology.get_link(*link)
                     link_rem[link] = obj.bandwidth_gbps if obj else 0.0
-        tiers = self.priority_analysis.priority_order([flow.task_id for flow in active_flows])
+        tiers = self.priority_analysis.priority_tiers([flow.task_id for flow in active_flows])
         by_coflow = {}
         background = []
         for flow in active_flows:
             coflow_id = self.priority_analysis.task_to_coflow.get(flow.task_id)
             (background if coflow_id is None else by_coflow.setdefault(coflow_id, [])).append(flow)
         result = {}
-        for coflow_id in tiers:
-            self._allocate_tier(by_coflow[coflow_id], link_rem, result)
+        for coflow_ids in tiers:
+            tier_flows = [flow for coflow_id in coflow_ids for flow in by_coflow[coflow_id]]
+            self._allocate_tier(tier_flows, link_rem, result)
         # Out-of-scope traffic is fair-share background, after Hermod traffic.
         if background:
             self._allocate_tier(background, link_rem, result)

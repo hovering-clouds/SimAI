@@ -100,6 +100,71 @@ GPU 数。
 的影响。`puppeteer` 使用自己的 Greedy route、TTE 分配及资源协调，因此是相关但不同的
 网络调度基线；它不等同于 Hermod，也尚未实现两者的组合策略。
 
+## Priority-tier and visualization notes
+
+The allocator treats coflows equal on every paper-defined §4.1 dimension
+(`job_id`, MID, CType, LID) as one priority tier and performs progressive
+max-min sharing within that tier.  `coflow_id` is only a stable display key;
+it must not invent an additional strict ordering.
+
+Both E2E runners accept a JSON boolean `"visualize": true` (or CLI
+`--visualize`).  The static runner writes `<mode>_trace.json` with the normal
+Chrome Trace visualizer; the dynamic runner writes the same per-mode file with
+task metadata, including Hermod MID/LID/coflow fields in each event's `args`.
+Open the trace in `chrome://tracing` or Perfetto.  The trace is diagnostic: it
+shows that bandwidth priorities were applied, but does not itself establish a
+paper-equivalent end-to-end speedup.
+
+### Performance interpretation
+
+On the four-server Hermod topology, the runner's default contiguous rank
+mapping places a complete `TP × DP` PP stage on each 8-GPU server for common
+`pp=4,tp=4,dp=2` configurations.  PP therefore uses NICs between servers
+while DP is local NVLink traffic, leaving little PP/DP contention for §4.1 to
+resolve.  Multiple dynamic iterations are sequential dependencies, so they
+smooth a measurement but do not create cross-iteration contention.  Results
+from this placement must not be used to claim that Hermod has no benefit.
+
+For contention diagnosis only, the dynamic runner also accepts
+`"placement": "cyclic_pp_dp"` and `"gpus_per_server": 8`.  It keeps each TP
+group inside one server, but rotates PP stages and DP replicas across the four
+servers so both groups traverse NIC/leaf resources.  This is deliberately an
+experimental stress placement, not a paper-validated placement.  Use it to
+inspect traces and priority behavior; report it separately from the contiguous
+placement baseline.
+
+With strict LID and the supplied Hermod topology, useful existing AICB
+single-iteration configurations are GPT-13B and GPT-22B `tp=4,pp=2,dp=4,ga=8`
+with `gbs32/mbs4`: Default/Hermod makespans are respectively
+`6,549,866 / 6,384,152 us` (+2.53%) and `9,854,039 / 9,686,335 us` (+1.70%).
+The corresponding `pp=4` scans and the first cyclic-PP/DP GPT-13B run
+regressed, so more contention alone is not a performance claim.
+
+For GPT-style AICB traces, the Hermod-only adapter now reconstructs a local
+model LID: the input `embedding_layer` is boundary LID 0, and each adjacent
+`attention_layer` + `mlp_layer` pair shares the next Transformer-layer LID.
+Post-GA DP traffic receives the final boundary LID.  The adapter validates the
+sequence and fails for an unrecognized operation instead of silently applying
+a flat position.  It does not change the generic parser, `Task.layer_id`, DAG,
+or any non-Hermod scheduler.  Static and dynamic sidecars record the mapping
+rule and source operation for audit.
+
+The remaining reproduction limitations are material: this recovers the local
+layer ordering but does not establish model-stage ownership or virtual-pipeline
+chunk ownership, the placement is not yet a paper-validated distributed-
+training placement, and §4.2 matching-based intra-coflow allocation/EP is
+absent.  A result where Hermod is slower is therefore useful diagnosis, not
+evidence of a faithful full-paper comparison.  Before reporting a speedup
+study, validate a placement that makes the intended PP/DP coflows share the
+NIC bottleneck, then compare its traces and critical-path stalls under the
+same 1F1B plan and routes.
+
+`interleaved_1f1b` currently selects only the §4.1 CType ordering variant.
+The compute serializer is still the conventional `OneFOneBSerializer`; it is
+not a virtual-pipeline/interleaved execution-model reproduction.  It must not
+be used as an interleaved Hermod performance result until that serializer and
+its VPP task DAG are implemented and validated.
+
 ## Dynamic executor
 
 ### Multi-job priority boundary

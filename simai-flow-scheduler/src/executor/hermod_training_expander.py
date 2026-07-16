@@ -35,7 +35,7 @@ class HermodTrainingJobExpander:
             job=job,
             comm_algo="ring",
         )
-        HermodAicbMetadataAdapter(header).apply(workload)
+        HermodAicbMetadataAdapter(header, items).apply(workload)
 
         offset = self._allocator.next_id
         self._allocator.allocate(len(workload.tasks))

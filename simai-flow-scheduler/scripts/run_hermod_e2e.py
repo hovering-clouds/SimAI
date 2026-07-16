@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.executor.analytical import AnalyticalExecutor
+from src.executor.visualizer import ChromeTraceVerbose
 from src.executor.policies.default_policy import DefaultSchedulingPolicy
 from src.executor.policies.hermod_policy import HermodSchedulingPolicy
 from src.executor.policies.puppeteer_policy import PuppeteerSchedulingPolicy
@@ -27,7 +28,7 @@ DEFAULT_AICB = "inputs/aicb-workload/A100-gpt_13B_ws8_pp2-world_size8-tp4-pp2-ep
 DEFAULT_TOPO = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100"
 CONFIG_KEYS = {
     "workload", "aicb", "topology", "topo", "dp", "ep_mode", "pipeline",
-    "modes", "k_paths", "variant", "output",
+    "modes", "k_paths", "variant", "output", "visualize",
 }
 CONFIG_PIPELINES = {"gpipe", "1f1b"}
 CONFIG_MODES = {"default", "puppeteer", "hermod"}
@@ -55,6 +56,8 @@ def load_config(path: str) -> dict:
     for key in ("dp", "k_paths"):
         if key in data and (not isinstance(data[key], int) or isinstance(data[key], bool) or data[key] < 1):
             raise ValueError(f"Hermod config {key!r} must be a positive integer")
+    if "visualize" in data and not isinstance(data["visualize"], bool):
+        raise ValueError("Hermod config 'visualize' must be a boolean")
     if "pipeline" in data and data["pipeline"] not in CONFIG_PIPELINES:
         raise ValueError(f"Unsupported Hermod pipeline: {data['pipeline']!r}")
     if "variant" in data and data["variant"] not in CONFIG_VARIANTS:
@@ -85,7 +88,7 @@ def build_workload(aicb_path: str, dp_override: int | None, ep_mode: HermodEpMod
     )
     workload = WorkloadBuilder().build_from_aicb(header, items, job, comm_algo="ring")
     records = HermodAicbMetadataAdapter(
-        header, reject_ep=(ep_mode == HermodEpMode.REJECT),
+        header, items, reject_ep=(ep_mode == HermodEpMode.REJECT),
     ).apply(workload)
     return header, dp, workload, records
 
@@ -112,6 +115,8 @@ def main():
     parser.add_argument("--variant", choices=[v.value for v in HermodScheduleVariant],
                         default=HermodScheduleVariant.CONVENTIONAL_1F1B.value)
     parser.add_argument("--output", default="outputs/hermod_e2e")
+    parser.add_argument("--visualize", action="store_true",
+                        help="Write <mode>_trace.json Chrome Trace files beside the results.")
     parser.set_defaults(**config)
     args = parser.parse_args()
 
@@ -150,6 +155,10 @@ def main():
             topology, HermodSchedulingPolicy(analysis)).execute(workload)
     for name, result in results.items():
         result.to_json(out / f"{name}_execution_result.json")
+        if args.visualize:
+            trace_path = out / f"{name}_trace.json"
+            ChromeTraceVerbose(workload).export(result, str(trace_path))
+            print(f"Wrote Chrome Trace: {trace_path}")
 
     coflows = [
         {"coflow_id": info.coflow_id, "task_ids": list(info.task_ids),

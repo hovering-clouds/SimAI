@@ -36,12 +36,14 @@ DEFAULT_AICB = "inputs/aicb-workload/A100-gpt_13B_ws8_pp2-world_size8-tp4-pp2-ep
 DEFAULT_TOPO = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100"
 CONFIG_KEYS = {
     "workload", "aicb", "topology", "topo", "dp", "pipeline", "variant",
-    "jobs", "iterations", "workloads", "modes", "output",
+    "jobs", "iterations", "workloads", "modes", "output", "visualize",
+    "placement", "gpus_per_server",
 }
 PIPELINES = {"gpipe", "1f1b"}
 MODES = {"default", "hermod"}
 VARIANTS = {variant.value for variant in HermodScheduleVariant}
 WORKLOAD_KEYS = {"aicb", "dp", "num_jobs", "num_iters"}
+PLACEMENTS = {"contiguous", "cyclic_pp_dp"}
 
 
 def load_config(path: str) -> dict:
@@ -62,6 +64,16 @@ def load_config(path: str) -> dict:
     for key in ("dp", "jobs", "iterations"):
         if key in data and (not isinstance(data[key], int) or isinstance(data[key], bool) or data[key] < 1):
             raise ValueError(f"Config {key!r} must be a positive integer")
+    if "placement" in data and data["placement"] not in PLACEMENTS:
+        raise ValueError(f"Unsupported placement: {data['placement']!r}")
+    if "gpus_per_server" in data and (
+        not isinstance(data["gpus_per_server"], int)
+        or isinstance(data["gpus_per_server"], bool)
+        or data["gpus_per_server"] < 1
+    ):
+        raise ValueError("Config 'gpus_per_server' must be a positive integer")
+    if "visualize" in data and not isinstance(data["visualize"], bool):
+        raise ValueError("Config 'visualize' must be a boolean")
     if "pipeline" in data and data["pipeline"] not in PIPELINES:
         raise ValueError(f"Unsupported pipeline: {data['pipeline']!r}")
     if "variant" in data and data["variant"] not in VARIANTS:
@@ -90,7 +102,45 @@ def load_config(path: str) -> dict:
     return data
 
 
-def build_compact_workload(workload_specs: list[dict]) -> tuple[CompactWorkload, list[dict], int]:
+def assigned_nodes_for(
+    parallelism: ParallelismConfig,
+    placement: str,
+    gpus_per_server: int,
+) -> list[int]:
+    """Map logical [PP][DP][EP][TP] ranks onto physical GPU IDs.
+
+    ``cyclic_pp_dp`` is an experimental contention placement for homogeneous
+    servers: every TP group remains local, while both adjacent PP stages and
+    DP replicas rotate across servers.  It is not claimed as a paper placement.
+    """
+    total = parallelism.tp * parallelism.dp * parallelism.pp * parallelism.ep
+    if placement == "contiguous":
+        return list(range(total))
+    if total % gpus_per_server or gpus_per_server % parallelism.tp:
+        raise ValueError("cyclic_pp_dp requires whole TP groups on equal-size servers")
+    server_count = total // gpus_per_server
+    if parallelism.ep != 1:
+        raise ValueError("cyclic_pp_dp currently requires ep=1")
+    slots_per_server = gpus_per_server // parallelism.tp
+    slots_used = [0] * server_count
+    nodes: list[int] = []
+    for pp_idx in range(parallelism.pp):
+        for dp_idx in range(parallelism.dp):
+            server = (pp_idx + dp_idx) % server_count
+            slot = slots_used[server]
+            if slot >= slots_per_server:
+                raise ValueError("cyclic_pp_dp cannot balance this PP/DP/server configuration")
+            slots_used[server] += 1
+            start = server * gpus_per_server + slot * parallelism.tp
+            nodes.extend(range(start, start + parallelism.tp))
+    return nodes
+
+
+def build_compact_workload(
+    workload_specs: list[dict],
+    placement: str = "contiguous",
+    gpus_per_server: int = 8,
+) -> tuple[CompactWorkload, list[dict], int]:
     dynamic_jobs: list[Job] = []
     expansion_info: dict[int, JobExpansionInfo] = {}
     job_id = 0
@@ -105,11 +155,12 @@ def build_compact_workload(workload_specs: list[dict]) -> tuple[CompactWorkload,
         num_jobs = spec.get("num_jobs", 1)
         num_iters = spec.get("num_iters", 1)
         parallelism = ParallelismConfig(tp=header.tp, dp=dp, pp=header.pp, ep=header.ep)
-        assigned_nodes = list(range(header.tp * dp * header.pp * header.ep))
+        assigned_nodes = assigned_nodes_for(parallelism, placement, gpus_per_server)
         max_required_gpus = max(max_required_gpus, len(assigned_nodes))
         resolved_specs.append({
             "aicb": aicb_path, "dp": dp, "num_jobs": num_jobs, "num_iters": num_iters,
             "tp": header.tp, "pp": header.pp, "ep": header.ep, "ga": header.ga,
+            "placement": placement,
         })
         for local_job in range(num_jobs):
             previous_iteration_id = None
@@ -195,6 +246,12 @@ def main() -> None:
                         default=HermodScheduleVariant.CONVENTIONAL_1F1B.value)
     parser.add_argument("--modes", nargs="+", choices=sorted(MODES), default=["default", "hermod"])
     parser.add_argument("--output", default="outputs/hermod_dynamic_e2e")
+    parser.add_argument("--placement", choices=sorted(PLACEMENTS), default="contiguous",
+                        help="GPU placement; cyclic_pp_dp deliberately creates PP/DP NIC contention.")
+    parser.add_argument("--gpus-per-server", type=int, default=8,
+                        help="Server size used only by non-contiguous placement modes.")
+    parser.add_argument("--visualize", action="store_true",
+                        help="Write <mode>_trace.json Chrome Trace files beside the results.")
     parser.set_defaults(**config)
     args = parser.parse_args()
 
@@ -210,7 +267,9 @@ def main() -> None:
             "num_jobs": args.jobs or 1,
             "num_iters": args.iterations or 2,
         }]
-    compact, resolved_specs, required_gpus = build_compact_workload(workload_specs)
+    compact, resolved_specs, required_gpus = build_compact_workload(
+        workload_specs, args.placement, args.gpus_per_server,
+    )
     topology = TopologyLoader().load(args.topo)
     if required_gpus > topology.gpu_count:
         raise ValueError(f"Run config needs {required_gpus} GPUs but topology has {topology.gpu_count}")
@@ -240,10 +299,22 @@ def main() -> None:
             (output / "hermod_metadata.json").write_text(
                 json.dumps(hermod_metadata, indent=2), encoding="utf-8",
             )
+        if args.visualize:
+            # Kept in visualize_dynamic.py so standalone and E2E exports have
+            # identical labels and Chrome Trace structure.
+            from visualize_dynamic import export_trace
+            trace_path = output / f"{mode}_trace.json"
+            event_count = export_trace(
+                str(output / f"{mode}_execution_result.json"),
+                str(output / f"{mode}_task_meta.json"),
+                str(trace_path),
+            )
+            print(f"Wrote {event_count:,} Chrome Trace events: {trace_path}")
         results[mode] = result
     summary = {
         "input": {"topology": args.topo, "pipeline": args.pipeline,
-                  "variant": args.variant, "ep_mode": "reject"},
+                  "variant": args.variant, "ep_mode": "reject",
+                  "placement": args.placement, "gpus_per_server": args.gpus_per_server},
         "workloads": resolved_specs,
         "dynamic": {
             "expanded_jobs": len(compact.jobs),

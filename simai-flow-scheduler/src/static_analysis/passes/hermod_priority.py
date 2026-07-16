@@ -133,14 +133,17 @@ class HermodPriorityAnalysis:
             return 0 if self.variant == HermodScheduleVariant.CONVENTIONAL_1F1B else 1
         return 2
 
-    def _default_key(self, coflow: HermodCoflowInfo) -> tuple[int, int, int, int, str]:
+    def _default_key(self, coflow: HermodCoflowInfo) -> tuple[int, int, int, int]:
         return (
             coflow.job_id,
             coflow.microbatch_id,
             self._ctype_rank(coflow.coflow_type),
             coflow.logical_layer_id,
-            coflow.coflow_id,
         )
+
+    def _stable_key(self, coflow: HermodCoflowInfo) -> tuple[int, int, int, int, str]:
+        """Deterministic presentation order; coflow_id is not a priority signal."""
+        return (*self._default_key(coflow), coflow.coflow_id)
 
     @staticmethod
     def _is_case_iii_pair(a: HermodCoflowInfo, b: HermodCoflowInfo) -> bool:
@@ -153,7 +156,7 @@ class HermodPriorityAnalysis:
             and dp.logical_layer_id < non_dp.logical_layer_id
         )
 
-    def _pair_winner(self, a: HermodCoflowInfo, b: HermodCoflowInfo) -> str:
+    def _pair_winner(self, a: HermodCoflowInfo, b: HermodCoflowInfo) -> str | None:
         # MID/LID are local to one training job. In a dynamic multi-job run
         # they restart at zero for every Job, so applying Case III across Jobs
         # can create a non-transitive relation. Hermod §4.1 does not define a
@@ -162,15 +165,21 @@ class HermodPriorityAnalysis:
         if a.job_id != b.job_id:
             return a.coflow_id if a.job_id < b.job_id else b.coflow_id
         if self._is_case_iii_pair(a, b):
-            return a.coflow_id if a.logical_layer_id < b.logical_layer_id else b.coflow_id
-        return a.coflow_id if self._default_key(a) < self._default_key(b) else b.coflow_id
+            if a.logical_layer_id != b.logical_layer_id:
+                return a.coflow_id if a.logical_layer_id < b.logical_layer_id else b.coflow_id
+        a_key, b_key = self._default_key(a), self._default_key(b)
+        if a_key == b_key:
+            # §4.1 supplies no ordering signal here.  These coflows must
+            # share a tier; using their opaque IDs would invent a priority.
+            return None
+        return a.coflow_id if a_key < b_key else b.coflow_id
 
-    def priority_order(self, active_task_ids: list[int]) -> list[str]:
-        """Return active coflow IDs from high to low priority.
+    def priority_tiers(self, active_task_ids: list[int]) -> list[list[str]]:
+        """Return active coflow tiers from high to low priority.
 
-        The pairwise rules are topologically sorted. A cycle means that the
-        metadata describes an unreachable/ambiguous paper case and is rejected
-        rather than hidden by an arbitrary global key.
+        Coflows tied on every §4.1 priority dimension are deliberately kept
+        in one tier.  The allocator applies max-min sharing to that tier;
+        serializing it by coflow ID would be an unsupported policy choice.
         """
         active = {
             self.task_to_coflow[task_id] for task_id in active_task_ids
@@ -182,23 +191,37 @@ class HermodPriorityAnalysis:
         indegree = {coflow_id: 0 for coflow_id in by_id}
         for a, b in combinations(infos, 2):
             winner = self._pair_winner(a, b)
+            if winner is None:
+                continue
             loser = b.coflow_id if winner == a.coflow_id else a.coflow_id
             successors[winner].add(loser)
             indegree[loser] += 1
 
-        ordered: list[str] = []
-        ready = [coflow_id for coflow_id, degree in indegree.items() if degree == 0]
-        while ready:
-            ready.sort(key=lambda coflow_id: self._default_key(by_id[coflow_id]))
-            winner = ready.pop(0)
-            ordered.append(winner)
-            for loser in successors[winner]:
-                indegree[loser] -= 1
-                if indegree[loser] == 0:
-                    ready.append(loser)
-        if len(ordered) != len(infos):
-            raise ValueError(
-                "Hermod active coflows create a cyclic §4.1 priority relation; "
-                "the MID/LID metadata does not represent a reachable training DAG"
+        tiers: list[list[str]] = []
+        remaining = set(by_id)
+        while remaining:
+            ready = sorted(
+                (coflow_id for coflow_id in remaining if indegree[coflow_id] == 0),
+                key=lambda coflow_id: self._stable_key(by_id[coflow_id]),
             )
-        return ordered
+            if not ready:
+                raise ValueError(
+                    "Hermod active coflows create a cyclic §4.1 priority relation; "
+                    "the MID/LID metadata does not represent a reachable training DAG"
+                )
+            tiers.append(ready)
+            for winner in ready:
+                remaining.remove(winner)
+            for winner in ready:
+                for loser in successors[winner]:
+                    indegree[loser] -= 1
+        return tiers
+
+    def priority_order(self, active_task_ids: list[int]) -> list[str]:
+        """Return active coflow IDs from high to low priority.
+
+        The pairwise rules are topologically sorted. A cycle means that the
+        metadata describes an unreachable/ambiguous paper case and is rejected
+        rather than hidden by an arbitrary global key.
+        """
+        return [coflow_id for tier in self.priority_tiers(active_task_ids) for coflow_id in tier]

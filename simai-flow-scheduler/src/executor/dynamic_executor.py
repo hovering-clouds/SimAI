@@ -254,7 +254,8 @@ class DynamicExecutor(AnalyticalExecutor):
             self._task_meta[t.task_id] = {
                 k: getattr(t, k, None)
                 for k in ("phase", "layer_id", "comm_type", "src", "dst", "node", "job_id",
-                          "coflow_id", "microbatch_id", "logical_layer_id")
+                          "coflow_id", "microbatch_id", "logical_layer_id",
+                          "hermod_lid_source_operation", "hermod_lid_mapping_rule")
             }
 
         # 3. Inject tasks (with delay if applicable)
