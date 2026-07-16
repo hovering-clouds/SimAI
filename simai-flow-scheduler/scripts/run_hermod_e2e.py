@@ -21,6 +21,7 @@ from src.workload_format.schema import Job, ParallelismConfig
 from src.workload_format.writer import WorkloadWriter
 from src.workload_generator.aicb_parser import AicbParser
 from src.workload_generator.hermod_aicb_metadata import HermodAicbMetadataAdapter
+from src.workload_generator.hermod_placement import PLACEMENTS, assigned_nodes_for
 from src.workload_generator.workload_builder import WorkloadBuilder
 
 
@@ -28,7 +29,7 @@ DEFAULT_AICB = "inputs/aicb-workload/A100-gpt_13B_ws8_pp2-world_size8-tp4-pp2-ep
 DEFAULT_TOPO = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100"
 CONFIG_KEYS = {
     "workload", "aicb", "topology", "topo", "dp", "ep_mode", "pipeline",
-    "modes", "k_paths", "variant", "output", "visualize",
+    "modes", "k_paths", "variant", "output", "visualize", "placement", "gpus_per_server",
 }
 CONFIG_PIPELINES = {"gpipe", "1f1b"}
 CONFIG_MODES = {"default", "puppeteer", "hermod"}
@@ -58,6 +59,14 @@ def load_config(path: str) -> dict:
             raise ValueError(f"Hermod config {key!r} must be a positive integer")
     if "visualize" in data and not isinstance(data["visualize"], bool):
         raise ValueError("Hermod config 'visualize' must be a boolean")
+    if "placement" in data and data["placement"] not in PLACEMENTS:
+        raise ValueError(f"Unsupported Hermod placement: {data['placement']!r}")
+    if "gpus_per_server" in data and (
+        not isinstance(data["gpus_per_server"], int)
+        or isinstance(data["gpus_per_server"], bool)
+        or data["gpus_per_server"] < 1
+    ):
+        raise ValueError("Hermod config 'gpus_per_server' must be a positive integer")
     if "pipeline" in data and data["pipeline"] not in CONFIG_PIPELINES:
         raise ValueError(f"Unsupported Hermod pipeline: {data['pipeline']!r}")
     if "variant" in data and data["variant"] not in CONFIG_VARIANTS:
@@ -72,7 +81,10 @@ def load_config(path: str) -> dict:
     return data
 
 
-def build_workload(aicb_path: str, dp_override: int | None, ep_mode: HermodEpMode):
+def build_workload(
+    aicb_path: str, dp_override: int | None, ep_mode: HermodEpMode,
+    placement: str = "contiguous", gpus_per_server: int = 8,
+):
     if ep_mode != HermodEpMode.REJECT:
         raise NotImplementedError("Hermod EP experiments are not implemented")
     header, items = AicbParser().parse(aicb_path)
@@ -80,11 +92,12 @@ def build_workload(aicb_path: str, dp_override: int | None, ep_mode: HermodEpMod
     dp = dp_override if dp_override is not None else header_dp
     if dp < 1:
         raise ValueError("--dp must be >= 1")
+    parallelism = ParallelismConfig(tp=header.tp, dp=dp, pp=header.pp, ep=header.ep)
     job = Job(
         job_id=0,
         name=Path(aicb_path).stem,
-        assigned_nodes=list(range(header.tp * dp * header.pp * header.ep)),
-        parallelism=ParallelismConfig(tp=header.tp, dp=dp, pp=header.pp, ep=header.ep),
+        assigned_nodes=assigned_nodes_for(parallelism, placement, gpus_per_server),
+        parallelism=parallelism,
     )
     workload = WorkloadBuilder().build_from_aicb(header, items, job, comm_algo="ring")
     records = HermodAicbMetadataAdapter(
@@ -117,12 +130,16 @@ def main():
     parser.add_argument("--output", default="outputs/hermod_e2e")
     parser.add_argument("--visualize", action="store_true",
                         help="Write <mode>_trace.json Chrome Trace files beside the results.")
+    parser.add_argument("--placement", choices=sorted(PLACEMENTS), default="contiguous")
+    parser.add_argument("--gpus-per-server", type=int, default=8)
     parser.set_defaults(**config)
     args = parser.parse_args()
 
     out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
     ep_mode = HermodEpMode(args.ep_mode)
-    header, dp, workload, records = build_workload(args.aicb, args.dp, ep_mode)
+    header, dp, workload, records = build_workload(
+        args.aicb, args.dp, ep_mode, args.placement, args.gpus_per_server,
+    )
     topology = TopologyLoader().load(args.topo)
     required_gpus = header.tp * dp * header.pp * header.ep
     if required_gpus > topology.gpu_count:
@@ -168,7 +185,8 @@ def main():
     ]
     summary = {
         "input": {"aicb": args.aicb, "topology": args.topo, "variant": args.variant,
-                  "pipeline": args.pipeline, "ep_mode": args.ep_mode},
+                  "pipeline": args.pipeline, "ep_mode": args.ep_mode,
+                  "placement": args.placement, "gpus_per_server": args.gpus_per_server},
         "parallelism": {"tp": header.tp, "dp": dp,
                         "pp": header.pp, "ep": header.ep, "ga": header.ga},
         "coflows": coflows,

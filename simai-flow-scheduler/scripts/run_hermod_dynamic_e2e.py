@@ -30,6 +30,7 @@ from src.workload_format.compact_workload import (
 )
 from src.workload_format.schema import Job, Meta, ParallelismConfig
 from src.workload_generator.aicb_parser import AicbParser
+from src.workload_generator.hermod_placement import PLACEMENTS, assigned_nodes_for
 
 
 DEFAULT_AICB = "inputs/aicb-workload/A100-gpt_13B_ws8_pp2-world_size8-tp4-pp2-ep1-gbs2-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-True.txt"
@@ -43,7 +44,6 @@ PIPELINES = {"gpipe", "1f1b"}
 MODES = {"default", "hermod"}
 VARIANTS = {variant.value for variant in HermodScheduleVariant}
 WORKLOAD_KEYS = {"aicb", "dp", "num_jobs", "num_iters"}
-PLACEMENTS = {"contiguous", "cyclic_pp_dp"}
 
 
 def load_config(path: str) -> dict:
@@ -100,40 +100,6 @@ def load_config(path: str) -> dict:
                 ):
                     raise ValueError(f"workloads[{index}].{key} must be a positive integer")
     return data
-
-
-def assigned_nodes_for(
-    parallelism: ParallelismConfig,
-    placement: str,
-    gpus_per_server: int,
-) -> list[int]:
-    """Map logical [PP][DP][EP][TP] ranks onto physical GPU IDs.
-
-    ``cyclic_pp_dp`` is an experimental contention placement for homogeneous
-    servers: every TP group remains local, while both adjacent PP stages and
-    DP replicas rotate across servers.  It is not claimed as a paper placement.
-    """
-    total = parallelism.tp * parallelism.dp * parallelism.pp * parallelism.ep
-    if placement == "contiguous":
-        return list(range(total))
-    if total % gpus_per_server or gpus_per_server % parallelism.tp:
-        raise ValueError("cyclic_pp_dp requires whole TP groups on equal-size servers")
-    server_count = total // gpus_per_server
-    if parallelism.ep != 1:
-        raise ValueError("cyclic_pp_dp currently requires ep=1")
-    slots_per_server = gpus_per_server // parallelism.tp
-    slots_used = [0] * server_count
-    nodes: list[int] = []
-    for pp_idx in range(parallelism.pp):
-        for dp_idx in range(parallelism.dp):
-            server = (pp_idx + dp_idx) % server_count
-            slot = slots_used[server]
-            if slot >= slots_per_server:
-                raise ValueError("cyclic_pp_dp cannot balance this PP/DP/server configuration")
-            slots_used[server] += 1
-            start = server * gpus_per_server + slot * parallelism.tp
-            nodes.extend(range(start, start + parallelism.tp))
-    return nodes
 
 
 def build_compact_workload(

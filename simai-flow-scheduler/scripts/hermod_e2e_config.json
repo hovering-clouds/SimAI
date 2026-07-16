@@ -5,7 +5,10 @@
   "ep_mode": "reject",
   "pipeline": "1f1b",
   "variant": "conventional_1f1b",
-  "modes": ["default", "puppeteer", "hermod"],
+  "modes": ["default", "hermod"],
   "k_paths": 4,
+  "placement": "cyclic_pp_dp",
+  "gpus_per_server": 8,
+  "visualize": true,
   "output": "outputs/hermod_e2e_config"
 }

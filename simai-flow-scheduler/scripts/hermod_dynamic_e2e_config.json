@@ -11,5 +11,8 @@
   "pipeline": "1f1b",
   "variant": "conventional_1f1b",
   "modes": ["default", "hermod"],
+  "placement": "cyclic_pp_dp",
+  "gpus_per_server": 8,
+  "visualize": true,
   "output": "outputs/hermod_dynamic_e2e-3"
 }
