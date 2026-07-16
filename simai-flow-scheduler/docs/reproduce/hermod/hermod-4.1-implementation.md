@@ -19,7 +19,7 @@ AICB workload + JSON experiment config
   -> WorkloadBuilder
   -> HermodAicbMetadataAdapter
        GA step -> microbatch_id (MID)
-       flattened AICB item position -> logical_layer_id (LID)
+       GPT embedding/attention+MLP structure -> audited local Transformer LID
        writes hermod_metadata.json sidecar
   -> HermodAnalyzer (GPipe or 1F1B execution plan + BFS routes)
   -> HermodSchedulingPolicy / HermodAllocator
@@ -71,6 +71,9 @@ python scripts/run_hermod_e2e.py --config scripts/hermod_e2e_config.json
   "variant": "conventional_1f1b",
   "modes": ["default", "puppeteer", "hermod"],
   "k_paths": 4,
+  "placement": "contiguous",
+  "gpus_per_server": 8,
+  "visualize": false,
   "output": "outputs/hermod_experiment"
 }
 ```
@@ -125,7 +128,7 @@ resolve.  Multiple dynamic iterations are sequential dependencies, so they
 smooth a measurement but do not create cross-iteration contention.  Results
 from this placement must not be used to claim that Hermod has no benefit.
 
-For contention diagnosis only, the dynamic runner also accepts
+For contention diagnosis only, both runners accept
 `"placement": "cyclic_pp_dp"` and `"gpus_per_server": 8`.  It keeps each TP
 group inside one server, but rotates PP stages and DP replicas across the four
 servers so both groups traverse NIC/leaf resources.  This is deliberately an
@@ -218,7 +221,8 @@ Dynamic Hermod 审查修复后，两个不同 AICB spec（第一项 `dp=2,num_jo
 包含每个范围内 flow 的 `coflow_id`、MID 与 LID。
 全量测试中 Spectrum-X 相关的既有测试仍依赖仓库外缺失的旧拓扑文件；这与 Hermod 无关。
 
-当前实现的结论应限制为 PP/DP 的 §4.1 流级严格优先实验。AICB 当前只提供 GA 块内的扁平
-item 位置，adapter 将其作为可审计的兼容 LID；它不是已由输入证实的论文逻辑模型层 ID。因此，
-Case III 的真实层语义仍需含显式模型层标识的输入验证。EP 与 §4.2 完成前，不应报告为完整
-Hermod 端到端复现。
+当前实现的结论应限制为 PP/DP 的 §4.1 流级严格优先实验。对于 GPT 风格 AICB，Hermod 专用
+adapter 会从 `embedding_layer` 与相邻的 `attention_layer + mlp_layer` 对恢复可审计的局部
+Transformer LID，而不是使用扁平 item 位置；但它尚未证明模型 stage ownership 或 VPP chunk
+ownership，因此完整的 Case III 层语义仍待验证。EP 与 §4.2 完成前，不应报告为完整 Hermod
+端到端复现。推荐场景、负例及结果解释见 `hermod-experiment-status.md`。

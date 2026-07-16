@@ -12,5 +12,6 @@ test/log/
 CLAUDE.md
 AGENTS.md
 *.pdf
+paper
 .claude
 tmp*
