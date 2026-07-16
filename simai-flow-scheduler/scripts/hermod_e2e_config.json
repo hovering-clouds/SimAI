@@ -1,0 +1,14 @@
+{
+  "workload": "inputs/aicb-workload/A100-gpt_13B_ws8_pp2-world_size8-tp4-pp2-ep1-gbs2-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
+  "topology": "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100",
+  "dp": 2,
+  "ep_mode": "reject",
+  "pipeline": "1f1b",
+  "variant": "conventional_1f1b",
+  "modes": ["default", "hermod"],
+  "k_paths": 4,
+  "placement": "cyclic_pp_dp",
+  "gpus_per_server": 8,
+  "visualize": true,
+  "output": "outputs/hermod_e2e_config"
+}

@@ -60,29 +60,20 @@ def _label(tid: int, timing: dict, task_meta: dict) -> str:
         return f"flow_{tid}"
 
 
-def main():
-    result_path = os.path.join(OUTPUT_DIR, RESULT_FILE)
-    meta_path = os.path.join(OUTPUT_DIR, META_FILE)
+def export_trace(result_path: str, meta_path: str | None, output_path: str) -> int:
+    """Write a Chrome Trace for a dynamic result and return its event count."""
 
     if not os.path.exists(result_path):
-        print(f"Error: {result_path} not found. Run run_dynamic_e2e.py first.")
-        sys.exit(1)
+        raise FileNotFoundError(f"Execution result not found: {result_path}")
 
     # Load execution result
     with open(result_path) as f:
         data = json.load(f)
-    print(f"Result: {result_path}")
-    print(f"  Tasks: {len(data['per_task'])}")
-    print(f"  Makespan: {data['makespan_us'] / 1000:.2f} ms")
-
     # Load optional task metadata
     task_meta = {}
-    if os.path.exists(meta_path):
+    if meta_path and os.path.exists(meta_path):
         with open(meta_path) as f:
             task_meta = {int(k): v for k, v in json.load(f).items()}
-        print(f"  Metadata: {len(task_meta)} tasks")
-    else:
-        print(f"  Metadata: not found ({meta_path}), using generic labels")
 
     # Build Chrome Trace events
     events = []
@@ -96,20 +87,30 @@ def main():
             "dur": max(timing["end_time_us"] - timing["start_time_us"], 1),
             "pid": 0,
             "tid": timing["node"],
+            "args": {"task_id": tid, **task_meta.get(tid, {})},
         })
 
     events.sort(key=lambda e: e["ts"])
 
-    # Save
-    if OUTPUT_FILE is None:
-        output = os.path.join(OUTPUT_DIR, "trace.json")
-    else:
-        output = os.path.join(OUTPUT_DIR, OUTPUT_FILE)
-
-    with open(output, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump({"traceEvents": events}, f)
+    return len(events)
 
-    print(f"  Events: {len(events)}")
+
+def main():
+    result_path = os.path.join(OUTPUT_DIR, RESULT_FILE)
+    meta_path = os.path.join(OUTPUT_DIR, META_FILE)
+    output = (os.path.join(OUTPUT_DIR, "trace.json")
+              if OUTPUT_FILE is None else os.path.join(OUTPUT_DIR, OUTPUT_FILE))
+
+    try:
+        event_count = export_trace(result_path, meta_path, output)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+
+    print(f"Result: {result_path}")
+    print(f"  Events: {event_count}")
     print(f"  Saved: {output}")
     print("  Open in chrome://tracing to view.")
 

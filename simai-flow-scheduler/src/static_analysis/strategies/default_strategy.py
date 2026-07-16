@@ -86,12 +86,20 @@ class OneFOneBAnalyzer:
     同时做 BFS 路由和 1F1B compute_order。
     """
 
-    def __init__(self, topology: NetworkTopology):
+    def __init__(
+        self,
+        topology: NetworkTopology,
+        jobs_by_id: dict[int, object] | None = None,
+    ):
         """
         Args:
             topology: 网络拓扑（用于 BFS 路由）。
         """
         self.topology = topology
+        # DynamicExecutor analyzes an injected mini-workload whose Job list is
+        # intentionally empty. Retain the original Jobs so 1F1B can recover
+        # PP stage placement before constructing its compute order.
+        self.jobs_by_id = jobs_by_id
 
     def analyze(self, workload: P2PWorkload) -> DefaultAnalysisResult:
         """构建路由表 + 1F1B compute_order。
@@ -102,6 +110,15 @@ class OneFOneBAnalyzer:
         Returns:
             DefaultAnalysisResult: 含路由表和 1F1B compute_order。
         """
+        if self.jobs_by_id is not None:
+            job_ids = {task.job_id for task in workload.tasks}
+            missing = sorted(job_ids - self.jobs_by_id.keys())
+            if missing:
+                raise ValueError(
+                    f"Dynamic 1F1B analysis lacks jobs for task job IDs: {missing}"
+                )
+            workload.jobs = [self.jobs_by_id[job_id] for job_id in sorted(job_ids)]
+
         # 从 workload 的 job 推导 node_to_stage 映射
         node_to_stage: dict[int, int] = {}
         pp = 1

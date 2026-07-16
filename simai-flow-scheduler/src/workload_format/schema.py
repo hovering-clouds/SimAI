@@ -145,6 +145,15 @@ class Task:
                 For pre/post items: sequential index (0, 1, 2...)
     - item_id: AICB workload item index (global, 0-based)
 
+    Hermod fields (optional outside Hermod mode):
+    - coflow_id: stable identifier shared by all P2P flows from one
+      communication invocation/subgroup.
+    - microbatch_id: paper MID.  This is deliberately distinct from
+      ``iteration`` (the latter is a GA-step index in this IR).
+    - logical_layer_id: paper LID, in the order data is consumed by the
+      training schedule.  It is deliberately distinct from ``layer_id``
+      until a trace producer has established that the two meanings agree.
+
     Scheduler can use (iteration, layer_id, phase) for C++ order.
     """
     task_id: int
@@ -154,6 +163,9 @@ class Task:
     phase: Phase = Phase.FORWARD
     layer_id: int = 0
     item_id: int = 0
+    coflow_id: Optional[str] = None
+    microbatch_id: Optional[int] = None
+    logical_layer_id: Optional[int] = None
     deps: list[int] = field(default_factory=list)
 
     # Compute-specific fields
@@ -377,6 +389,10 @@ P2P_WORKLOAD_JSON_SCHEMA = {
                         "enum": ["forward", "backward_input", "backward_weight", "optimizer", "prefill", "decode"]
                     },
                     "layer_id": {"type": "integer"},
+                    "item_id": {"type": "integer"},
+                    "coflow_id": {"type": "string"},
+                    "microbatch_id": {"type": "integer", "minimum": 0},
+                    "logical_layer_id": {"type": "integer", "minimum": 0},
                     "node": {"type": "integer"},
                     "duration_us": {"type": "integer"},
                     "src": {"type": "integer"},
