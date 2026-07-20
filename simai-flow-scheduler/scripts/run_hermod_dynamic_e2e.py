@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.executor.dynamic_executor import DynamicExecutor
-from src.executor.hermod_training_expander import HermodTrainingJobExpander
+from src.executor.job_expander import JobExpander
 from src.executor.job_policy import FifoJobPolicy
 from src.executor.policies.default_policy import DefaultSchedulingPolicy
 from src.executor.policies.hermod_policy import HermodSchedulingPolicy
@@ -20,7 +20,7 @@ from src.static_analysis.passes.routing import BfsRouteTable
 from src.static_analysis.passes.task_serializer import ExecutionPlan
 from src.static_analysis.passes.topology_loader import TopologyLoader
 from src.static_analysis.strategies.default_strategy import (
-    DefaultAnalysisResult, DefaultAnalyzer, OneFOneBAnalyzer,
+    DefaultAnalysisResult, DefaultAnalyzer, DynamicOneFOneBAnalyzer,
 )
 from src.static_analysis.strategies.hermod_strategy import (
     HermodAnalysisResult, HermodDynamicAnalyzer,
@@ -30,7 +30,7 @@ from src.workload_format.compact_workload import (
 )
 from src.workload_format.schema import Job, Meta, ParallelismConfig
 from src.workload_generator.aicb_parser import AicbParser
-from src.workload_generator.hermod_placement import PLACEMENTS, assigned_nodes_for
+from src.static_analysis.passes.hermod_placement import PLACEMENTS, assigned_nodes_for
 
 
 DEFAULT_AICB = "inputs/aicb-workload/A100-gpt_13B_ws8_pp2-world_size8-tp4-pp2-ep1-gbs2-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-True.txt"
@@ -164,7 +164,7 @@ def run_mode(mode: str, compact: CompactWorkload, topology, args):
         analysis = DefaultAnalysisResult(BfsRouteTable(topology), ExecutionPlan())
         policy = DefaultSchedulingPolicy(analysis)
         if args.pipeline == "1f1b":
-            analyzer = OneFOneBAnalyzer(
+            analyzer = DynamicOneFOneBAnalyzer(
                 topology, {job.job_id: job for job in compact.jobs},
             )
         else:
@@ -176,19 +176,25 @@ def run_mode(mode: str, compact: CompactWorkload, topology, args):
             HermodPriorityAnalysis({}, variant, HermodEpMode.REJECT),
         )
         policy = HermodSchedulingPolicy(empty)
+        trace_src_by_job = {
+            jid: info.trace_src
+            for jid, info in compact.job_expansion_info.items()
+        }
         analyzer = HermodDynamicAnalyzer(
             topology,
             {job.job_id: job for job in compact.jobs},
+            trace_src_by_job,
             variant=variant,
             ep_mode=HermodEpMode.REJECT,
             pipeline_mode=args.pipeline,
         )
+    from src.workload_generator.inference_profile import InferenceProfileStore
     executor = DynamicExecutor(topology=topology, policy=policy, analyzer=analyzer)
     result = executor.execute_dynamic(
         job_dag=JobDAG.from_compact(compact),
         job_expansion_info=compact.job_expansion_info,
         job_policy=FifoJobPolicy(),
-        job_expander=HermodTrainingJobExpander(TaskIdAllocator()),
+        job_expander=JobExpander(TaskIdAllocator(), InferenceProfileStore()),
     )
     return executor, result
 

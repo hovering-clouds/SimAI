@@ -1,5 +1,5 @@
 """Hermod-only logical-rank to physical-GPU placement helpers."""
-from ..workload_format.schema import ParallelismConfig
+from ...workload_format.schema import ParallelismConfig
 
 
 PLACEMENTS = {"contiguous", "cyclic_pp_dp"}

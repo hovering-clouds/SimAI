@@ -67,11 +67,6 @@ class FlowTask:
     phase: Phase = Phase.FORWARD
     layer_id: int = 0
     item_id: int = 0
-    # Optional Hermod metadata.  These deliberately do not default from the
-    # legacy iteration/layer fields; see Task's field documentation.
-    coflow_id: Optional[str] = None
-    microbatch_id: Optional[int] = None
-    logical_layer_id: Optional[int] = None
 
     def to_task(self) -> Task:
         """Convert FlowTask to Task object."""
@@ -83,9 +78,6 @@ class FlowTask:
             phase=self.phase,
             layer_id=self.layer_id,
             item_id=self.item_id,
-            coflow_id=self.coflow_id,
-            microbatch_id=self.microbatch_id,
-            logical_layer_id=self.logical_layer_id,
             node=self.node,
             duration_us=self.duration_us,
             src=self.src,

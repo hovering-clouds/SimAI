@@ -7,9 +7,9 @@ from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 
-from .aicb_parser import AicbHeader, AicbWorkItem
-from ..static_analysis.passes.hermod_priority import classify_coflow_type, HermodCoflowType
-from ..workload_format.schema import P2PWorkload
+from ...workload_generator.aicb_parser import AicbHeader, AicbWorkItem
+from .hermod_priority import classify_coflow_type, HermodCoflowType
+from ...workload_format.schema import P2PWorkload
 
 
 @dataclass(frozen=True)
@@ -102,8 +102,20 @@ class HermodAicbMetadataAdapter:
             raise ValueError("AICB GA block ends with attention_layer without mlp_layer")
         return lids, operations
 
-    def apply(self, workload: P2PWorkload) -> list[HermodMetadataRecord]:
-        records: list[HermodMetadataRecord] = []
+    @staticmethod
+    def _compute_coflow_id(task) -> str | None:
+        """Synthesise a stable coflow identifier from existing Task fields.
+
+        Used as an opaque grouping key by HermodPriorityAnalysis.  No code
+        in the Hermod strategy parses this string.
+        """
+        ct = classify_coflow_type(task.comm_type)
+        if ct is None:
+            return None
+        return f"j{task.job_id}:i{task.iteration}:{task.phase.value}:{ct.value}"
+
+    def apply(self, workload: P2PWorkload) -> dict[int, HermodMetadataRecord]:
+        records: dict[int, HermodMetadataRecord] = {}
         layer_task_ids = [
             task.layer_id for task in workload.tasks
             if 0 <= task.iteration < self.header.ga
@@ -113,16 +125,15 @@ class HermodAicbMetadataAdapter:
         transformer_lids, operations = self._transformer_lids(workload)
         last_lid = max(transformer_lids.values(), default=None)
         for task in workload.get_flow_tasks():
-            coflow_type = classify_coflow_type(task.comm_type)
-            if coflow_type is None:
+            coflow_id = self._compute_coflow_id(task)
+            if coflow_id is None:
                 continue
+            coflow_type = classify_coflow_type(task.comm_type)
             if coflow_type == HermodCoflowType.EP and self.reject_ep:
                 raise ValueError(
                     f"Hermod EP is disabled: task {task.task_id} is {task.comm_type.value}. "
                     "Use a validated EP path before enabling it."
                 )
-            if not task.coflow_id:
-                raise ValueError(f"Hermod task {task.task_id} has no coflow_id")
 
             if 0 <= task.iteration < self.header.ga:
                 mid = task.iteration
@@ -148,26 +159,23 @@ class HermodAicbMetadataAdapter:
                 raise ValueError(
                     f"Hermod task {task.task_id} has no AICB layer position for LID mapping"
                 )
-            task.microbatch_id = mid
-            task.logical_layer_id = lid
-            # Keep audit-only provenance outside the generic Task schema.
-            # DynamicExecutor copies these attributes to its Hermod sidecar.
-            task.hermod_lid_source_operation = operation
-            task.hermod_lid_mapping_rule = mapping_rule
-            records.append(HermodMetadataRecord(
+            records[task.task_id] = HermodMetadataRecord(
                 task_id=task.task_id,
-                coflow_id=task.coflow_id,
+                coflow_id=coflow_id,
                 microbatch_id=mid,
                 logical_layer_id=lid,
                 coflow_type=coflow_type.value,
                 provenance=provenance,
                 source_operation=operation,
                 mapping_rule=mapping_rule,
-            ))
+            )
         return records
 
     @staticmethod
-    def write_sidecar(records: list[HermodMetadataRecord], path: str | Path) -> None:
+    def write_sidecar(records: dict[int, HermodMetadataRecord] | list[HermodMetadataRecord],
+                      path: str | Path) -> None:
+        if isinstance(records, dict):
+            records = list(records.values())
         Path(path).write_text(
             json.dumps([asdict(record) for record in records], indent=2),
             encoding="utf-8",

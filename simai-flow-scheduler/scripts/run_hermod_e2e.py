@@ -20,8 +20,8 @@ from src.static_analysis.strategies.puppeteer_strategy import PuppeteerAnalyzer
 from src.workload_format.schema import Job, ParallelismConfig
 from src.workload_format.writer import WorkloadWriter
 from src.workload_generator.aicb_parser import AicbParser
-from src.workload_generator.hermod_aicb_metadata import HermodAicbMetadataAdapter
-from src.workload_generator.hermod_placement import PLACEMENTS, assigned_nodes_for
+from src.static_analysis.passes.hermod_metadata import HermodAicbMetadataAdapter
+from src.static_analysis.passes.hermod_placement import PLACEMENTS, assigned_nodes_for
 from src.workload_generator.workload_builder import WorkloadBuilder
 
 
@@ -148,7 +148,7 @@ def main():
     variant = HermodScheduleVariant(args.variant)
     analysis = HermodAnalyzer(
         topology, variant, ep_mode, pipeline_mode=args.pipeline,
-    ).analyze(workload)
+    ).analyze(workload, hermod_records=records)
     WorkloadWriter().write(workload, out / "workload.json")
     HermodAicbMetadataAdapter.write_sidecar(records, out / "hermod_metadata.json")
 

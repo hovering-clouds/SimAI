@@ -1,5 +1,5 @@
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
-from src.static_analysis.strategies.default_strategy import OneFOneBAnalyzer
+from src.static_analysis.strategies.default_strategy import DynamicOneFOneBAnalyzer
 from src.static_analysis.strategies.hermod_strategy import HermodDynamicAnalyzer
 from src.static_analysis.passes.hermod_priority import HermodEpMode, HermodScheduleVariant
 from src.workload_format.schema import (
@@ -29,7 +29,7 @@ def test_dynamic_1f1b_analyzer_restores_job_stage_mapping():
         ],
     )
 
-    result = OneFOneBAnalyzer(topology, {7: job}).analyze(mini_workload)
+    result = DynamicOneFOneBAnalyzer(topology, {7: job}).analyze(mini_workload)
 
     assert mini_workload.jobs == [job]
     assert result.execution_plan.compute_order == {0: [1], 1: [2]}
@@ -55,7 +55,7 @@ def test_dynamic_default_and_hermod_share_the_same_1f1b_plan():
     default_workload = P2PWorkload("1.0", Meta(1, 2), tasks=list(tasks))
     hermod_workload = P2PWorkload("1.0", Meta(1, 2), tasks=list(tasks))
 
-    default = OneFOneBAnalyzer(topology, {3: job}).analyze(default_workload)
+    default = DynamicOneFOneBAnalyzer(topology, {3: job}).analyze(default_workload)
     hermod = HermodDynamicAnalyzer(
         topology, {3: job}, HermodScheduleVariant.CONVENTIONAL_1F1B,
         HermodEpMode.REJECT, "1f1b",

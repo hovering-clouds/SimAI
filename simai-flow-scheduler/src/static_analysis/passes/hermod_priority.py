@@ -71,45 +71,35 @@ class HermodPriorityAnalysis:
     @classmethod
     def from_workload(
         cls, workload: P2PWorkload,
+        hermod_records: dict,
         variant: HermodScheduleVariant = HermodScheduleVariant.CONVENTIONAL_1F1B,
         ep_mode: HermodEpMode = HermodEpMode.REJECT,
     ) -> "HermodPriorityAnalysis":
         grouped: dict[str, list] = {}
         for task in workload.get_flow_tasks():
-            coflow_type = classify_coflow_type(task.comm_type)
-            if coflow_type is None:
+            record = hermod_records.get(task.task_id)
+            if record is None:
                 continue
-            if coflow_type == HermodCoflowType.EP and ep_mode == HermodEpMode.REJECT:
-                raise ValueError(
-                    f"Hermod EP is disabled: task {task.task_id} is {task.comm_type.value}"
-                )
-            missing = [
-                name for name, value in (
-                    ("coflow_id", task.coflow_id),
-                    ("microbatch_id", task.microbatch_id),
-                    ("logical_layer_id", task.logical_layer_id),
-                ) if value is None
-            ]
-            if missing:
-                raise ValueError(
-                    f"Hermod task {task.task_id} lacks required metadata: {', '.join(missing)}"
-                )
-            grouped.setdefault(task.coflow_id, []).append(task)
+            coflow_id = record.coflow_id
+            microbatch_id = record.microbatch_id
+            logical_layer_id = record.logical_layer_id
+            coflow_type = classify_coflow_type(task.comm_type)
+            grouped.setdefault(coflow_id, []).append((task, microbatch_id, logical_layer_id))
 
         coflows: dict[str, HermodCoflowInfo] = {}
-        for coflow_id, tasks in grouped.items():
-            first = tasks[0]
+        for coflow_id, items in grouped.items():
+            first_task, first_mid, first_lid = items[0]
             signature = (
-                first.job_id,
-                first.microbatch_id,
-                first.logical_layer_id,
-                classify_coflow_type(first.comm_type),
+                first_task.job_id,
+                first_mid,
+                first_lid,
+                classify_coflow_type(first_task.comm_type),
             )
-            for task in tasks[1:]:
+            for task, mid, lid in items[1:]:
                 actual = (
                     task.job_id,
-                    task.microbatch_id,
-                    task.logical_layer_id,
+                    mid,
+                    lid,
                     classify_coflow_type(task.comm_type),
                 )
                 if actual != signature:
@@ -118,10 +108,10 @@ class HermodPriorityAnalysis:
                     )
             coflows[coflow_id] = HermodCoflowInfo(
                 coflow_id=coflow_id,
-                task_ids=tuple(sorted(task.task_id for task in tasks)),
-                job_id=first.job_id,
-                microbatch_id=first.microbatch_id,
-                logical_layer_id=first.logical_layer_id,
+                task_ids=tuple(sorted(task.task_id for task, _, _ in items)),
+                job_id=first_task.job_id,
+                microbatch_id=first_mid,
+                logical_layer_id=first_lid,
                 coflow_type=signature[3],
             )
         return cls(coflows, variant, ep_mode)

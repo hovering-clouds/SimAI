@@ -80,26 +80,17 @@ class LightweightAnalyzer:
 
 
 class OneFOneBAnalyzer:
-    """1F1B 分析器 — 路由 + 1F1B compute_order。
+    """1F1B 分析器 — default 路由 + 1F1B compute_order（静态模式）。
 
-    与 DefaultAnalyzer 类似：从 workload 的 Job 中推导 PP 映射，
-    同时做 BFS 路由和 1F1B compute_order。
+    假设 workload.jobs 已完整（非 dynamic 场景），直接从中推导 PP 映射。
     """
 
-    def __init__(
-        self,
-        topology: NetworkTopology,
-        jobs_by_id: dict[int, object] | None = None,
-    ):
+    def __init__(self, topology: NetworkTopology):
         """
         Args:
             topology: 网络拓扑（用于 BFS 路由）。
         """
         self.topology = topology
-        # DynamicExecutor analyzes an injected mini-workload whose Job list is
-        # intentionally empty. Retain the original Jobs so 1F1B can recover
-        # PP stage placement before constructing its compute order.
-        self.jobs_by_id = jobs_by_id
 
     def analyze(self, workload: P2PWorkload) -> DefaultAnalysisResult:
         """构建路由表 + 1F1B compute_order。
@@ -110,15 +101,6 @@ class OneFOneBAnalyzer:
         Returns:
             DefaultAnalysisResult: 含路由表和 1F1B compute_order。
         """
-        if self.jobs_by_id is not None:
-            job_ids = {task.job_id for task in workload.tasks}
-            missing = sorted(job_ids - self.jobs_by_id.keys())
-            if missing:
-                raise ValueError(
-                    f"Dynamic 1F1B analysis lacks jobs for task job IDs: {missing}"
-                )
-            workload.jobs = [self.jobs_by_id[job_id] for job_id in sorted(job_ids)]
-
         # 从 workload 的 job 推导 node_to_stage 映射
         node_to_stage: dict[int, int] = {}
         pp = 1
@@ -142,3 +124,26 @@ class OneFOneBAnalyzer:
             route_table=route_table,
             execution_plan=execution_plan,
         )
+
+
+class DynamicOneFOneBAnalyzer(OneFOneBAnalyzer):
+    """1F1B 分析器 — 专用于 DynamicExecutor 场景。
+
+    DynamicExecutor 展开的 mini workload 中 jobs 为空，
+    通过 jobs_by_id 注册表还原后委托父类分析。
+    """
+
+    def __init__(self, topology: NetworkTopology,
+                 jobs_by_id: dict[int, object]):
+        super().__init__(topology)
+        self.jobs_by_id = jobs_by_id
+
+    def analyze(self, workload: P2PWorkload) -> DefaultAnalysisResult:
+        job_ids = {task.job_id for task in workload.tasks}
+        missing = sorted(job_ids - self.jobs_by_id.keys())
+        if missing:
+            raise ValueError(
+                f"Dynamic 1F1B analysis lacks jobs for task job IDs: {missing}"
+            )
+        workload.jobs = [self.jobs_by_id[job_id] for job_id in sorted(job_ids)]
+        return super().analyze(workload)
