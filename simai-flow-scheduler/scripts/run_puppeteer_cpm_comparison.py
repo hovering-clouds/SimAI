@@ -40,8 +40,9 @@ _CFG = {
         "dp": 3,  # override DP beyond header for more traffic
     },
     "1f1b": {
-        "aicb": "inputs/aicb-workload/A100-gpt_7B_ws4_pp2-world_size4-tp2-pp2-ep1-gbs32-mbs4-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
-        "topo": "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_A100",
+        "aicb": "inputs/aicb-workload/A100-gpt_13B_ws16_pp4-world_size16-tp4-pp4-ep1-gbs16-mbs2-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
+        "topo": "inputs/topologies/AlibabaHPN_32g_8gps_DualToR_DualPlane_200Gbps_A100",
+        "dp": 2,  # tp=4 pp=4 dp=2 → 32 GPUs (fits AlibabaHPN_32g)
     },
 }
 DEFAULT_SERIALIZER = "cpp"
@@ -473,11 +474,13 @@ def main():
     parser = argparse.ArgumentParser(
         description="Puppeteer CPM comparison: verify static vs actual critical path")
     parser.add_argument("--mode", choices=["cpp", "1f1b"], default="cpp",
-                        help="1F1B uses pp=2 workload + AlibabaHPN topology")
+                        help="Compute-order serializer: cpp (GPipe-style) or 1f1b")
     parser.add_argument("--aicb", default=None,
                         help="Override AICB workload file")
     parser.add_argument("--topo", default=None,
                         help="Override topology file")
+    parser.add_argument("--dp", type=int, default=None,
+                        help="Override data-parallel degree")
     parser.add_argument("--output", "-o", default=None,
                         help="Override output directory")
     args = parser.parse_args()
@@ -497,7 +500,7 @@ def main():
     ap = AicbParser()
     header, items = ap.parse(aicb_file)
     tp, pp, ep = header.tp, header.pp, header.ep
-    dp = cfg.get("dp") or (header.all_gpus // (tp * pp * ep))
+    dp = args.dp or cfg.get("dp") or (header.all_gpus // (tp * pp * ep))
     total_gpus = tp * dp * pp * ep
     print(f"  model: {os.path.basename(aicb_file)}")
     print(f"  tp={tp} dp={dp} pp={pp} ep={ep}  gpus={total_gpus}")
