@@ -60,8 +60,17 @@ def _label(tid: int, timing: dict, task_meta: dict) -> str:
         return f"flow_{tid}"
 
 
-def export_trace(result_path: str, meta_path: str | None, output_path: str) -> int:
-    """Write a Chrome Trace for a dynamic result and return its event count."""
+def export_trace(result_path: str, meta_path: str | None, output_path: str,
+                 min_dur_us: int = 0) -> int:
+    """Write a Chrome Trace for a dynamic result and return its event count.
+
+    Args:
+        result_path: Path to execution_result.json.
+        meta_path: Path to task_meta.json, or None.
+        output_path: Output path for trace.json.
+        min_dur_us: Skip events with duration <= this value (e.g. 1 to filter
+                    zero-duration tasks that clutter the visualisation).
+    """
 
     if not os.path.exists(result_path):
         raise FileNotFoundError(f"Execution result not found: {result_path}")
@@ -79,12 +88,15 @@ def export_trace(result_path: str, meta_path: str | None, output_path: str) -> i
     events = []
     for tid_str, timing in data["per_task"].items():
         tid = int(tid_str)
+        dur = max(timing["end_time_us"] - timing["start_time_us"], 1)
+        if dur <= min_dur_us:
+            continue
         events.append({
             "name": _label(tid, timing, task_meta),
             "cat": timing["task_type"],
             "ph": "X",
             "ts": timing["start_time_us"],
-            "dur": max(timing["end_time_us"] - timing["start_time_us"], 1),
+            "dur": dur,
             "pid": 0,
             "tid": timing["node"],
             "args": {"task_id": tid, **task_meta.get(tid, {})},
