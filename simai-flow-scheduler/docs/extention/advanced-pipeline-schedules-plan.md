@@ -1,5 +1,13 @@
 # 高级流水线调度阶段性实施计划
 
+> 历史记录：本文记录早期 serializer/overlay 阶段。自 2026-07-23 起，三种策略已按独立设计稿
+> 迁移到 strategy-specific direct workload builder；当前状态以
+> [`interleaved-1f1b-pipeline-schedule-design.md`](./interleaved-1f1b-pipeline-schedule-design.md)、
+> [`zero-bubble-pipeline-schedule-design.md`](./zero-bubble-pipeline-schedule-design.md) 和
+> [`bidirectional-pipeline-schedule-design.md`](./bidirectional-pipeline-schedule-design.md) 为准。
+> Default/Hermod/Puppeteer 与既有实验入口均保持扩展前状态；高级流水线只通过独立 analyzer
+> 和三个 `run_e2e_*` 脚本验证。
+
 ## 1. 目标与实现边界
 
 本轮在不修改 `Task`、`P2PWorkload`、workload schema 和 executor 资源模型的前提下，

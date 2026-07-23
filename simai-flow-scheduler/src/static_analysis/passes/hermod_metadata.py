@@ -8,9 +8,8 @@ import json
 from pathlib import Path
 
 from ...workload_generator.aicb_parser import AicbHeader, AicbWorkItem
-from ...workload_generator.rank_grouper import RankGrouper
 from .hermod_priority import classify_coflow_type, HermodCoflowType
-from ...workload_format.schema import P2PWorkload, Phase
+from ...workload_format.schema import P2PWorkload
 
 
 @dataclass(frozen=True)
@@ -104,12 +103,7 @@ class HermodAicbMetadataAdapter:
         return lids, operations
 
     @staticmethod
-    def _compute_coflow_id(
-        task,
-        *,
-        split_pp_by_layer: bool = False,
-        pp_direction: str | None = None,
-    ) -> str | None:
+    def _compute_coflow_id(task) -> str | None:
         """Synthesise a stable coflow identifier from existing Task fields.
 
         Used as an opaque grouping key by HermodPriorityAnalysis.  No code
@@ -118,23 +112,9 @@ class HermodAicbMetadataAdapter:
         ct = classify_coflow_type(task.comm_type)
         if ct is None:
             return None
-        suffix = ""
-        if split_pp_by_layer and ct == HermodCoflowType.PP:
-            # A virtual pipeline has one PP wave per chunk boundary.  Keeping
-            # different boundary layers in one coflow would mix LIDs and make
-            # the Hermod priority record internally inconsistent.
-            suffix = f":l{task.layer_id}"
-        if pp_direction is not None and ct == HermodCoflowType.PP:
-            suffix += f":p{pp_direction}"
-        return f"j{task.job_id}:i{task.iteration}:{task.phase.value}:{ct.value}{suffix}"
+        return f"j{task.job_id}:i{task.iteration}:{task.phase.value}:{ct.value}"
 
-    def apply(
-        self,
-        workload: P2PWorkload,
-        *,
-        split_pp_by_layer: bool = False,
-        split_pp_by_direction: bool = False,
-    ) -> dict[int, HermodMetadataRecord]:
+    def apply(self, workload: P2PWorkload) -> dict[int, HermodMetadataRecord]:
         records: dict[int, HermodMetadataRecord] = {}
         layer_task_ids = [
             task.layer_id for task in workload.tasks
@@ -144,15 +124,8 @@ class HermodAicbMetadataAdapter:
             raise ValueError("AICB workload contains no GA-layer tasks for Hermod")
         transformer_lids, operations = self._transformer_lids(workload)
         last_lid = max(transformer_lids.values(), default=None)
-        pp_directions = (
-            self._pp_directions(workload) if split_pp_by_direction else {}
-        )
         for task in workload.get_flow_tasks():
-            coflow_id = self._compute_coflow_id(
-                task,
-                split_pp_by_layer=split_pp_by_layer,
-                pp_direction=pp_directions.get(task.task_id),
-            )
+            coflow_id = self._compute_coflow_id(task)
             if coflow_id is None:
                 continue
             coflow_type = classify_coflow_type(task.comm_type)
@@ -197,53 +170,6 @@ class HermodAicbMetadataAdapter:
                 mapping_rule=mapping_rule,
             )
         return records
-
-    @staticmethod
-    def _pp_directions(workload: P2PWorkload) -> dict[int, str]:
-        """Infer logical pipeline direction from Job stage layout and phase.
-
-        Rank numbers are intentionally ignored: non-contiguous/cyclic
-        placements still use the explicit ``assigned_nodes`` order.
-        """
-        node_to_stage_by_job: dict[int, dict[int, int]] = {}
-        for job in workload.jobs:
-            grouper = RankGrouper(job.assigned_nodes, job.parallelism)
-            stage_size = grouper.dp * grouper.ep * grouper.tp
-            node_to_stage_by_job[job.job_id] = {
-                node: index // stage_size
-                for index, node in enumerate(grouper.nodes)
-            }
-
-        result: dict[int, str] = {}
-        for task in workload.get_flow_tasks():
-            if classify_coflow_type(task.comm_type) != HermodCoflowType.PP:
-                continue
-            node_to_stage = node_to_stage_by_job.get(task.job_id)
-            if node_to_stage is None:
-                raise ValueError(
-                    f"Hermod bidirectional PP metadata lacks Job {task.job_id}"
-                )
-            if task.src not in node_to_stage or task.dst not in node_to_stage:
-                raise ValueError(
-                    f"PP task {task.task_id} endpoint is outside Job {task.job_id} placement"
-                )
-            src_stage = node_to_stage[task.src]
-            dst_stage = node_to_stage[task.dst]
-            if abs(src_stage - dst_stage) != 1:
-                raise ValueError(
-                    f"PP task {task.task_id} is not between adjacent physical stages: "
-                    f"{src_stage}->{dst_stage}"
-                )
-            physical_step = 1 if dst_stage > src_stage else -1
-            if task.phase is Phase.FORWARD:
-                result[task.task_id] = "down" if physical_step > 0 else "up"
-            elif task.phase is Phase.BACKWARD_INPUT:
-                result[task.task_id] = "down" if physical_step < 0 else "up"
-            else:
-                raise ValueError(
-                    f"PP task {task.task_id} has unsupported phase {task.phase.value}"
-                )
-        return result
 
     @staticmethod
     def write_sidecar(records: dict[int, HermodMetadataRecord] | list[HermodMetadataRecord],

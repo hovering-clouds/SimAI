@@ -8,7 +8,8 @@ to the common :class:`Task` schema.
 from __future__ import annotations
 
 from abc import abstractmethod
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 import heapq
 
 from .task_serializer import (
@@ -437,6 +438,7 @@ class InterleavedOneFOneBSerializer(AdvancedPipelineSerializer):
         interleave_group_size: int | None = None,
         pp: int | None = None,
         node_to_stage: dict[int, int] | None = None,
+        expansion_task_info: Mapping[int, object] | None = None,
     ):
         super().__init__(pp, node_to_stage)
         if virtual_pipeline_size < 2:
@@ -449,8 +451,30 @@ class InterleavedOneFOneBSerializer(AdvancedPipelineSerializer):
             )
         self.virtual_pipeline_size = virtual_pipeline_size
         self.interleave_group_size = interleave_group_size
+        self.expansion_task_info = expansion_task_info or {}
 
     def _chunk_by_layer(self, tasks: list[Task], ga: int) -> dict[int, int]:
+        sidecar_mapping: dict[int, int] = {}
+        for task in tasks:
+            info = self.expansion_task_info.get(task.task_id)
+            chunk_id = getattr(info, "model_chunk_id", None)
+            if chunk_id is None or not 0 <= task.iteration < ga:
+                continue
+            previous = sidecar_mapping.setdefault(task.layer_id, chunk_id)
+            if previous != chunk_id:
+                raise ValueError(
+                    f"Layer {task.layer_id} maps to multiple interleaved chunks"
+                )
+        if sidecar_mapping:
+            chunks = set(sidecar_mapping.values())
+            expected = set(range(self.virtual_pipeline_size))
+            if chunks != expected:
+                raise ValueError(
+                    "Interleaved expansion sidecar chunk mismatch: "
+                    f"expected={sorted(expected)}, actual={sorted(chunks)}"
+                )
+            return sidecar_mapping
+
         layers = sorted({
             task.layer_id
             for task in tasks
@@ -524,6 +548,46 @@ class ZeroBubbleSerializer(AdvancedPipelineSerializer):
 
     schedule_name = "zero_bubble"
 
+    def __init__(
+        self,
+        pp: int | None = None,
+        node_to_stage: dict[int, int] | None = None,
+        expansion_task_info: Mapping[int, object] | None = None,
+        max_inflight_microbatches: int | None = None,
+    ):
+        super().__init__(pp=pp, node_to_stage=node_to_stage)
+        if max_inflight_microbatches is not None and max_inflight_microbatches < 1:
+            raise ValueError("max_inflight_microbatches must be >= 1")
+        self.expansion_task_info = (
+            expansion_task_info if expansion_task_info is not None else {}
+        )
+        self.max_inflight_microbatches = max_inflight_microbatches
+
+    def serialize(self, workload: P2PWorkload) -> ExecutionPlan:
+        plan = super().serialize(workload)
+        if isinstance(self.expansion_task_info, dict):
+            for task_id, schedule_info in self.task_info.items():
+                expansion_info = self.expansion_task_info.get(task_id)
+                if (
+                    expansion_info is None
+                    or not hasattr(expansion_info, "preferred_slot")
+                    or not hasattr(expansion_info, "final_local_order")
+                ):
+                    continue
+                self.expansion_task_info[task_id] = replace(
+                    expansion_info,
+                    preferred_slot=schedule_info.schedule_slot,
+                    final_local_order=schedule_info.local_order,
+                )
+        return plan
+
+    def _operation(self, task: Task) -> str:
+        info = self.expansion_task_info.get(task.task_id)
+        role = getattr(info, "task_role", None)
+        if role in {"F", "B", "W"}:
+            return role
+        return super()._operation(task)
+
     def _schedule_tokens(
         self,
         ga: int,
@@ -533,6 +597,8 @@ class ZeroBubbleSerializer(AdvancedPipelineSerializer):
         if ga == 0:
             return []
         warmup = min(ga, max(1, layout.pp - stage_id))
+        if self.max_inflight_microbatches is not None:
+            warmup = min(warmup, self.max_inflight_microbatches)
         result = [_ScheduleToken("F", microbatch_id) for microbatch_id in range(warmup)]
 
         steady_count = ga - warmup
@@ -550,12 +616,53 @@ class ZeroBubbleSerializer(AdvancedPipelineSerializer):
 class BidirectionalPipelineSerializer(AdvancedPipelineSerializer):
     """DualPipe-style bidirectional local compute sequence.
 
-    This serializer models the two-direction GPU order.  Endpoint rewriting
-    remains outside a ``TaskSerializer`` and is supplied non-invasively by
-    ``BidirectionalPipelineWorkloadOverlay`` in the static/dynamic runners.
+    This serializer models the two-direction GPU order and consumes endpoint
+    direction metadata produced by ``BidirectionalPipelineWorkloadBuilder``.
     """
 
     schedule_name = "bidirectional"
+
+    def __init__(
+        self,
+        pp: int | None = None,
+        node_to_stage: dict[int, int] | None = None,
+        expansion_task_info: Mapping[int, object] | None = None,
+    ):
+        super().__init__(pp=pp, node_to_stage=node_to_stage)
+        self.expansion_task_info = (
+            expansion_task_info if expansion_task_info is not None else {}
+        )
+
+    def _record_task(
+        self,
+        task: Task,
+        layout: _JobLayout,
+        stage_id: int,
+        token: _ScheduleToken | None,
+        operation: str,
+        slot: int,
+    ) -> None:
+        expansion_info = self.expansion_task_info.get(task.task_id)
+        if token is not None and expansion_info is not None:
+            microbatch_id = getattr(expansion_info, "microbatch_id", None)
+            if microbatch_id != token.microbatch_id:
+                raise ValueError(
+                    "Bidirectional expansion/serializer microbatch mismatch "
+                    f"for task {task.task_id}: expansion={microbatch_id}, "
+                    f"serializer={token.microbatch_id}"
+                )
+            token = replace(
+                token,
+                pipeline_id=getattr(
+                    expansion_info, "pipeline_id", token.pipeline_id,
+                ),
+                direction=getattr(
+                    expansion_info, "direction", token.direction,
+                ),
+            )
+        super()._record_task(
+            task, layout, stage_id, token, operation, slot,
+        )
 
     def _schedule_tokens(
         self,
@@ -695,6 +802,7 @@ def build_pipeline_serializer(
     *,
     virtual_pipeline_size: int = 2,
     interleave_group_size: int | None = None,
+    expansion_task_info: Mapping[int, object] | None = None,
 ) -> TaskSerializer:
     """Create a registered serializer without changing the common task IR."""
     if mode == "gpipe":
@@ -719,11 +827,20 @@ def build_pipeline_serializer(
             interleave_group_size=interleave_group_size,
             pp=pp,
             node_to_stage=node_to_stage,
+            expansion_task_info=expansion_task_info,
         )
     if mode == "zero_bubble":
-        return ZeroBubbleSerializer(pp=pp, node_to_stage=node_to_stage)
+        return ZeroBubbleSerializer(
+            pp=pp,
+            node_to_stage=node_to_stage,
+            expansion_task_info=expansion_task_info,
+        )
     if mode == "bidirectional":
-        return BidirectionalPipelineSerializer(pp=pp, node_to_stage=node_to_stage)
+        return BidirectionalPipelineSerializer(
+            pp=pp,
+            node_to_stage=node_to_stage,
+            expansion_task_info=expansion_task_info,
+        )
     raise ValueError(
         f"Unsupported pipeline mode {mode!r}; expected one of {sorted(PIPELINE_NAMES)}"
     )

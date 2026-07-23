@@ -12,10 +12,6 @@ from src.static_analysis.passes.task_serializer import (
     CppReferenceSerializer,
     OneFOneBSerializer,
 )
-from src.static_analysis.passes.topology_loader import NetworkTopology
-from src.static_analysis.strategies.default_strategy import PipelineAnalyzer
-from src.static_analysis.strategies.hermod_strategy import HermodAnalyzer
-from src.static_analysis.strategies.puppeteer_strategy import PuppeteerAnalyzer
 from src.workload_format.schema import (
     Job,
     Meta,
@@ -246,41 +242,3 @@ def test_factory_preserves_existing_modes_and_registers_new_modes():
     )
     with pytest.raises(ValueError, match="Unsupported pipeline mode"):
         build_pipeline_serializer("unknown", workload)
-
-
-@pytest.mark.parametrize(
-    "mode",
-    ["interleaved_1f1b", "zero_bubble", "bidirectional"],
-)
-def test_analyzers_share_advanced_pipeline_compute_order(mode):
-    workload = _make_pipeline_workload(pp=4, ga=8, layers=4)
-    topology = NetworkTopology()
-
-    default_analyzer = PipelineAnalyzer(
-        topology,
-        mode,
-        pipeline_vpp=2,
-        interleave_group_size=2,
-    )
-    default = default_analyzer.analyze(workload)
-    hermod_analyzer = HermodAnalyzer(
-        topology,
-        pipeline_mode=mode,
-        pipeline_vpp=2,
-        interleave_group_size=2,
-    )
-    hermod = hermod_analyzer.analyze(workload, hermod_records={})
-    puppeteer_analyzer = PuppeteerAnalyzer(
-        topology,
-        serializer=mode,
-        pipeline_vpp=2,
-        interleave_group_size=2,
-    )
-    puppeteer = puppeteer_analyzer.analyze(workload)
-
-    assert default.execution_plan.compute_order == hermod.execution_plan.compute_order
-    assert default.execution_plan.compute_order == puppeteer.execution_plan.compute_order
-    assert default_analyzer.pipeline_task_info.keys() \
-        == hermod_analyzer.pipeline_task_info.keys()
-    assert default_analyzer.pipeline_task_info.keys() \
-        == puppeteer_analyzer.pipeline_task_info.keys()
