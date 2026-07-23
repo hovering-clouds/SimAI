@@ -614,13 +614,14 @@ class ZeroBubbleSerializer(AdvancedPipelineSerializer):
 
 
 class BidirectionalPipelineSerializer(AdvancedPipelineSerializer):
-    """DualPipe-style bidirectional local compute sequence.
+    """Basic Chimera schedule formed by merging two mirrored 1F1B pipelines.
 
-    This serializer models the two-direction GPU order and consumes endpoint
-    direction metadata produced by ``BidirectionalPipelineWorkloadBuilder``.
+    Each direction owns half of the microbatches.  Its logical stages use the
+    normal 1F1B warmup/steady/cooldown sequence; the two local sequences are
+    then alternated, starting with the direction entering from the nearer end.
     """
 
-    schedule_name = "bidirectional"
+    schedule_name = "chimera"
 
     def __init__(
         self,
@@ -674,104 +675,75 @@ class BidirectionalPipelineSerializer(AdvancedPipelineSerializer):
             raise ValueError(f"bidirectional requires even pp, got {layout.pp}")
         if ga % 2:
             raise ValueError(f"bidirectional requires even microbatch count, got {ga}")
-        if ga < 2 * layout.pp:
-            raise ValueError(
-                "bidirectional requires at least 2 * pp microbatches: "
-                f"ga={ga}, pp={layout.pp}"
-            )
-
         half_ga = ga // 2
         microbatches = {
             0: list(range(half_ga)),
             1: list(range(half_ga, ga)),
         }
-        forward_cursor = [0, 0]
-        backward_cursor = [0, 0]
-        pending_weights: list[_ScheduleToken] = []
+        sequences = {
+            direction: self._one_f_one_b_sequence(
+                microbatches[direction],
+                (
+                    stage_id
+                    if direction == 0
+                    else layout.pp - 1 - stage_id
+                ),
+                layout.pp,
+                direction,
+            )
+            for direction in (0, 1)
+        }
+
+        # The pipeline entering from the nearer physical end receives the
+        # first preference. DAG legalization remains authoritative if actual
+        # communication readiness differs from this unit-time Chimera merge.
+        directions = (
+            (0, 1)
+            if stage_id < layout.pp // 2
+            else (1, 0)
+        )
         result: list[_ScheduleToken] = []
-        second_half = stage_id >= layout.pp // 2
-
-        def direction_for_phase(phase: int) -> int:
-            return phase ^ int(second_half)
-
-        def emit_forward(phase: int) -> None:
-            direction = direction_for_phase(phase)
-            index = forward_cursor[direction]
-            if index >= half_ga:
-                return
-            microbatch_id = microbatches[direction][index]
-            forward_cursor[direction] += 1
-            result.append(self._direction_token("F", microbatch_id, direction))
-
-        def emit_backward(phase: int, deferred_weight: bool = False) -> None:
-            direction = direction_for_phase(phase)
-            index = backward_cursor[direction]
-            if index >= half_ga:
-                return
-            microbatch_id = microbatches[direction][index]
-            backward_cursor[direction] += 1
-            if deferred_weight:
-                result.append(self._direction_token("B", microbatch_id, direction))
-                pending_weights.append(
-                    self._direction_token("W", microbatch_id, direction)
-                )
-            else:
-                result.append(self._direction_token("BW", microbatch_id, direction))
-
-        def emit_weight() -> None:
-            if pending_weights:
-                result.append(pending_weights.pop(0))
-
-        num_half_ranks = layout.pp // 2
-        half_rank = min(stage_id, layout.pp - 1 - stage_id)
-
-        # DualPipe's eight local scheduling regions.  Communication overlap is
-        # intentionally flattened because ExecutionPlan is a compute-only order.
-        for _ in range((num_half_ranks - half_rank - 1) * 2):
-            emit_forward(0)
-        for _ in range(half_rank + 1):
-            emit_forward(0)
-            emit_forward(1)
-        for _ in range(num_half_ranks - half_rank - 1):
-            emit_backward(1, deferred_weight=True)
-            emit_weight()
-            emit_forward(1)
-        for _ in range(half_ga - layout.pp + half_rank + 1):
-            emit_forward(0)
-            emit_backward(1)
-            emit_forward(1)
-            emit_backward(0)
-        for _ in range(num_half_ranks - half_rank - 1):
-            emit_backward(1)
-            emit_forward(1)
-            emit_backward(0)
-
-        defer_weight = False
-        step_six = half_rank + 1
-        for index in range(step_six):
-            if index == step_six // 2 and half_rank % 2 == 1:
-                defer_weight = True
-            emit_backward(1, deferred_weight=defer_weight)
-            if index == step_six // 2 and half_rank % 2 == 0:
-                defer_weight = True
-            emit_backward(0, deferred_weight=defer_weight)
-        for _ in range(num_half_ranks - half_rank - 1):
-            emit_weight()
-            emit_backward(0, deferred_weight=True)
-        for _ in range(half_rank + 1):
-            emit_weight()
-
-        # Formula guards above make these loops empty for the canonical case;
-        # they keep every task represented if a future DualPipe variant changes
-        # one of the region counts.
-        for direction in (0, 1):
-            while forward_cursor[direction] < half_ga:
-                emit_forward(direction ^ int(second_half))
-            while backward_cursor[direction] < half_ga:
-                emit_backward(direction ^ int(second_half))
-        while pending_weights:
-            emit_weight()
+        cursor = [0, 0]
+        while any(cursor[d] < len(sequences[d]) for d in directions):
+            for direction in directions:
+                if cursor[direction] >= len(sequences[direction]):
+                    continue
+                result.append(sequences[direction][cursor[direction]])
+                cursor[direction] += 1
         return result
+
+    @classmethod
+    def _one_f_one_b_sequence(
+        cls,
+        microbatches: list[int],
+        logical_stage: int,
+        pp: int,
+        direction: int,
+    ) -> list[_ScheduleToken]:
+        """Return one pipeline's ordinary synchronous 1F1B local sequence."""
+        count = len(microbatches)
+        warmup = min(max(1, pp - logical_stage), count)
+        sequence = [
+            cls._direction_token("F", microbatch_id, direction)
+            for microbatch_id in microbatches[:warmup]
+        ]
+        for index in range(count - warmup):
+            sequence.append(
+                cls._direction_token(
+                    "BW", microbatches[index], direction,
+                )
+            )
+            sequence.append(
+                cls._direction_token(
+                    "F", microbatches[warmup + index], direction,
+                )
+            )
+        placed_backward = count - warmup
+        sequence.extend(
+            cls._direction_token("BW", microbatch_id, direction)
+            for microbatch_id in microbatches[placed_backward:]
+        )
+        return sequence
 
     @staticmethod
     def _direction_token(

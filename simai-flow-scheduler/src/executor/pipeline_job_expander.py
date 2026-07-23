@@ -32,12 +32,14 @@ class PipelineJobExpander(JobExpander):
         *args,
         pipeline_mode: str,
         pipeline_vpp: int = 2,
+        pipeline_gradient_sync_bytes: int | None = None,
         pipeline_task_info: dict[int, object] | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.pipeline_mode = pipeline_mode
         self.pipeline_vpp = pipeline_vpp
+        self.pipeline_gradient_sync_bytes = pipeline_gradient_sync_bytes
         self.pipeline_task_info = (
             pipeline_task_info if pipeline_task_info is not None else {}
         )
@@ -64,7 +66,10 @@ class PipelineJobExpander(JobExpander):
         elif self.pipeline_mode == "zero_bubble":
             builder = ZeroBubblePipelineWorkloadBuilder(local_info)
         else:
-            builder = BidirectionalPipelineWorkloadBuilder(local_info)
+            builder = BidirectionalPipelineWorkloadBuilder(
+                local_info,
+                gradient_sync_bytes=self.pipeline_gradient_sync_bytes,
+            )
         workload = builder.build_from_aicb(header, items, job)
 
         offset = self._allocator.next_id

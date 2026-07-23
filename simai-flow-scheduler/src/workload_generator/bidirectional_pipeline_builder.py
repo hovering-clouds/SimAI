@@ -1,8 +1,10 @@
-"""Direct two-direction pipeline expansion.
+"""Direct two-direction Chimera pipeline expansion.
 
 Half of the microbatches traverse physical stages in ascending order and half
-in descending order. Gradient traffic follows the exact reverse path. The
-common workload builder and task schema are not modified.
+in descending order. Gradient traffic follows the exact reverse path. Each
+physical stage owns one shard from each mirrored model replica, whose
+gradients are synchronized before the optimizer. The common workload builder
+and task schema are not modified.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from .zero_semantics import is_zero_workload
 
 @dataclass(frozen=True)
 class BidirectionalPipelineTaskInfo:
-    """Bidirectional-only metadata kept outside the common Task schema."""
+    """Chimera-only metadata kept outside the common Task schema."""
 
     task_id: int
     job_id: int
@@ -29,6 +31,9 @@ class BidirectionalPipelineTaskInfo:
     direction: str
     physical_stage_id: int
     logical_stage_id: int
+    module_replica_id: int = -1
+    model_shard_id: int = -1
+    mirror_physical_stage_id: int | None = None
     logical_boundary_id: int | None = None
     peer_physical_stage_id: int | None = None
     peer_logical_stage_id: int | None = None
@@ -52,14 +57,18 @@ class BidirectionalPPFlowResult:
 
 
 class BidirectionalPipelineWorkloadBuilder(WorkloadBuilder):
-    """Generate opposing PP endpoints during the initial AICB expansion."""
+    """Generate the two mirrored model replicas used by basic Chimera."""
 
     def __init__(
         self,
         task_info: dict[int, BidirectionalPipelineTaskInfo] | None = None,
+        gradient_sync_bytes: int | None = None,
     ):
         super().__init__()
         self.task_info = task_info if task_info is not None else {}
+        if gradient_sync_bytes is not None and gradient_sync_bytes <= 0:
+            raise ValueError("gradient_sync_bytes must be positive when provided")
+        self.gradient_sync_bytes = gradient_sync_bytes
         self._active_job: Job | None = None
         self._active_grouper: RankGrouper | None = None
         self._active_ga = 0
@@ -85,9 +94,17 @@ class BidirectionalPipelineWorkloadBuilder(WorkloadBuilder):
         self._active_job = job
         self._active_grouper = grouper
         self._active_ga = aicb_header.ga
+        sync_bytes = self._resolve_gradient_sync_bytes(aicb_items)
 
         workload = super().build_from_aicb(
             aicb_header, aicb_items, job, comm_algo,
+        )
+        self._append_chimera_gradient_sync(
+            workload,
+            grouper,
+            aicb_header,
+            sync_bytes,
+            comm_algo,
         )
         self._record_compute_info(workload)
         return workload
@@ -217,6 +234,11 @@ class BidirectionalPipelineWorkloadBuilder(WorkloadBuilder):
                 direction=boundary.direction,
                 physical_stage_id=boundary.source_stage,
                 logical_stage_id=logical_stage,
+                module_replica_id=boundary.pipeline_id,
+                model_shard_id=logical_stage,
+                mirror_physical_stage_id=(
+                    grouper.pp - 1 - boundary.source_stage
+                ),
                 logical_boundary_id=boundary.logical_boundary,
                 peer_physical_stage_id=boundary.destination_stage,
                 peer_logical_stage_id=peer_logical_stage,
@@ -266,7 +288,160 @@ class BidirectionalPipelineWorkloadBuilder(WorkloadBuilder):
                 direction=direction,
                 physical_stage_id=physical_stage,
                 logical_stage_id=logical_stage,
+                module_replica_id=pipeline_id,
+                model_shard_id=logical_stage,
+                mirror_physical_stage_id=grouper.pp - 1 - physical_stage,
             )
+
+    def _resolve_gradient_sync_bytes(
+        self,
+        aicb_items: list[AicbWorkItem],
+    ) -> int:
+        """Resolve per-stage gradient bytes without guessing from PP tensors."""
+        if self.gradient_sync_bytes is not None:
+            return self.gradient_sync_bytes
+        explicit_rows = [
+            item.dp_comm_size
+            for item in aicb_items
+            if item.name == "grad_param_comm" and item.dp_comm_size > 0
+        ]
+        if explicit_rows:
+            return sum(explicit_rows)
+        raise ValueError(
+            "Chimera requires per-stage gradient synchronization bytes. "
+            "Pass gradient_sync_bytes or provide a positive "
+            "grad_param_comm.dp_comm_size AICB row."
+        )
+
+    def _append_chimera_gradient_sync(
+        self,
+        workload: P2PWorkload,
+        grouper: RankGrouper,
+        aicb_header: AicbHeader,
+        sync_bytes: int,
+        comm_algo: str,
+    ) -> None:
+        """Synchronize mirrored stage replicas after their local W terminals."""
+        task_id = max((task.task_id for task in workload.tasks), default=-1) + 1
+        half_ga = aicb_header.ga // 2
+        node_to_stage = {
+            node: stage
+            for stage in range(grouper.pp)
+            for dp_idx in range(grouper.dp)
+            for ep_idx in range(grouper.ep)
+            for tp_idx in range(grouper.tp)
+            for node in [
+                grouper.get_pp_rank(stage, dp_idx, ep_idx, tp_idx)
+            ]
+        }
+
+        def local_terminals(rank: int, replica_id: int) -> list[int]:
+            iteration_range = (
+                range(half_ga)
+                if replica_id == 0
+                else range(half_ga, aicb_header.ga)
+            )
+            iterations = set(iteration_range)
+            dp_completions = [
+                task.task_id
+                for task in workload.tasks
+                if task.is_flow()
+                and task.phase is Phase.BACKWARD_WEIGHT
+                and task.iteration in iterations
+                and task.dst == rank
+                and task.comm_type in {
+                    CommType.DP_ALLREDUCE,
+                    CommType.DP_ALLGATHER,
+                    CommType.DP_REDUCESCATTER,
+                    CommType.DP_ALLTOALL,
+                    CommType.DP_BROADCAST,
+                }
+            ]
+            if dp_completions:
+                return dp_completions
+            return [
+                task.task_id
+                for task in workload.tasks
+                if task.is_compute()
+                and task.node == rank
+                and task.phase is Phase.BACKWARD_WEIGHT
+                and task.iteration in iterations
+            ]
+
+        sync_tasks = []
+        for model_shard in range(grouper.pp):
+            mirror_stage = grouper.pp - 1 - model_shard
+            for ep_idx in range(grouper.ep):
+                for tp_idx in range(grouper.tp):
+                    ranks = [
+                        grouper.get_pp_rank(
+                            model_shard, dp_idx, ep_idx, tp_idx,
+                        )
+                        for dp_idx in range(grouper.dp)
+                    ] + [
+                        grouper.get_pp_rank(
+                            mirror_stage, dp_idx, ep_idx, tp_idx,
+                        )
+                        for dp_idx in range(grouper.dp)
+                    ]
+                    flows = self.expanders["ALLREDUCE"].expand_allreduce(
+                        ranks,
+                        sync_bytes,
+                        comm_algo,
+                        workload.jobs[0].job_id,
+                        task_id,
+                        "dp",
+                    )
+                    task_id += len(flows)
+                    for flow in flows:
+                        flow.phase = Phase.BACKWARD_WEIGHT
+                        flow.layer_id = model_shard
+                        flow.iteration = aicb_header.ga
+                        flow.item_id = -1
+                        if not flow.deps:
+                            source_stage = node_to_stage[flow.src]
+                            replica_id = (
+                                0 if source_stage == model_shard else 1
+                            )
+                            flow.deps.extend(
+                                local_terminals(flow.src, replica_id)
+                            )
+                        sync_tasks.append(flow.to_task())
+                        source_stage = node_to_stage[flow.src]
+                        replica_id = (
+                            0 if source_stage == model_shard else 1
+                        )
+                        self.task_info[flow.task_id] = (
+                            BidirectionalPipelineTaskInfo(
+                                task_id=flow.task_id,
+                                job_id=flow.job_id,
+                                task_role="chimera_gradient_sync",
+                                microbatch_id=-1,
+                                pipeline_id=-1,
+                                direction="sync",
+                                physical_stage_id=source_stage,
+                                logical_stage_id=model_shard,
+                                module_replica_id=replica_id,
+                                model_shard_id=model_shard,
+                                mirror_physical_stage_id=mirror_stage,
+                            )
+                        )
+
+        workload.tasks.extend(sync_tasks)
+        completion_by_rank: dict[int, list[int]] = {}
+        for task in sync_tasks:
+            completion_by_rank.setdefault(task.dst, []).append(task.task_id)
+        for task in workload.tasks:
+            if (
+                task.is_compute()
+                and task.iteration >= aicb_header.ga
+                and task.node in completion_by_rank
+            ):
+                task.deps.extend(
+                    dependency
+                    for dependency in completion_by_rank[task.node]
+                    if dependency not in task.deps
+                )
 
     @staticmethod
     def _validate_shape(pp: int, ga: int, job_id: int) -> None:
@@ -277,11 +452,6 @@ class BidirectionalPipelineWorkloadBuilder(WorkloadBuilder):
         if ga % 2:
             raise ValueError(
                 f"Job {job_id} bidirectional requires even microbatch count, got {ga}"
-            )
-        if ga < 2 * pp:
-            raise ValueError(
-                f"Job {job_id} bidirectional requires at least 2 * pp "
-                f"microbatches: ga={ga}, pp={pp}"
             )
 
     def _require_grouper(self) -> RankGrouper:

@@ -176,6 +176,23 @@ def run_pipeline_e2e_cli(mode: str) -> None:
                 task.comm_type in {CommType.PP_SEND, CommType.PP_RECV}
                 for task in workload.get_flow_tasks()
             ),
+            "chimera_gradient_sync_flow": sum(
+                getattr(
+                    analyzer.expansion_task_info.get(task.task_id),
+                    "task_role",
+                    None,
+                ) == "chimera_gradient_sync"
+                for task in workload.get_flow_tasks()
+            ),
+            "chimera_gradient_sync_network_bytes": sum(
+                task.size_bytes or 0
+                for task in workload.get_flow_tasks()
+                if getattr(
+                    analyzer.expansion_task_info.get(task.task_id),
+                    "task_role",
+                    None,
+                ) == "chimera_gradient_sync"
+            ),
             "expansion_sidecar": len(analyzer.expansion_task_info),
             "schedule_sidecar": len(analyzer.schedule_task_info),
             "completed": len(result.per_task),

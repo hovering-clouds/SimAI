@@ -85,7 +85,7 @@ class ZeroBubblePipelineAnalyzer(_AdvancedPipelineAnalyzer):
 
 
 class BidirectionalPipelineAnalyzer(_AdvancedPipelineAnalyzer):
-    """Isolated analyzer for direct bidirectional workloads."""
+    """Isolated analyzer for the basic two-replica Chimera workload."""
 
     def _build_serializer(self) -> BidirectionalPipelineSerializer:
         return BidirectionalPipelineSerializer(

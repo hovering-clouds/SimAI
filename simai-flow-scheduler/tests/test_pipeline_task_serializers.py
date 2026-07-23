@@ -152,20 +152,19 @@ def test_zero_bubble_splits_input_and_weight_backward():
         assert b_position < w_position
 
 
-def test_bidirectional_uses_dualpipe_regions_and_mirrored_stage_sidecar():
+def test_bidirectional_merges_two_one_f_one_b_chimera_sequences():
     workload = _make_pipeline_workload(pp=4, ga=8, layers=1)
     serializer = BidirectionalPipelineSerializer()
 
     plan = serializer.serialize(workload)
     stage_zero = _operation_groups(serializer, plan, 0)
 
-    assert stage_zero[:9] == [
+    assert stage_zero[:8] == [
         ("F", 0, 0, "down"),
-        ("F", 1, 0, "down"),
-        ("F", 2, 0, "down"),
         ("F", 4, 0, "up"),
-        ("B", 4, 0, "up"),
-        ("W", 4, 0, "up"),
+        ("F", 1, 0, "down"),
+        ("BW", 4, 0, "up"),
+        ("F", 2, 0, "down"),
         ("F", 5, 0, "up"),
         ("F", 3, 0, "down"),
         ("BW", 5, 0, "up"),
@@ -181,7 +180,7 @@ def test_bidirectional_uses_dualpipe_regions_and_mirrored_stage_sidecar():
 
 @pytest.mark.parametrize(
     ("pp", "ga", "message"),
-    [(3, 6, "even pp"), (4, 7, "even microbatch"), (4, 6, "2 \\* pp")],
+    [(3, 6, "even pp"), (4, 7, "even microbatch")],
 )
 def test_bidirectional_rejects_unsupported_shapes(pp, ga, message):
     workload = _make_pipeline_workload(pp=pp, ga=ga, layers=1)

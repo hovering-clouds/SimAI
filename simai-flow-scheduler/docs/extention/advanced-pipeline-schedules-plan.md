@@ -5,6 +5,7 @@
 > [`interleaved-1f1b-pipeline-schedule-design.md`](./interleaved-1f1b-pipeline-schedule-design.md)、
 > [`zero-bubble-pipeline-schedule-design.md`](./zero-bubble-pipeline-schedule-design.md) 和
 > [`bidirectional-pipeline-schedule-design.md`](./bidirectional-pipeline-schedule-design.md) 为准。
+> `bidirectional` 已明确收敛为基础 Chimera；本文残留的 DualPipe 八阶段内容只属于历史方案。
 > Default/Hermod/Puppeteer 与既有实验入口均保持扩展前状态；高级流水线只通过独立 analyzer
 > 和三个 `run_e2e_*` 脚本验证。
 

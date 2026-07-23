@@ -1,4 +1,4 @@
-"""Golden DAG tests for direct bidirectional pipeline expansion."""
+"""Golden DAG tests for direct basic-Chimera pipeline expansion."""
 
 import pytest
 
@@ -58,6 +58,7 @@ def _build(*, pp=4, tp=2, ga=8):
     sidecar = {}
     workload = BidirectionalPipelineWorkloadBuilder(
         sidecar,
+        gradient_sync_bytes=8192,
     ).build_from_aicb(header, items, job)
     return workload, sidecar, nodes
 
@@ -176,6 +177,7 @@ def test_dynamic_direct_builder_preserves_ids_and_directions(tmp_path):
         InferenceProfileStore(),
         pipeline_mode="bidirectional",
         pipeline_task_info=sidecar,
+        pipeline_gradient_sync_bytes=8192,
     )
     info = JobExpansionInfo(job_type="training", trace_src=str(trace))
     first = expander.expand_job(
@@ -196,6 +198,7 @@ def test_dynamic_direct_builder_preserves_ids_and_directions(tmp_path):
         metadata.direction
         for task_id, metadata in sidecar.items()
         if task_id in first_ids
+        and metadata.pipeline_id >= 0
     } == {"down", "up"}
     assert len([
         task for task in first.tasks if task.comm_type is CommType.PP_SEND
@@ -207,9 +210,42 @@ def test_dynamic_direct_builder_preserves_ids_and_directions(tmp_path):
     [
         (3, 6, "even pp"),
         (4, 7, "even microbatch"),
-        (4, 6, r"at least 2 \* pp"),
     ],
 )
 def test_shape_constraints_are_explicit(pp, ga, message):
     with pytest.raises(ValueError, match=message):
         _build(pp=pp, tp=1, ga=ga)
+
+
+def test_chimera_gradient_sync_joins_mirrored_replicas():
+    workload, sidecar, nodes = _build(pp=4, tp=1, ga=4)
+    task_by_id = {task.task_id: task for task in workload.tasks}
+    sync_flows = [
+        task for task in workload.tasks
+        if sidecar.get(task.task_id) is not None
+        and sidecar[task.task_id].task_role == "chimera_gradient_sync"
+    ]
+
+    assert sync_flows
+    shard_zero = [
+        task for task in sync_flows
+        if sidecar[task.task_id].model_shard_id == 0
+    ]
+    assert {(task.src, task.dst) for task in shard_zero} == {
+        (nodes[0], nodes[3]),
+        (nodes[3], nodes[0]),
+    }
+    assert {task.size_bytes for task in shard_zero} == {4096}
+    assert sum(task.size_bytes for task in shard_zero) == 16384
+    assert all(
+        task_by_id[dependency].phase is Phase.BACKWARD_WEIGHT
+        for task in shard_zero
+        for dependency in task.deps
+        if task_by_id[dependency].is_compute()
+    )
+    assert workload.validate() == []
+
+
+def test_chimera_supports_even_microbatch_count_below_pipeline_depth():
+    workload, _, _ = _build(pp=4, tp=1, ga=2)
+    assert workload.validate() == []
