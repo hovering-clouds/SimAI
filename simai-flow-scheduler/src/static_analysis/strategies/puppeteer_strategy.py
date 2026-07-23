@@ -8,7 +8,7 @@ Bootstrap pipeline:
 5. Compute resource dependency / coordination groups
 6. Package into PuppeteerAnalysisResult
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ..passes.puppeteer_coordination import (
     ResourceDependencyTable,
@@ -16,12 +16,10 @@ from ..passes.puppeteer_coordination import (
 )
 from ..passes.routing import GreedyRouteTable, GreedyStrategy, BfsStrategy
 from ..passes.puppeteer_tte import TTEInfo, FlowTiming, compute_tte
+from ..passes.pipeline_task_serializers import PipelineTaskInfo, build_pipeline_serializer
 from ..passes.task_serializer import ExecutionPlan
 from ..passes.topology_loader import NetworkTopology
-from ..passes.task_serializer import OneFOneBSerializer
-from ..passes.task_serializer import CppReferenceSerializer
 from ...workload_format.schema import P2PWorkload
-from ...workload_generator.rank_grouper import RankGrouper
 
 
 @dataclass
@@ -62,12 +60,17 @@ class PuppeteerAnalyzer:
         tte_threshold_us: float = 1000.0,
         recompute_tte: bool = True,
         serializer: str = "cpp",
+        pipeline_vpp: int = 2,
+        interleave_group_size: int | None = None,
     ):
         self.topology = topology
         self.k_paths = k_paths
         self.tte_threshold_us = tte_threshold_us
         self.recompute_tte = recompute_tte
         self.serializer = serializer
+        self.pipeline_vpp = pipeline_vpp
+        self.interleave_group_size = interleave_group_size
+        self.pipeline_task_info: dict[int, PipelineTaskInfo] = {}
 
     def analyze(self, workload: P2PWorkload) -> PuppeteerAnalysisResult:
         """Run the full Puppeteer analysis pipeline.
@@ -79,23 +82,16 @@ class PuppeteerAnalyzer:
             PuppeteerAnalysisResult with all precomputed tables
         """
         # Step 1: Serialize compute order
-        if self.serializer == "1f1b":
-            # Derive node→stage mapping from workload's job config
-            node_to_stage: dict[int, int] = {}
-            pp = 1
-            for job in workload.jobs:
-                grouper = RankGrouper(job.assigned_nodes, job.parallelism)
-                pp = grouper.pp
-                stage_size = grouper.dp * grouper.ep * grouper.tp
-                for stage_id in range(grouper.pp):
-                    for i in range(stage_size):
-                        node = grouper.nodes[stage_id * stage_size + i]
-                        node_to_stage[node] = stage_id
-
-            serializer = OneFOneBSerializer(pp=pp, node_to_stage=node_to_stage)
-            execution_plan = serializer.serialize(workload)
-        else:
-            execution_plan = CppReferenceSerializer().serialize(workload)
+        serializer_mode = "gpipe" if self.serializer == "cpp" else self.serializer
+        serializer = build_pipeline_serializer(
+            serializer_mode,
+            workload,
+            virtual_pipeline_size=self.pipeline_vpp,
+            interleave_group_size=self.interleave_group_size,
+        )
+        execution_plan = serializer.serialize(workload)
+        pipeline_task_info = dict(getattr(serializer, "task_info", {}))
+        self.pipeline_task_info.update(pipeline_task_info)
 
         # Step 2: Initial routing hints (shortest paths)
         route_table = BfsStrategy().compute_routes(workload, self.topology)

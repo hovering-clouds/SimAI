@@ -1,5 +1,6 @@
 """Run a PP/DP Hermod §4.1 experiment on an existing AICB input/topology."""
 import argparse
+from dataclasses import asdict
 import json
 from pathlib import Path
 import sys
@@ -13,6 +14,7 @@ from src.executor.policies.default_policy import DefaultSchedulingPolicy
 from src.executor.policies.hermod_policy import HermodSchedulingPolicy
 from src.executor.policies.puppeteer_policy import PuppeteerSchedulingPolicy
 from src.static_analysis.passes.hermod_priority import HermodEpMode, HermodScheduleVariant
+from src.static_analysis.passes.pipeline_task_serializers import PIPELINE_NAMES
 from src.static_analysis.passes.topology_loader import TopologyLoader
 from src.static_analysis.strategies.default_strategy import DefaultAnalysisResult
 from src.static_analysis.strategies.hermod_strategy import HermodAnalyzer
@@ -23,6 +25,9 @@ from src.workload_generator.aicb_parser import AicbParser
 from src.static_analysis.passes.hermod_metadata import HermodAicbMetadataAdapter
 from src.static_analysis.passes.hermod_placement import PLACEMENTS, assigned_nodes_for
 from src.workload_generator.workload_builder import WorkloadBuilder
+from src.workload_generator.pipeline_workload_overlay import (
+    apply_pipeline_workload_overlay,
+)
 
 
 DEFAULT_AICB = "inputs/aicb-workload/A100-gpt_13B_ws8_pp2-world_size8-tp4-pp2-ep1-gbs2-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-True.txt"
@@ -30,8 +35,9 @@ DEFAULT_TOPO = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_
 CONFIG_KEYS = {
     "workload", "aicb", "topology", "topo", "dp", "ep_mode", "pipeline",
     "modes", "k_paths", "variant", "output", "visualize", "placement", "gpus_per_server",
+    "vpp", "interleave_group_size",
 }
-CONFIG_PIPELINES = {"gpipe", "1f1b"}
+CONFIG_PIPELINES = set(PIPELINE_NAMES)
 CONFIG_MODES = {"default", "puppeteer", "hermod"}
 CONFIG_VARIANTS = {variant.value for variant in HermodScheduleVariant}
 
@@ -54,7 +60,7 @@ def load_config(path: str) -> dict:
     for key in ("aicb", "topo", "output"):
         if key in data and not isinstance(data[key], str):
             raise ValueError(f"Hermod config {key!r} must be a string")
-    for key in ("dp", "k_paths"):
+    for key in ("dp", "k_paths", "vpp", "interleave_group_size"):
         if key in data and (not isinstance(data[key], int) or isinstance(data[key], bool) or data[key] < 1):
             raise ValueError(f"Hermod config {key!r} must be a positive integer")
     if "visualize" in data and not isinstance(data["visualize"], bool):
@@ -84,6 +90,7 @@ def load_config(path: str) -> dict:
 def build_workload(
     aicb_path: str, dp_override: int | None, ep_mode: HermodEpMode,
     placement: str = "contiguous", gpus_per_server: int = 8,
+    pipeline_mode: str = "1f1b", pipeline_vpp: int = 2,
 ):
     if ep_mode != HermodEpMode.REJECT:
         raise NotImplementedError("Hermod EP experiments are not implemented")
@@ -100,10 +107,23 @@ def build_workload(
         parallelism=parallelism,
     )
     workload = WorkloadBuilder().build_from_aicb(header, items, job, comm_algo="ring")
+    pipeline_dag_info = {}
+    if pipeline_mode in {"interleaved_1f1b", "bidirectional"}:
+        overlay = apply_pipeline_workload_overlay(
+            pipeline_mode,
+            workload,
+            virtual_pipeline_size=pipeline_vpp,
+        )
+        workload = overlay.workload
+        pipeline_dag_info = overlay.task_info
     records = HermodAicbMetadataAdapter(
         header, items, reject_ep=(ep_mode == HermodEpMode.REJECT),
-    ).apply(workload)
-    return header, dp, workload, records
+    ).apply(
+        workload,
+        split_pp_by_layer=pipeline_mode == "interleaved_1f1b",
+        split_pp_by_direction=pipeline_mode == "bidirectional",
+    )
+    return header, dp, workload, records, pipeline_dag_info
 
 
 def main():
@@ -118,8 +138,12 @@ def main():
     parser.add_argument("--topo", default=DEFAULT_TOPO)
     parser.add_argument("--dp", type=int, default=None,
                         help="Override AICB header DP to synthesize DP collectives (as in Puppeteer experiments).")
-    parser.add_argument("--pipeline", choices=["gpipe", "1f1b"], default="1f1b",
-                        help="Compute pipeline serializer; add future modes in HermodAnalyzer.")
+    parser.add_argument("--pipeline", choices=sorted(CONFIG_PIPELINES), default="1f1b",
+                        help="Compute pipeline serializer.")
+    parser.add_argument("--vpp", type=int, default=2,
+                        help="Virtual pipeline chunks for interleaved_1f1b (default: 2).")
+    parser.add_argument("--interleave-group-size", type=int, default=None,
+                        help="Micro-batches per interleaved VPP group (default: pp).")
     parser.add_argument("--ep-mode", choices=[HermodEpMode.REJECT.value], default="reject",
                         help="EP is intentionally unavailable until its separate path is validated.")
     parser.add_argument("--modes", nargs="+", choices=["default", "puppeteer", "hermod"],
@@ -137,8 +161,9 @@ def main():
 
     out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
     ep_mode = HermodEpMode(args.ep_mode)
-    header, dp, workload, records = build_workload(
+    header, dp, workload, records, pipeline_dag_info = build_workload(
         args.aicb, args.dp, ep_mode, args.placement, args.gpus_per_server,
+        args.pipeline, args.vpp,
     )
     topology = TopologyLoader().load(args.topo)
     required_gpus = header.tp * dp * header.pp * header.ep
@@ -146,11 +171,30 @@ def main():
         raise ValueError(f"Run config needs {required_gpus} GPUs but topology has {topology.gpu_count}")
 
     variant = HermodScheduleVariant(args.variant)
-    analysis = HermodAnalyzer(
+    hermod_analyzer = HermodAnalyzer(
         topology, variant, ep_mode, pipeline_mode=args.pipeline,
-    ).analyze(workload, hermod_records=records)
+        pipeline_vpp=args.vpp,
+        interleave_group_size=args.interleave_group_size,
+    )
+    analysis = hermod_analyzer.analyze(workload, hermod_records=records)
     WorkloadWriter().write(workload, out / "workload.json")
     HermodAicbMetadataAdapter.write_sidecar(records, out / "hermod_metadata.json")
+    pipeline_metadata = {
+        task_id: asdict(info) for task_id, info in pipeline_dag_info.items()
+    }
+    for task_id, info in hermod_analyzer.pipeline_task_info.items():
+        pipeline_metadata.setdefault(task_id, {}).update(asdict(info))
+    if pipeline_metadata:
+        (out / "pipeline_task_metadata.json").write_text(
+            json.dumps(
+                {
+                    str(task_id): metadata
+                    for task_id, metadata in pipeline_metadata.items()
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
     # Same routes and compute order isolate Hermod's allocator effect.
     baseline_analysis = DefaultAnalysisResult(analysis.route_table, analysis.execution_plan)
@@ -159,7 +203,13 @@ def main():
         results["default"] = AnalyticalExecutor(
             topology, DefaultSchedulingPolicy(baseline_analysis)).execute(workload)
     if "puppeteer" in args.modes:
-        puppet = PuppeteerAnalyzer(topology, k_paths=args.k_paths, serializer=args.pipeline).analyze(workload)
+        puppet = PuppeteerAnalyzer(
+            topology,
+            k_paths=args.k_paths,
+            serializer=args.pipeline,
+            pipeline_vpp=args.vpp,
+            interleave_group_size=args.interleave_group_size,
+        ).analyze(workload)
         results["puppeteer"] = AnalyticalExecutor(
             topology,
             PuppeteerSchedulingPolicy(
@@ -186,9 +236,18 @@ def main():
     summary = {
         "input": {"aicb": args.aicb, "topology": args.topo, "variant": args.variant,
                   "pipeline": args.pipeline, "ep_mode": args.ep_mode,
+                  "vpp": args.vpp, "interleave_group_size": args.interleave_group_size,
                   "placement": args.placement, "gpus_per_server": args.gpus_per_server},
         "parallelism": {"tp": header.tp, "dp": dp,
                         "pp": header.pp, "ep": header.ep, "ga": header.ga},
+        "pipeline_dag": {
+            "overlay": args.pipeline in {"interleaved_1f1b", "bidirectional"},
+            "annotated_tasks": len(pipeline_dag_info),
+            "pp_flows": sum(
+                task.comm_type.value in {"pp_send", "pp_recv"}
+                for task in workload.get_flow_tasks()
+            ),
+        },
         "coflows": coflows,
         "coflow_type_counts": {
             name: sum(info.coflow_type.value == name for info in analysis.priority_analysis.coflows.values())

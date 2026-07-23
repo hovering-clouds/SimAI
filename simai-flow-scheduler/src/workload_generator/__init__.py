@@ -7,6 +7,14 @@ from .rank_grouper import RankGrouper
 from .collective_expander import CollectiveExpander, FlowTask
 from .workload_builder import WorkloadBuilder, FlowGroupResult, ItemTasks
 from .job_merger import JobMerger, MergeResult
+from .pipeline_workload_overlay import (
+    BidirectionalPipelineTaskInfo,
+    BidirectionalPipelineWorkloadOverlay,
+    InterleavedOneFOneBWorkloadOverlay,
+    InterleavedPipelineTaskInfo,
+    PipelineWorkloadOverlayResult,
+    apply_pipeline_workload_overlay,
+)
 
 __all__ = [
     "AicbParser",
@@ -20,4 +28,10 @@ __all__ = [
     "ItemTasks",
     "JobMerger",
     "MergeResult",
+    "BidirectionalPipelineTaskInfo",
+    "BidirectionalPipelineWorkloadOverlay",
+    "InterleavedPipelineTaskInfo",
+    "PipelineWorkloadOverlayResult",
+    "InterleavedOneFOneBWorkloadOverlay",
+    "apply_pipeline_workload_overlay",
 ]

@@ -12,6 +12,7 @@ from .bandwidth_allocators.hermod_allocator import HermodAllocator
 from .result import ExecutionResult, TaskTiming
 from .runtime import ActiveFlow
 from .visualizer import ChromeTraceCompact, ChromeTraceVerbose, ChromeTraceVisualizer
+from .pipeline_job_expander import PipelineJobExpander
 
 __all__ = [
     "AnalyticalExecutor",
@@ -30,4 +31,5 @@ __all__ = [
     "ChromeTraceVisualizer",
     "ChromeTraceCompact",
     "ChromeTraceVerbose",
+    "PipelineJobExpander",
 ]

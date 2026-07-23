@@ -6,6 +6,7 @@ see ExampleAnalyzer in example_strategy.py.
 from dataclasses import dataclass, field
 
 from ..passes.routing import BfsRouteTable, BfsStrategy, RouteTable
+from ..passes.pipeline_task_serializers import PipelineTaskInfo, build_pipeline_serializer
 from ..passes.topology_loader import NetworkTopology
 from ..passes.task_serializer import CppReferenceSerializer, OneFOneBSerializer, ExecutionPlan
 from ...workload_format.schema import P2PWorkload
@@ -144,6 +145,68 @@ class DynamicOneFOneBAnalyzer(OneFOneBAnalyzer):
         if missing:
             raise ValueError(
                 f"Dynamic 1F1B analysis lacks jobs for task job IDs: {missing}"
+            )
+        workload.jobs = [self.jobs_by_id[job_id] for job_id in sorted(job_ids)]
+        return super().analyze(workload)
+
+
+class PipelineAnalyzer:
+    """Configurable analyzer for all registered compute pipeline modes."""
+
+    def __init__(
+        self,
+        topology: NetworkTopology,
+        pipeline_mode: str,
+        pipeline_vpp: int = 2,
+        interleave_group_size: int | None = None,
+    ):
+        self.topology = topology
+        self.pipeline_mode = pipeline_mode
+        self.pipeline_vpp = pipeline_vpp
+        self.interleave_group_size = interleave_group_size
+        self.pipeline_task_info: dict[int, PipelineTaskInfo] = {}
+
+    def analyze(self, workload: P2PWorkload) -> DefaultAnalysisResult:
+        serializer = build_pipeline_serializer(
+            self.pipeline_mode,
+            workload,
+            virtual_pipeline_size=self.pipeline_vpp,
+            interleave_group_size=self.interleave_group_size,
+        )
+        execution_plan = serializer.serialize(workload)
+        pipeline_task_info = dict(getattr(serializer, "task_info", {}))
+        self.pipeline_task_info.update(pipeline_task_info)
+        return DefaultAnalysisResult(
+            route_table=BfsStrategy().compute_routes(workload, self.topology),
+            execution_plan=execution_plan,
+        )
+
+
+class DynamicPipelineAnalyzer(PipelineAnalyzer):
+    """Restore dynamic job layouts before applying a pipeline serializer."""
+
+    def __init__(
+        self,
+        topology: NetworkTopology,
+        jobs_by_id: dict[int, object],
+        pipeline_mode: str,
+        pipeline_vpp: int = 2,
+        interleave_group_size: int | None = None,
+    ):
+        super().__init__(
+            topology,
+            pipeline_mode,
+            pipeline_vpp,
+            interleave_group_size,
+        )
+        self.jobs_by_id = jobs_by_id
+
+    def analyze(self, workload: P2PWorkload) -> DefaultAnalysisResult:
+        job_ids = {task.job_id for task in workload.tasks}
+        missing = sorted(job_ids - self.jobs_by_id.keys())
+        if missing:
+            raise ValueError(
+                f"Dynamic pipeline analysis lacks jobs for task job IDs: {missing}"
             )
         workload.jobs = [self.jobs_by_id[job_id] for job_id in sorted(job_ids)]
         return super().analyze(workload)

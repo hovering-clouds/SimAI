@@ -7,11 +7,14 @@ from ..passes.hermod_priority import (
     HermodPriorityAnalysis, HermodScheduleVariant, HermodEpMode, classify_coflow_type,
 )
 from ..passes.routing import BfsStrategy, RouteTable
-from ..passes.task_serializer import CppReferenceSerializer, OneFOneBSerializer, ExecutionPlan
+from ..passes.pipeline_task_serializers import (
+    PipelineTaskInfo,
+    build_pipeline_serializer,
+)
+from ..passes.task_serializer import ExecutionPlan
 from ..passes.topology_loader import NetworkTopology
 from ...workload_format.schema import P2PWorkload
 from ...workload_generator.aicb_parser import AicbHeader, AicbParser, AicbWorkItem
-from ...workload_generator.rank_grouper import RankGrouper
 
 
 @dataclass
@@ -25,6 +28,7 @@ def build_hermod_records(
     workload: P2PWorkload,
     header: AicbHeader,
     aicb_items: list[AicbWorkItem] | None = None,
+    pipeline_mode: str | None = None,
 ) -> dict[int, HermodMetadataRecord]:
     """Build Hermod metadata sidecar from a workload and its AICB source.
 
@@ -32,39 +36,39 @@ def build_hermod_records(
         records = build_hermod_records(workload, header, items)
         analysis = HermodAnalyzer(...).analyze(workload, hermod_records=records)
     """
-    return HermodAicbMetadataAdapter(header, aicb_items).apply(workload)
+    return HermodAicbMetadataAdapter(header, aicb_items).apply(
+        workload,
+        split_pp_by_layer=pipeline_mode == "interleaved_1f1b",
+        split_pp_by_direction=pipeline_mode == "bidirectional",
+    )
 
 
 class HermodAnalyzer:
     def __init__(self, topology: NetworkTopology,
                  variant: HermodScheduleVariant = HermodScheduleVariant.CONVENTIONAL_1F1B,
                  ep_mode: HermodEpMode = HermodEpMode.REJECT,
-                 pipeline_mode: str = "1f1b"):
+                 pipeline_mode: str = "1f1b",
+                 pipeline_vpp: int = 2,
+                 interleave_group_size: int | None = None):
         self.topology = topology
         self.variant = variant
         self.ep_mode = ep_mode
         self.pipeline_mode = pipeline_mode
+        self.pipeline_vpp = pipeline_vpp
+        self.interleave_group_size = interleave_group_size
+        self.pipeline_task_info: dict[int, PipelineTaskInfo] = {}
 
     def analyze(self, workload: P2PWorkload,
                 hermod_records: dict[int, HermodMetadataRecord]) -> HermodAnalysisResult:
-        node_to_stage = {}
-        pp = 1
-        for job in workload.jobs:
-            grouper = RankGrouper(job.assigned_nodes, job.parallelism)
-            pp = max(pp, grouper.pp)
-            stage_size = grouper.dp * grouper.ep * grouper.tp
-            for stage_id in range(grouper.pp):
-                for node in grouper.nodes[stage_id * stage_size:(stage_id + 1) * stage_size]:
-                    node_to_stage[node] = stage_id
-        if self.pipeline_mode == "gpipe":
-            execution_plan = CppReferenceSerializer().serialize(workload)
-        elif self.pipeline_mode == "1f1b":
-            execution_plan = OneFOneBSerializer(pp, node_to_stage).serialize(workload)
-        else:
-            raise ValueError(
-                f"Unsupported Hermod pipeline mode {self.pipeline_mode!r}. "
-                "Register a serializer before exposing a new mode."
-            )
+        serializer = build_pipeline_serializer(
+            self.pipeline_mode,
+            workload,
+            virtual_pipeline_size=self.pipeline_vpp,
+            interleave_group_size=self.interleave_group_size,
+        )
+        execution_plan = serializer.serialize(workload)
+        pipeline_task_info = dict(getattr(serializer, "task_info", {}))
+        self.pipeline_task_info.update(pipeline_task_info)
         return HermodAnalysisResult(
             route_table=BfsStrategy().compute_routes(workload, self.topology),
             execution_plan=execution_plan,
@@ -86,8 +90,13 @@ class HermodDynamicAnalyzer(HermodAnalyzer):
                  trace_src_by_job: dict[int, str],
                  variant: HermodScheduleVariant = HermodScheduleVariant.CONVENTIONAL_1F1B,
                  ep_mode: HermodEpMode = HermodEpMode.REJECT,
-                 pipeline_mode: str = "1f1b"):
-        super().__init__(topology, variant, ep_mode, pipeline_mode)
+                 pipeline_mode: str = "1f1b",
+                 pipeline_vpp: int = 2,
+                 interleave_group_size: int | None = None):
+        super().__init__(
+            topology, variant, ep_mode, pipeline_mode,
+            pipeline_vpp, interleave_group_size,
+        )
         self.jobs_by_id = jobs_by_id
         self._trace_src_by_job = trace_src_by_job
         self._aicb_cache: dict[str, tuple[AicbHeader, list[AicbWorkItem]]] = {}
@@ -112,5 +121,7 @@ class HermodDynamicAnalyzer(HermodAnalyzer):
             if src not in self._aicb_cache:
                 self._aicb_cache[src] = AicbParser().parse(Path(src))
             header, items = self._aicb_cache[src]
-            return build_hermod_records(workload, header, items)
+            return build_hermod_records(
+                workload, header, items, pipeline_mode=self.pipeline_mode,
+            )
         return {}

@@ -44,13 +44,24 @@ from .passes.workload_summary import (
 from .strategies import (
     DefaultAnalyzer,
     DefaultAnalysisResult,
+    DynamicPipelineAnalyzer,
     ExampleAnalyzer,
     ExampleAnalysisResult,
+    PipelineAnalyzer,
 )
 from .passes.task_serializer import (
     ExecutionPlan,
     CppReferenceSerializer,
     TaskSerializer,
+)
+from .passes.pipeline_task_serializers import (
+    PIPELINE_NAMES,
+    BidirectionalPipelineSerializer,
+    InterleavedOneFOneBSerializer,
+    PipelineScheduleResult,
+    PipelineTaskInfo,
+    ZeroBubbleSerializer,
+    build_pipeline_serializer,
 )
 from .passes.puppeteer_tte import (
     TTEInfo,
@@ -100,11 +111,20 @@ __all__ = [
     "compute_workload_summary",
     "DefaultAnalyzer",
     "DefaultAnalysisResult",
+    "PipelineAnalyzer",
+    "DynamicPipelineAnalyzer",
     "ExampleAnalyzer",
     "ExampleAnalysisResult",
     "ExecutionPlan",
     "CppReferenceSerializer",
     "TaskSerializer",
+    "PipelineTaskInfo",
+    "PipelineScheduleResult",
+    "InterleavedOneFOneBSerializer",
+    "ZeroBubbleSerializer",
+    "BidirectionalPipelineSerializer",
+    "PIPELINE_NAMES",
+    "build_pipeline_serializer",
     "TTEInfo",
     "FlowTiming",
     "ResourceDependencyTable",

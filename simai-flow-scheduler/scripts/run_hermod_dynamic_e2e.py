@@ -1,6 +1,7 @@
 """Run config-driven multi-job/multi-iteration dynamic Hermod experiments."""
 import argparse
 import copy
+from dataclasses import asdict
 import json
 from pathlib import Path
 import sys
@@ -9,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.executor.dynamic_executor import DynamicExecutor
-from src.executor.job_expander import JobExpander
+from src.executor.pipeline_job_expander import PipelineJobExpander
 from src.executor.job_policy import FifoJobPolicy
 from src.executor.policies.default_policy import DefaultSchedulingPolicy
 from src.executor.policies.hermod_policy import HermodSchedulingPolicy
@@ -17,10 +18,11 @@ from src.static_analysis.passes.hermod_priority import (
     HermodEpMode, HermodPriorityAnalysis, HermodScheduleVariant,
 )
 from src.static_analysis.passes.routing import BfsRouteTable
+from src.static_analysis.passes.pipeline_task_serializers import PIPELINE_NAMES
 from src.static_analysis.passes.task_serializer import ExecutionPlan
 from src.static_analysis.passes.topology_loader import TopologyLoader
 from src.static_analysis.strategies.default_strategy import (
-    DefaultAnalysisResult, DefaultAnalyzer, DynamicOneFOneBAnalyzer,
+    DefaultAnalysisResult, DynamicPipelineAnalyzer,
 )
 from src.static_analysis.strategies.hermod_strategy import (
     HermodAnalysisResult, HermodDynamicAnalyzer,
@@ -38,9 +40,9 @@ DEFAULT_TOPO = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_
 CONFIG_KEYS = {
     "workload", "aicb", "topology", "topo", "dp", "pipeline", "variant",
     "jobs", "iterations", "workloads", "modes", "output", "visualize",
-    "placement", "gpus_per_server",
+    "placement", "gpus_per_server", "vpp", "interleave_group_size",
 }
-PIPELINES = {"gpipe", "1f1b"}
+PIPELINES = set(PIPELINE_NAMES)
 MODES = {"default", "hermod"}
 VARIANTS = {variant.value for variant in HermodScheduleVariant}
 WORKLOAD_KEYS = {"aicb", "dp", "num_jobs", "num_iters"}
@@ -61,7 +63,7 @@ def load_config(path: str) -> dict:
     for key in ("aicb", "topo", "output"):
         if key in data and not isinstance(data[key], str):
             raise ValueError(f"Config {key!r} must be a string")
-    for key in ("dp", "jobs", "iterations"):
+    for key in ("dp", "jobs", "iterations", "vpp", "interleave_group_size"):
         if key in data and (not isinstance(data[key], int) or isinstance(data[key], bool) or data[key] < 1):
             raise ValueError(f"Config {key!r} must be a positive integer")
     if "placement" in data and data["placement"] not in PLACEMENTS:
@@ -117,7 +119,7 @@ def build_compact_workload(
         aicb_path = spec["aicb"]
         header, _ = AicbParser().parse(aicb_path)
         header_dp = header.all_gpus // (header.tp * header.pp * header.ep)
-        dp = spec.get("dp", header_dp)
+        dp = spec.get("dp") or header_dp
         num_jobs = spec.get("num_jobs", 1)
         num_iters = spec.get("num_iters", 1)
         parallelism = ParallelismConfig(tp=header.tp, dp=dp, pp=header.pp, ep=header.ep)
@@ -163,12 +165,13 @@ def run_mode(mode: str, compact: CompactWorkload, topology, args):
     if mode == "default":
         analysis = DefaultAnalysisResult(BfsRouteTable(topology), ExecutionPlan())
         policy = DefaultSchedulingPolicy(analysis)
-        if args.pipeline == "1f1b":
-            analyzer = DynamicOneFOneBAnalyzer(
-                topology, {job.job_id: job for job in compact.jobs},
-            )
-        else:
-            analyzer = DefaultAnalyzer(topology)
+        analyzer = DynamicPipelineAnalyzer(
+            topology,
+            {job.job_id: job for job in compact.jobs},
+            args.pipeline,
+            pipeline_vpp=args.vpp,
+            interleave_group_size=args.interleave_group_size,
+        )
     else:
         variant = HermodScheduleVariant(args.variant)
         empty = HermodAnalysisResult(
@@ -187,15 +190,29 @@ def run_mode(mode: str, compact: CompactWorkload, topology, args):
             variant=variant,
             ep_mode=HermodEpMode.REJECT,
             pipeline_mode=args.pipeline,
+            pipeline_vpp=args.vpp,
+            interleave_group_size=args.interleave_group_size,
         )
     from src.workload_generator.inference_profile import InferenceProfileStore
     executor = DynamicExecutor(topology=topology, policy=policy, analyzer=analyzer)
+    job_expander = PipelineJobExpander(
+        TaskIdAllocator(),
+        InferenceProfileStore(),
+        pipeline_mode=args.pipeline,
+        pipeline_vpp=args.vpp,
+    )
     result = executor.execute_dynamic(
         job_dag=JobDAG.from_compact(compact),
         job_expansion_info=compact.job_expansion_info,
         job_policy=FifoJobPolicy(),
-        job_expander=JobExpander(TaskIdAllocator(), InferenceProfileStore()),
+        job_expander=job_expander,
     )
+    for task_id, info in job_expander.pipeline_task_info.items():
+        if task_id in executor._task_meta:
+            executor._task_meta[task_id].update(asdict(info))
+    for task_id, info in analyzer.pipeline_task_info.items():
+        if task_id in executor._task_meta:
+            executor._task_meta[task_id].update(asdict(info))
     return executor, result
 
 
@@ -214,6 +231,10 @@ def main() -> None:
     parser.add_argument("--jobs", type=int, default=None, help="Legacy single-workload job count")
     parser.add_argument("--iterations", type=int, default=None, help="Legacy single-workload iteration count")
     parser.add_argument("--pipeline", choices=sorted(PIPELINES), default="1f1b")
+    parser.add_argument("--vpp", type=int, default=2,
+                        help="Virtual pipeline chunks for interleaved_1f1b (default: 2).")
+    parser.add_argument("--interleave-group-size", type=int, default=None,
+                        help="Micro-batches per interleaved VPP group (default: pp).")
     parser.add_argument("--variant", choices=sorted(VARIANTS),
                         default=HermodScheduleVariant.CONVENTIONAL_1F1B.value)
     parser.add_argument("--modes", nargs="+", choices=sorted(MODES), default=["default", "hermod"])
@@ -285,6 +306,7 @@ def main() -> None:
         results[mode] = result
     summary = {
         "input": {"topology": args.topo, "pipeline": args.pipeline,
+                  "vpp": args.vpp, "interleave_group_size": args.interleave_group_size,
                   "variant": args.variant, "ep_mode": "reject",
                   "placement": args.placement, "gpus_per_server": args.gpus_per_server},
         "workloads": resolved_specs,
