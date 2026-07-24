@@ -16,6 +16,9 @@ from ..workload_generator.zero_bubble_pipeline_builder import (
 from ..workload_generator.bidirectional_pipeline_builder import (
     BidirectionalPipelineWorkloadBuilder,
 )
+from ..workload_generator.dualpipe_pipeline_builder import (
+    DualPipePipelineWorkloadBuilder,
+)
 from .job_expander import JobExpander
 
 
@@ -33,6 +36,8 @@ class PipelineJobExpander(JobExpander):
         pipeline_mode: str,
         pipeline_vpp: int = 2,
         pipeline_gradient_sync_bytes: int | None = None,
+        pipeline_overlap_model: str = "conservative",
+        pipeline_overlap_factor: float | None = None,
         pipeline_task_info: dict[int, object] | None = None,
         **kwargs,
     ):
@@ -40,13 +45,15 @@ class PipelineJobExpander(JobExpander):
         self.pipeline_mode = pipeline_mode
         self.pipeline_vpp = pipeline_vpp
         self.pipeline_gradient_sync_bytes = pipeline_gradient_sync_bytes
+        self.pipeline_overlap_model = pipeline_overlap_model
+        self.pipeline_overlap_factor = pipeline_overlap_factor
         self.pipeline_task_info = (
             pipeline_task_info if pipeline_task_info is not None else {}
         )
 
     def expand_job(self, job: Job, info: JobExpansionInfo) -> ExpandedJob:
         if info.job_type == "training" and self.pipeline_mode in {
-            "interleaved_1f1b", "zero_bubble", "bidirectional",
+            "interleaved_1f1b", "zero_bubble", "bidirectional", "dualpipe",
         }:
             return self._expand_direct_training(job, info)
         return super().expand_job(job, info)
@@ -65,10 +72,17 @@ class PipelineJobExpander(JobExpander):
             )
         elif self.pipeline_mode == "zero_bubble":
             builder = ZeroBubblePipelineWorkloadBuilder(local_info)
-        else:
+        elif self.pipeline_mode == "bidirectional":
             builder = BidirectionalPipelineWorkloadBuilder(
                 local_info,
                 gradient_sync_bytes=self.pipeline_gradient_sync_bytes,
+            )
+        else:
+            builder = DualPipePipelineWorkloadBuilder(
+                local_info,
+                gradient_sync_bytes=self.pipeline_gradient_sync_bytes,
+                overlap_model=self.pipeline_overlap_model,
+                overlap_factor=self.pipeline_overlap_factor,
             )
         workload = builder.build_from_aicb(header, items, job)
 

@@ -1,4 +1,4 @@
-"""Isolated E2E runner shared by the three advanced pipeline smoke scripts.
+"""Isolated E2E runner shared by the advanced pipeline smoke scripts.
 
 This module deliberately does not register new modes in Default, Hermod, or
 Puppeteer analyzers. Each script selects a strategy-specific workload builder
@@ -21,6 +21,7 @@ from src.executor.policies.default_policy import DefaultSchedulingPolicy
 from src.static_analysis.passes.topology_loader import TopologyLoader
 from src.static_analysis.strategies.advanced_pipeline_strategies import (
     BidirectionalPipelineAnalyzer,
+    DualPipePipelineAnalyzer,
     InterleavedPipelineAnalyzer,
     ZeroBubblePipelineAnalyzer,
 )
@@ -29,6 +30,9 @@ from src.workload_format.writer import WorkloadWriter
 from src.workload_generator.aicb_parser import AicbParser
 from src.workload_generator.bidirectional_pipeline_builder import (
     BidirectionalPipelineWorkloadBuilder,
+)
+from src.workload_generator.dualpipe_pipeline_builder import (
+    DualPipePipelineWorkloadBuilder,
 )
 from src.workload_generator.interleaved_pipeline_builder import (
     InterleavedPipelineWorkloadBuilder,
@@ -51,6 +55,7 @@ MODES = {
     "interleaved_1f1b",
     "zero_bubble",
     "bidirectional",
+    "dualpipe",
 }
 
 
@@ -77,6 +82,22 @@ def run_pipeline_e2e_cli(mode: str) -> None:
             type=int,
             default=None,
             help="Microbatches per interleaved schedule group; defaults to pp.",
+        )
+    if mode == "dualpipe":
+        parser.add_argument(
+            "--overlap-model",
+            choices=("conservative", "ideal", "profiled"),
+            default="conservative",
+            help="F&B overlap timing model recorded in the DualPipe sidecar.",
+        )
+        parser.add_argument(
+            "--overlap-factor",
+            type=float,
+            default=None,
+            help=(
+                "Profiled F&B duration divided by unoverlapped F+B duration; "
+                "required only for --overlap-model profiled."
+            ),
         )
     args = parser.parse_args()
     vpp = getattr(args, "vpp", 2)
@@ -121,10 +142,17 @@ def run_pipeline_e2e_cli(mode: str) -> None:
         builder = ZeroBubblePipelineWorkloadBuilder(
             analyzer.expansion_task_info,
         )
-    else:
+    elif mode == "bidirectional":
         analyzer = BidirectionalPipelineAnalyzer(topology)
         builder = BidirectionalPipelineWorkloadBuilder(
             analyzer.expansion_task_info,
+        )
+    else:
+        analyzer = DualPipePipelineAnalyzer(topology)
+        builder = DualPipePipelineWorkloadBuilder(
+            analyzer.expansion_task_info,
+            overlap_model=args.overlap_model,
+            overlap_factor=args.overlap_factor,
         )
 
     print(f"[2/4] Build {mode} workload")
@@ -193,11 +221,39 @@ def run_pipeline_e2e_cli(mode: str) -> None:
                     None,
                 ) == "chimera_gradient_sync"
             ),
+            "dualpipe_gradient_sync_flow": sum(
+                getattr(
+                    analyzer.expansion_task_info.get(task.task_id),
+                    "task_role",
+                    None,
+                ) == "dualpipe_gradient_sync"
+                for task in workload.get_flow_tasks()
+            ),
+            "dualpipe_gradient_sync_network_bytes": sum(
+                task.size_bytes or 0
+                for task in workload.get_flow_tasks()
+                if getattr(
+                    analyzer.expansion_task_info.get(task.task_id),
+                    "task_role",
+                    None,
+                ) == "dualpipe_gradient_sync"
+            ),
+            "dualpipe_overlap_pairs": len({
+                getattr(info, "overlap_pair_id", None)
+                for info in analyzer.expansion_task_info.values()
+                if getattr(info, "overlap_pair_id", None) is not None
+            }),
             "expansion_sidecar": len(analyzer.expansion_task_info),
             "schedule_sidecar": len(analyzer.schedule_task_info),
             "completed": len(result.per_task),
         },
         "makespan_us": result.makespan_us,
+        "overlap_model": (
+            args.overlap_model if mode == "dualpipe" else None
+        ),
+        "overlap_factor": (
+            args.overlap_factor if mode == "dualpipe" else None
+        ),
     }
     (output / "summary.json").write_text(
         json.dumps(summary, indent=2),

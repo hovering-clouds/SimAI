@@ -1,13 +1,14 @@
 # 流水线调度扩展实现总览
 
 本文面向希望理解、使用或继续扩展 `simai-flow-scheduler` 流水线调度能力的开发者，集中说明
-以下三种高级训练流水线：
+以下四种高级训练流水线：
 
 - Interleaved 1F1B
 - Zero Bubble（当前为 ZB1P 风格）
 - Chimera Bidirectional Pipeline（兼容模式名 `bidirectional`）
+- DeepSeek-V3 DualPipe（模式名 `dualpipe`）
 
-三种扩展均已具备独立 workload builder、`TaskSerializer` 子类、analyzer sidecar、单元测试
+四种扩展均已具备独立 workload builder、`TaskSerializer` 子类、analyzer sidecar、单元测试
 和端到端验证脚本。它们目前是隔离的研究路径，不会改变 GPipe、普通 1F1B、
 Default、Puppeteer 或 Hermod 的既有行为。
 
@@ -16,6 +17,7 @@ Default、Puppeteer 或 Hermod 的既有行为。
 - [Interleaved 1F1B 设计](./interleaved-1f1b-pipeline-schedule-design.md)
 - [Zero Bubble 设计](./zero-bubble-pipeline-schedule-design.md)
 - [Chimera 设计](./bidirectional-pipeline-schedule-design.md)
+- [DualPipe 设计与实现结果](./dualpipe-pipeline-schedule-design.md)
 - [普通 1F1B 基础设计](./1f1b-pipeline-schedule-design.md)
 
 ## 1. 为什么不能只修改 compute 顺序
@@ -110,7 +112,7 @@ model replica 等信息。
 
 ### 2.3 Serializer 的职责边界
 
-三种 serializer 都继承 `TaskSerializer`，最终只输出：
+四种 serializer 都继承 `TaskSerializer`，最终只输出：
 
 ```python
 ExecutionPlan(
@@ -370,21 +372,54 @@ warmup -> 1F1B steady state -> cooldown
 当前是 unit-operation preferred merge，尚未实现 Chimera 论文中的 eager-sync、
 eager-sync-opt 或根据异构 F/B duration 自动搜索最优 schedule。
 
-## 6. 文件结构
+## 6. DeepSeek-V3 DualPipe
+
+DualPipe 是独立的 `dualpipe` 模式，不替换 Chimera。它保持两个镜像
+module replica，并按照 DeepSeek-AI 公开实现生成八阶段本地序列：
+
+```text
+nF0
+-> nF0F1
+-> nB1W1F1
+-> nF0B1F1B0
+-> nB1F1B0
+-> nB1B0
+-> nWB0
+-> nW
+```
+
+builder 直接生成 down/up PP DAG，backward-input 不等待 deferred W。
+`grad_param_comm` 被转换为包含两个 module replica 和外部 DP ranks 的
+replica-aware Ring AllReduce，避免普通 DP 加副本同步的重复流量。
+
+`F&B` 使用显式 overlap model：
+
+```text
+conservative: F+B
+ideal:        max(F,B)
+profiled:     overlap_factor*(F+B)
+```
+
+该 envelope 校准 flow-DAG 可观察的 wall time，不模拟逐 SM 并发。
+EP/TP flow 的参与者、次数和 bytes 完全保留 AICB 输入；普通 AICB
+无法区分 dispatch/combine 时不会合成额外 All-to-All。
+
+## 7. 文件结构
 
 | 文件 | 职责 |
 |---|---|
 | `src/workload_generator/interleaved_pipeline_builder.py` | VPP chunk、logical PP boundary 和 Interleaved sidecar |
 | `src/workload_generator/zero_bubble_pipeline_builder.py` | B/W/DP/optimizer DAG 和 Zero Bubble sidecar |
 | `src/workload_generator/bidirectional_pipeline_builder.py` | Chimera 双向 PP、镜像 replica 和 gradient sync |
-| `src/static_analysis/passes/pipeline_task_serializers.py` | 三种 `TaskSerializer` 子类及 DAG legalization |
+| `src/workload_generator/dualpipe_pipeline_builder.py` | DualPipe 八阶段 token、B/W FIFO、双向 DAG、overlap sidecar 和 replica sync |
+| `src/static_analysis/passes/pipeline_task_serializers.py` | 四种 `TaskSerializer` 子类及 DAG legalization |
 | `src/static_analysis/strategies/advanced_pipeline_strategies.py` | 隔离 analyzer 和 sidecar ownership |
 | `src/executor/pipeline_job_expander.py` | 动态 job 的策略 builder 选择与 task-ID remap |
-| `scripts/pipeline_e2e_common.py` | 三种隔离 E2E 的公共执行链和 summary |
+| `scripts/pipeline_e2e_common.py` | 四种隔离 E2E 的公共执行链和 summary |
 
-三个策略没有注册到通用 analyzer package，也没有加入 Hermod 的 `gpipe/1f1b` CLI。
+四个策略没有注册到通用 analyzer package，也没有加入 Hermod 的 `gpipe/1f1b` CLI。
 
-## 7. 使用方式
+## 8. 使用方式
 
 在 `simai-flow-scheduler/` 下运行：
 
@@ -392,6 +427,7 @@ eager-sync-opt 或根据异构 F/B duration 自动搜索最优 schedule。
 python scripts/run_e2e_interleaved_1f1b.py
 python scripts/run_e2e_zero_bubble.py
 python scripts/run_e2e_bidirectional.py
+python scripts/run_e2e_dualpipe.py
 ```
 
 指定输入：
@@ -412,6 +448,10 @@ python scripts/run_e2e_bidirectional.py \
   --aicb <training-workload.txt> \
   --topo <topology-file> \
   --output outputs/chimera_e2e
+
+python scripts/run_e2e_dualpipe.py \
+  --overlap-model conservative \
+  --output outputs/dualpipe_e2e
 ```
 
 每个输出目录包含：
@@ -431,18 +471,19 @@ summary.json
 - PP flow 的 boundary 和方向；
 - preferred slot 与最终本地顺序。
 
-## 8. 输入约束
+## 9. 输入约束
 
 | 策略 | 主要约束 |
 |---|---|
 | Interleaved 1F1B | training AICB；`vpp >= 2`；每个 GA 至少有一个 layer/chunk；`pp>1` 时 PP size 为正 |
 | Zero Bubble | 普通 training AICB；`ga >= 1`；存在独立 B/W；不接受 DeepSpeed ZeRO/FSDP 专用行 |
 | Chimera | 偶数 `pp`；偶数 `ga`；`pp_comm_size > 0`；存在明确的 stage gradient bytes |
+| DualPipe | 偶数 `pp`；偶数 `ga`；`ga >= 2*pp`；正 PP bytes；明确的 gradient bytes |
 
-三个策略当前都只支持 training AICB direct expansion。推理 workload 继续使用
+四个策略当前都只支持 training AICB direct expansion。推理 workload 继续使用
 `InferenceTraceExpander`。
 
-## 9. 测试与验证
+## 10. 测试与验证
 
 定向测试：
 
@@ -451,13 +492,14 @@ python -m pytest \
   tests/test_interleaved_pipeline_builder.py \
   tests/test_zero_bubble_pipeline_builder.py \
   tests/test_bidirectional_pipeline_builder.py \
+  tests/test_dualpipe_pipeline_builder.py \
   tests/test_pipeline_task_serializers.py -q
 ```
 
 当前结果：
 
 ```text
-26 passed
+46 passed
 ```
 
 排除工作区缺失的外部 Spectrum-X topology 集成用例后：
@@ -469,7 +511,7 @@ python -m pytest -q -k "not SpectrumX"
 当前结果：
 
 ```text
-754 passed, 3 skipped, 18 deselected
+774 passed, 3 skipped, 18 deselected
 ```
 
 默认 GPT-7B AICB smoke run：
@@ -479,6 +521,9 @@ python -m pytest -q -k "not SpectrumX"
 | Interleaved 1F1B | 3,352 | 4,197,756 us |
 | Zero Bubble | 3,288 | 4,272,394 us |
 | Chimera | 3,304 | 4,219,863 us |
+| DualPipe conservative | 3,304 | 3,938,319 us |
+| DualPipe ideal | 3,304 | 2,944,279 us |
+| DualPipe profiled (`factor=0.7`) | 3,304 | 3,221,018 us |
 
 Chimera smoke 中包含：
 
@@ -491,7 +536,7 @@ Chimera smoke 中包含：
 这些数字只证明当前输入能够完成 DAG 校验、路由、调度和执行闭环。不同策略的 workload
 语义和附加通信并不完全相同，因此不能把 smoke makespan 直接解释为论文性能收益。
 
-## 10. 如何继续扩展
+## 11. 如何继续扩展
 
 新增流水线策略时建议遵循：
 
@@ -507,7 +552,7 @@ Chimera smoke 中包含：
 不要通过修改公共 `Task` 增加 `chunk_id`、`pipeline_id`、`replica_id` 等策略字段，也不要为了
 接入新策略改变 Default、Puppeteer、Hermod 或普通 `WorkloadBuilder` 的默认行为。
 
-## 11. 参考资料
+## 12. 参考资料
 
 - Megatron-LM pipeline parallelism：
   https://arxiv.org/abs/2104.04473
@@ -517,4 +562,7 @@ Chimera smoke 中包含：
   https://arxiv.org/abs/2107.06925
 - Chimera 官方实现：
   https://github.com/shigangli/chimera
-
+- DeepSeek-V3 Technical Report：
+  https://arxiv.org/abs/2412.19437
+- DeepSeek-AI DualPipe：
+  https://github.com/deepseek-ai/DualPipe

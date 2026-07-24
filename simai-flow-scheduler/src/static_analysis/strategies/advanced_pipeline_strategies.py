@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from ..passes.pipeline_task_serializers import (
     AdvancedPipelineSerializer,
     BidirectionalPipelineSerializer,
+    DualPipeSerializer,
     InterleavedOneFOneBSerializer,
     PipelineTaskInfo,
     ZeroBubbleSerializer,
@@ -89,5 +90,14 @@ class BidirectionalPipelineAnalyzer(_AdvancedPipelineAnalyzer):
 
     def _build_serializer(self) -> BidirectionalPipelineSerializer:
         return BidirectionalPipelineSerializer(
+            expansion_task_info=self.expansion_task_info,
+        )
+
+
+class DualPipePipelineAnalyzer(_AdvancedPipelineAnalyzer):
+    """Isolated analyzer for the DeepSeek-style DualPipe workload."""
+
+    def _build_serializer(self) -> DualPipeSerializer:
+        return DualPipeSerializer(
             expansion_task_info=self.expansion_task_info,
         )

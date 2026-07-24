@@ -4,6 +4,7 @@ import pytest
 
 from src.static_analysis.passes.pipeline_task_serializers import (
     BidirectionalPipelineSerializer,
+    DualPipeSerializer,
     InterleavedOneFOneBSerializer,
     ZeroBubbleSerializer,
     build_pipeline_serializer,
@@ -238,6 +239,10 @@ def test_factory_preserves_existing_modes_and_registers_new_modes():
     assert isinstance(
         build_pipeline_serializer("bidirectional", workload),
         BidirectionalPipelineSerializer,
+    )
+    assert isinstance(
+        build_pipeline_serializer("dualpipe", workload),
+        DualPipeSerializer,
     )
     with pytest.raises(ValueError, match="Unsupported pipeline mode"):
         build_pipeline_serializer("unknown", workload)

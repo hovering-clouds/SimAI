@@ -19,6 +19,9 @@ from .task_serializer import (
     TaskSerializer,
 )
 from ...workload_format.schema import P2PWorkload, Phase, Task
+from ...workload_generator.dualpipe_pipeline_builder import (
+    build_dualpipe_schedule,
+)
 from ...workload_generator.rank_grouper import RankGrouper
 
 
@@ -759,10 +762,95 @@ class BidirectionalPipelineSerializer(AdvancedPipelineSerializer):
         )
 
 
+class DualPipeSerializer(AdvancedPipelineSerializer):
+    """Official eight-step DeepSeek DualPipe compute-order projection."""
+
+    schedule_name = "dualpipe"
+
+    def __init__(
+        self,
+        pp: int | None = None,
+        node_to_stage: dict[int, int] | None = None,
+        expansion_task_info: Mapping[int, object] | None = None,
+    ):
+        super().__init__(pp=pp, node_to_stage=node_to_stage)
+        self.expansion_task_info = (
+            expansion_task_info if expansion_task_info is not None else {}
+        )
+
+    def serialize(self, workload: P2PWorkload) -> ExecutionPlan:
+        plan = super().serialize(workload)
+        if isinstance(self.expansion_task_info, dict):
+            for task_id, schedule_info in self.task_info.items():
+                expansion_info = self.expansion_task_info.get(task_id)
+                if (
+                    expansion_info is None
+                    or not hasattr(expansion_info, "preferred_slot")
+                    or not hasattr(expansion_info, "final_local_order")
+                ):
+                    continue
+                self.expansion_task_info[task_id] = replace(
+                    expansion_info,
+                    preferred_slot=schedule_info.schedule_slot,
+                    final_local_order=schedule_info.local_order,
+                )
+        return plan
+
+    def _record_task(
+        self,
+        task: Task,
+        layout: _JobLayout,
+        stage_id: int,
+        token: _ScheduleToken | None,
+        operation: str,
+        slot: int,
+    ) -> None:
+        expansion_info = self.expansion_task_info.get(task.task_id)
+        if token is not None and expansion_info is not None:
+            expected_microbatch = getattr(
+                expansion_info, "microbatch_id", token.microbatch_id,
+            )
+            expected_replica = getattr(
+                expansion_info, "module_replica_id", token.pipeline_id,
+            )
+            if expected_microbatch != token.microbatch_id:
+                raise ValueError(
+                    "DualPipe expansion/serializer microbatch mismatch for "
+                    f"task {task.task_id}: expansion={expected_microbatch}, "
+                    f"serializer={token.microbatch_id}"
+                )
+            if expected_replica != token.pipeline_id:
+                raise ValueError(
+                    "DualPipe expansion/serializer replica mismatch for "
+                    f"task {task.task_id}: expansion={expected_replica}, "
+                    f"serializer={token.pipeline_id}"
+                )
+        super()._record_task(
+            task, layout, stage_id, token, operation, slot,
+        )
+
+    def _schedule_tokens(
+        self,
+        ga: int,
+        layout: _JobLayout,
+        stage_id: int,
+    ) -> list[_ScheduleToken]:
+        return [
+            _ScheduleToken(
+                operation=token.operation,
+                microbatch_id=token.microbatch_id,
+                pipeline_id=token.module_replica_id,
+                direction=token.direction,
+            )
+            for token in build_dualpipe_schedule(layout.pp, ga, stage_id)
+        ]
+
+
 ADVANCED_PIPELINE_NAMES = frozenset({
     "interleaved_1f1b",
     "zero_bubble",
     "bidirectional",
+    "dualpipe",
 })
 
 PIPELINE_NAMES = frozenset({"gpipe", "1f1b", *ADVANCED_PIPELINE_NAMES})
@@ -809,6 +897,12 @@ def build_pipeline_serializer(
         )
     if mode == "bidirectional":
         return BidirectionalPipelineSerializer(
+            pp=pp,
+            node_to_stage=node_to_stage,
+            expansion_task_info=expansion_task_info,
+        )
+    if mode == "dualpipe":
+        return DualPipeSerializer(
             pp=pp,
             node_to_stage=node_to_stage,
             expansion_task_info=expansion_task_info,
