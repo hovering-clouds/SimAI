@@ -6,6 +6,7 @@ from .aicb_parser import AicbParser, AicbHeader, AicbWorkItem
 from .rank_grouper import RankGrouper
 from .collective_expander import CollectiveExpander, FlowTask
 from .workload_builder import WorkloadBuilder, FlowGroupResult, ItemTasks
+from .zero_workload_builder import ZeroWorkloadBuilder
 from .job_merger import JobMerger, MergeResult
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "WorkloadBuilder",
     "FlowGroupResult",
     "ItemTasks",
+    "ZeroWorkloadBuilder",
     "JobMerger",
     "MergeResult",
 ]
