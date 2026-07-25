@@ -117,7 +117,7 @@ def build_compact_workload(
         aicb_path = spec["aicb"]
         header, _ = AicbParser().parse(aicb_path)
         header_dp = header.all_gpus // (header.tp * header.pp * header.ep)
-        dp = spec.get("dp") or header_dp
+        dp = spec.get("dp", header_dp)
         num_jobs = spec.get("num_jobs", 1)
         num_iters = spec.get("num_iters", 1)
         parallelism = ParallelismConfig(tp=header.tp, dp=dp, pp=header.pp, ep=header.ep)

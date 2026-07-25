@@ -2,7 +2,7 @@
   "topology": "inputs/topologies/Hermod_32g_4server_2nic_4sn3700_100Gbps_A100",
   "workloads": [
     {
-      "aicb": "inputs/aicb-workload/A100-gpt_7B_ws8_pp2-world_size8-tp4-pp2-ep1-gbs2-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
+      "aicb": "inputs/aicb-workload/A100-gpt_7B_ws4_pp2-world_size4-tp2-pp2-ep1-gbs4-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-True.txt",
       "dp": 4,
       "num_jobs": 1,
       "num_iters": 10
@@ -14,5 +14,5 @@
   "placement": "cyclic_pp_dp",
   "gpus_per_server": 8,
   "visualize": true,
-  "output": "outputs/hermod_dynamic_e2e-3"
+  "output": "outputs/hermod_dynamic_e2e-t"
 }
