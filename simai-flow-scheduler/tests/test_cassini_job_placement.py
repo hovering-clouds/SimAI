@@ -1,6 +1,6 @@
 """Tests for Cassini experiment GPU placement helpers."""
 
-from src.cassini.job_placement import (
+from scripts.utils.job_placement import (
     contention_spread_gpus,
 )
 from src.workload_format.schema import ParallelismConfig

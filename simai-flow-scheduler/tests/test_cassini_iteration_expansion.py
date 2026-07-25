@@ -1,6 +1,6 @@
 """Tests for Cassini iteration expansion (GA merge + multi-iteration replication)."""
 
-from src.cassini.iteration_expansion import (
+from scripts.utils.iteration_expansion import (
     merge_ga_to_one_iteration,
     replicate_with_cross_iteration_deps,
 )

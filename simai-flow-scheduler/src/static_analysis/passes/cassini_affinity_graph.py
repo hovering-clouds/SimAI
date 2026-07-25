@@ -26,9 +26,9 @@ shared across all links it traverses.
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from .circle_abstraction import CircleAbstraction
-from .communication_pattern import CommunicationPattern
-from .pair_compatibility import (
+from .cassini_circle_abstraction import CircleAbstraction
+from .cassini_communication_pattern import CommunicationPattern
+from .cassini_pair_compatibility import (
     CompatibilityResult,
     optimize_link_compatibility,
 )

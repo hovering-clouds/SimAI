@@ -231,7 +231,7 @@ def test_cassini_policy_delays_task_by_time_shift():
 
     # Build analysis with a manual time-shift of 500 us
     default = DefaultAnalyzer(topo).analyze(workload)
-    from src.cassini.communication_pattern import extract_communication_patterns
+    from src.static_analysis.passes.cassini_communication_pattern import extract_communication_patterns
     from src.static_analysis.passes.critical_path import analyze_critical_path
     patterns = extract_communication_patterns(
         workload, default.critical_path if hasattr(default, 'critical_path') else analyze_critical_path(workload, default.route_table, topo),

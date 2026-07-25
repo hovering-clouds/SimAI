@@ -13,8 +13,8 @@ are present.
 
 from __future__ import annotations
 
-from ..static_analysis.passes.task_serializer import CppReferenceSerializer
-from ..workload_format.schema import Phase
+from .task_serializer import CppReferenceSerializer
+from ...workload_format.schema import Phase
 
 
 _ORIGINAL_SERIALIZE = CppReferenceSerializer.serialize

@@ -4,7 +4,7 @@ from collections import Counter
 
 import pytest
 
-from src.executor.pipeline_job_expander import PipelineJobExpander
+from src.executor.dynamic.pipeline_job_expander import PipelineJobExpander
 from src.static_analysis.passes.pipeline_task_serializers import (
     DualPipeSerializer,
 )
@@ -14,7 +14,7 @@ from src.workload_format.compact_workload import (
 )
 from src.workload_format.schema import CommType, Job, ParallelismConfig, Phase
 from src.workload_generator.aicb_parser import AicbHeader, AicbWorkItem
-from src.workload_generator.dualpipe_pipeline_builder import (
+from src.workload_generator.builders.dualpipe_pipeline_builder import (
     DualPipePipelineWorkloadBuilder,
     build_dualpipe_schedule,
 )

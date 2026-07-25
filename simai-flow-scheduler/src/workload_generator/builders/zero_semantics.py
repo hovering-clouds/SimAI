@@ -3,7 +3,7 @@
 import re
 from enum import Enum
 
-from .aicb_parser import AicbWorkItem
+from ..aicb_parser import AicbWorkItem
 
 
 class ZeroItemKind(str, Enum):

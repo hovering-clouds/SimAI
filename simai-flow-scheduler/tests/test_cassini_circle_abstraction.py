@@ -1,7 +1,7 @@
 """Unit tests for src/cassini/circle_abstraction.py — CircleAbstraction."""
 
-from src.cassini.circle_abstraction import CircleAbstraction
-from src.cassini.communication_pattern import CommunicationPattern
+from src.static_analysis.passes.cassini_circle_abstraction import CircleAbstraction
+from src.static_analysis.passes.cassini_communication_pattern import CommunicationPattern
 
 
 # ---------------------------------------------------------------------------

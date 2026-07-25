@@ -9,7 +9,7 @@ import os
 import sys
 import json
 
-project_root = os.path.join(os.path.dirname(__file__), "..")
+project_root = os.path.join(os.path.dirname(__file__), "..", "..")
 sys.path.insert(0, project_root)
 os.chdir(project_root)
 

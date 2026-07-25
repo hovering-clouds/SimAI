@@ -7,8 +7,8 @@ Users implement JobPolicy to customise Job-level scheduling behaviour.
 
 from abc import ABC, abstractmethod
 
-from ..workload_format.schema import Job
-from ..workload_format.compact_workload import SimulationState
+from ...workload_format.schema import Job
+from ...workload_format.compact_workload import SimulationState
 
 
 class JobPolicy(ABC):

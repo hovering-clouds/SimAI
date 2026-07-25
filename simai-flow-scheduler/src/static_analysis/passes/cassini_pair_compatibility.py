@@ -16,7 +16,7 @@ Search strategy:
 
 from dataclasses import dataclass, field
 
-from .circle_abstraction import CircleAbstraction
+from .cassini_circle_abstraction import CircleAbstraction
 
 # Minimum compatibility improvement threshold.  If rotating a job improves the
 # score by less than this, the shift is discarded — the scheduling delay it

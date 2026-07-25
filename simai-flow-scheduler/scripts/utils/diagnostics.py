@@ -8,8 +8,8 @@ import json
 import os
 from collections import defaultdict
 
-from .circle_abstraction import CircleAbstraction
-from .pair_compatibility import CompatibilityResult, compute_score, optimize_link_compatibility
+from src.static_analysis.passes.cassini_circle_abstraction import CircleAbstraction
+from src.static_analysis.passes.cassini_pair_compatibility import CompatibilityResult, compute_score, optimize_link_compatibility
 
 
 def extract_metrics(result, mode_name, elapsed_s=0.0):

@@ -9,7 +9,7 @@ from src.static_analysis.passes.critical_path import (
 )
 from src.static_analysis.passes.routing.bfs import BfsRouteTable
 from src.static_analysis.passes.topology_loader import Link, NetworkTopology
-from src.cassini.communication_pattern import (
+from src.static_analysis.passes.cassini_communication_pattern import (
     CommunicationPattern,
     extract_communication_patterns,
     _path_to_links,

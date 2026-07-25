@@ -3,7 +3,7 @@
 from src.static_analysis.passes.pipeline_task_serializers import (
     ZeroBubbleSerializer,
 )
-from src.executor.pipeline_job_expander import PipelineJobExpander
+from src.executor.dynamic.pipeline_job_expander import PipelineJobExpander
 from src.workload_format.compact_workload import (
     JobExpansionInfo,
     TaskIdAllocator,
@@ -16,7 +16,7 @@ from src.workload_format.schema import (
 )
 from src.workload_generator.aicb_parser import AicbHeader, AicbWorkItem
 from src.workload_generator.inference_profile import InferenceProfileStore
-from src.workload_generator.zero_bubble_pipeline_builder import (
+from src.workload_generator.builders.zero_bubble_pipeline_builder import (
     ZeroBubblePipelineWorkloadBuilder,
 )
 

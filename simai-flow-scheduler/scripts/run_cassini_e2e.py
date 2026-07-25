@@ -48,7 +48,7 @@ project_root = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, project_root)
 os.chdir(project_root)
 
-from src.cassini.diagnostics import (
+from scripts.utils.diagnostics import (
     extract_metrics,
     print_comparison,
     print_job_times,
@@ -59,12 +59,12 @@ from src.cassini.diagnostics import (
     print_compatibility_report,
     save_visualizations,
 )
-from src.cassini.iteration_expansion import (
+from scripts.utils.iteration_expansion import (
     merge_ga_to_one_iteration,
     patch_iteration_time_us,
     replicate_with_cross_iteration_deps,
 )
-from src.cassini.job_placement import (
+from scripts.utils.job_placement import (
     resolve_parallelism,
     PLACEMENT_MAP,
     print_placement_report,

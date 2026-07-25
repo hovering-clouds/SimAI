@@ -12,7 +12,7 @@ Covers:
 from src.workload_format.schema import CommType, Job, ParallelismConfig, Phase
 from src.workload_generator.aicb_parser import AicbHeader, AicbWorkItem
 from src.workload_generator.workload_builder import WorkloadBuilder
-from src.workload_generator.zero_workload_builder import ZeroWorkloadBuilder
+from src.workload_generator.builders.zero_workload_builder import ZeroWorkloadBuilder
 
 
 # ===========================================================================

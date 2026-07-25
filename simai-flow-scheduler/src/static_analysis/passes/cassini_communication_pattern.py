@@ -18,7 +18,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ..workload_format.schema import P2PWorkload
+from ...workload_format.schema import P2PWorkload
 
 if TYPE_CHECKING:
     from ..static_analysis.passes.critical_path import CriticalPathInfo

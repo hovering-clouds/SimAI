@@ -16,9 +16,9 @@ from ..workload_format.compact_workload import (
 )
 
 from .analytical import AnalyticalExecutor, Event, EVENT_BATCH_GAP_US, PROGRESS_INTERVAL
-from .job_manager import JobManager
-from .job_expander import JobExpander
-from .job_policy import JobPolicy
+from .dynamic.job_manager import JobManager
+from .dynamic.job_expander import JobExpander
+from .dynamic.job_policy import JobPolicy
 from .runtime import ActiveFlow
 from .result import ExecutionResult, TaskTiming
 from ..workload_format.compact_workload import expanded_jobs_to_workload

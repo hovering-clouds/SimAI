@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.executor.dynamic_executor import DynamicExecutor
-from src.executor.job_expander import JobExpander
-from src.executor.job_policy import FifoJobPolicy
+from src.executor.dynamic.job_expander import JobExpander
+from src.executor.dynamic.job_policy import FifoJobPolicy
 from src.executor.policies.default_policy import DefaultSchedulingPolicy
 from src.executor.policies.hermod_policy import HermodSchedulingPolicy
 from src.static_analysis.passes.hermod_priority import (
@@ -274,7 +274,7 @@ def main() -> None:
         if args.visualize:
             # Kept in visualize_dynamic.py so standalone and E2E exports have
             # identical labels and Chrome Trace structure.
-            from visualize_dynamic import export_trace
+            from utils.visualize_dynamic import export_trace
             trace_path = output / f"{mode}_trace.json"
             event_count = export_trace(
                 str(output / f"{mode}_execution_result.json"),

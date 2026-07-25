@@ -1,7 +1,7 @@
 """Unit tests for src/cassini/pair_compatibility.py — score & optimise."""
 
-from src.cassini.circle_abstraction import CircleAbstraction
-from src.cassini.pair_compatibility import (
+from src.static_analysis.passes.cassini_circle_abstraction import CircleAbstraction
+from src.static_analysis.passes.cassini_pair_compatibility import (
     CompatibilityResult,
     compute_score,
     optimize_link_compatibility,

@@ -9,20 +9,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from ..workload_format.schema import (
+from ...workload_format.schema import (
     CommType,
     Job,
     P2PWorkload,
     Phase,
     Task,
 )
-from .aicb_parser import AicbHeader, AicbWorkItem
+from ..aicb_parser import AicbHeader, AicbWorkItem
 from .bidirectional_pipeline_builder import (
     BidirectionalPipelineTaskInfo,
     BidirectionalPipelineWorkloadBuilder,
 )
-from .rank_grouper import RankGrouper
-from .workload_builder import WorkloadBuilder
+from ..rank_grouper import RankGrouper
+from ..workload_builder import WorkloadBuilder
 from .zero_semantics import is_zero_workload
 
 

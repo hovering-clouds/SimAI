@@ -17,11 +17,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..workload_format.schema import Job, Meta, P2PWorkload, Phase
-from .aicb_parser import AicbHeader, AicbWorkItem
-from .collective_expander import FlowTask
-from .rank_grouper import RankGrouper
-from .workload_builder import FlowGroupResult, ItemTasks, WorkloadBuilder
+from ...workload_format.schema import Job, Meta, P2PWorkload, Phase
+from ..aicb_parser import AicbHeader, AicbWorkItem
+from ..collective_expander import FlowTask
+from ..rank_grouper import RankGrouper
+from ..workload_builder import FlowGroupResult, ItemTasks, WorkloadBuilder
 from .zero_semantics import (
     ZeroItemKind,
     classify_zero_item,

@@ -17,8 +17,8 @@ from ..passes.critical_path import CriticalPathInfo, analyze_critical_path
 from ..passes.routing import RouteTable, BfsStrategy
 from ..passes.task_serializer import CppReferenceSerializer, ExecutionPlan
 from ..passes.topology_loader import NetworkTopology
-from ...cassini.affinity_graph import build_affinity_graph, compute_cluster_time_shifts
-from ...cassini.communication_pattern import (
+from ..passes.cassini_affinity_graph import build_affinity_graph, compute_cluster_time_shifts
+from ..passes.cassini_communication_pattern import (
     CommunicationPattern,
     extract_communication_patterns,
 )

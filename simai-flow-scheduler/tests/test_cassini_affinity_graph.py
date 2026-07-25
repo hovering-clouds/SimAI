@@ -1,12 +1,12 @@
 """Unit tests for src/cassini/affinity_graph.py — BFS traversal & global shifts."""
 
-from src.cassini.affinity_graph import (
+from src.static_analysis.passes.cassini_affinity_graph import (
     AffinityGraph,
     build_affinity_graph,
     compute_cluster_time_shifts,
     _find_connected_components,
 )
-from src.cassini.communication_pattern import CommunicationPattern
+from src.static_analysis.passes.cassini_communication_pattern import CommunicationPattern
 
 
 # ---------------------------------------------------------------------------

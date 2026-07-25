@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from src.executor.analytical import AnalyticalExecutor
@@ -28,16 +28,16 @@ from src.static_analysis.strategies.advanced_pipeline_strategies import (
 from src.workload_format.schema import CommType, Job, ParallelismConfig
 from src.workload_format.writer import WorkloadWriter
 from src.workload_generator.aicb_parser import AicbParser
-from src.workload_generator.bidirectional_pipeline_builder import (
+from src.workload_generator.builders.bidirectional_pipeline_builder import (
     BidirectionalPipelineWorkloadBuilder,
 )
-from src.workload_generator.dualpipe_pipeline_builder import (
+from src.workload_generator.builders.dualpipe_pipeline_builder import (
     DualPipePipelineWorkloadBuilder,
 )
-from src.workload_generator.interleaved_pipeline_builder import (
+from src.workload_generator.builders.interleaved_pipeline_builder import (
     InterleavedPipelineWorkloadBuilder,
 )
-from src.workload_generator.zero_bubble_pipeline_builder import (
+from src.workload_generator.builders.zero_bubble_pipeline_builder import (
     ZeroBubblePipelineWorkloadBuilder,
 )
 

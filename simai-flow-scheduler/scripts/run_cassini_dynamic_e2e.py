@@ -29,17 +29,17 @@ project_root = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, project_root)
 os.chdir(project_root)
 
-from src.cassini.iteration_expansion import (
+from scripts.utils.iteration_expansion import (
     merge_ga_to_one_iteration,
     patch_iteration_time_us,
 )
-from src.cassini.job_placement import (
+from scripts.utils.job_placement import (
     resolve_parallelism,
     PLACEMENT_MAP,
 )
 from src.executor.dynamic_executor import DynamicExecutor
-from src.executor.job_expander import JobExpander
-from src.executor.job_policy import DelayByJobPolicy
+from src.executor.dynamic.job_expander import JobExpander
+from src.executor.dynamic.job_policy import DelayByJobPolicy
 from src.executor.policies.cassini_policy import CassiniSchedulingPolicy
 from src.static_analysis.strategies.cassini_strategy import CassiniAnalyzer
 from src.static_analysis.strategies.default_strategy import LightweightAnalyzer

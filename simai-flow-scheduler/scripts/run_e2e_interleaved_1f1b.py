@@ -5,7 +5,7 @@ Usage:
     python scripts/run_e2e_interleaved_1f1b.py --vpp 2 --aicb <path>
 """
 
-from pipeline_e2e_common import run_pipeline_e2e_cli
+from utils.pipeline_e2e_common import run_pipeline_e2e_cli
 
 
 if __name__ == "__main__":

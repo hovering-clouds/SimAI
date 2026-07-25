@@ -7,7 +7,7 @@ Usage:
 The ``bidirectional`` mode name is retained for compatibility.
 """
 
-from pipeline_e2e_common import run_pipeline_e2e_cli
+from utils.pipeline_e2e_common import run_pipeline_e2e_cli
 
 
 if __name__ == "__main__":

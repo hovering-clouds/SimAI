@@ -1,6 +1,6 @@
 """Golden DAG tests for direct Interleaved 1F1B expansion."""
 
-from src.executor.pipeline_job_expander import PipelineJobExpander
+from src.executor.dynamic.pipeline_job_expander import PipelineJobExpander
 from src.static_analysis.passes.pipeline_task_serializers import (
     InterleavedOneFOneBSerializer,
 )
@@ -11,7 +11,7 @@ from src.workload_format.compact_workload import (
 from src.workload_format.schema import CommType, Job, ParallelismConfig, Phase
 from src.workload_generator.aicb_parser import AicbHeader, AicbWorkItem
 from src.workload_generator.inference_profile import InferenceProfileStore
-from src.workload_generator.interleaved_pipeline_builder import (
+from src.workload_generator.builders.interleaved_pipeline_builder import (
     InterleavedPipelineWorkloadBuilder,
 )
 

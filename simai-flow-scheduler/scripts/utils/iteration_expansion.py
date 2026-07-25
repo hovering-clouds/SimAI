@@ -16,7 +16,7 @@ from collections import defaultdict
 from dataclasses import replace
 from statistics import median
 
-from .task_serializer_patch import install_cassini_task_serializer_patch
+from src.static_analysis.passes.cassini_task_serializer_patch import install_cassini_task_serializer_patch
 
 
 install_cassini_task_serializer_patch()

@@ -4,19 +4,19 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from ..workload_format.compact_workload import ExpandedJob, JobExpansionInfo
-from ..workload_format.schema import Job
-from ..workload_generator.aicb_parser import AicbParser
-from ..workload_generator.interleaved_pipeline_builder import (
+from ...workload_format.compact_workload import ExpandedJob, JobExpansionInfo
+from ...workload_format.schema import Job
+from ...workload_generator.aicb_parser import AicbParser
+from ...workload_generator.builders.interleaved_pipeline_builder import (
     InterleavedPipelineWorkloadBuilder,
 )
-from ..workload_generator.zero_bubble_pipeline_builder import (
+from ...workload_generator.builders.zero_bubble_pipeline_builder import (
     ZeroBubblePipelineWorkloadBuilder,
 )
-from ..workload_generator.bidirectional_pipeline_builder import (
+from ...workload_generator.builders.bidirectional_pipeline_builder import (
     BidirectionalPipelineWorkloadBuilder,
 )
-from ..workload_generator.dualpipe_pipeline_builder import (
+from ...workload_generator.builders.dualpipe_pipeline_builder import (
     DualPipePipelineWorkloadBuilder,
 )
 from .job_expander import JobExpander

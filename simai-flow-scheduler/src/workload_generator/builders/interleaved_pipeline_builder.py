@@ -10,11 +10,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..workload_format.schema import CommType, Job, P2PWorkload, Phase, TaskType
-from .aicb_parser import AicbHeader, AicbWorkItem
-from .collective_expander import FlowTask
-from .rank_grouper import RankGrouper
-from .workload_builder import ItemTasks, WorkloadBuilder
+from ...workload_format.schema import CommType, Job, P2PWorkload, Phase, TaskType
+from ..aicb_parser import AicbHeader, AicbWorkItem
+from ..collective_expander import FlowTask
+from ..rank_grouper import RankGrouper
+from ..workload_builder import ItemTasks, WorkloadBuilder
 from .zero_semantics import is_zero_workload
 
 

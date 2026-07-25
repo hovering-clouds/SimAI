@@ -5,8 +5,8 @@ Tracks active/completed Jobs, checks JobDAG for newly eligible Jobs,
 and coordinates expansion via JobExpander + JobPolicy.
 """
 
-from ..workload_format.schema import Job, Task
-from ..workload_format.compact_workload import (
+from ...workload_format.schema import Job, Task
+from ...workload_format.compact_workload import (
     JobDAG, JobExpansionInfo, ExpandedJob, SimulationState,
 )
 from .job_expander import JobExpander

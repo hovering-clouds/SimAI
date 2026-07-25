@@ -19,7 +19,7 @@ from .task_serializer import (
     TaskSerializer,
 )
 from ...workload_format.schema import P2PWorkload, Phase, Task
-from ...workload_generator.dualpipe_pipeline_builder import (
+from ...workload_generator.builders.dualpipe_pipeline_builder import (
     build_dualpipe_schedule,
 )
 from ...workload_generator.rank_grouper import RankGrouper

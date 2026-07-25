@@ -7,14 +7,14 @@ tasks on demand during dynamic simulation.
 
 import json
 
-from ..workload_format.schema import Job, Task
-from ..workload_format.compact_workload import (
+from ...workload_format.schema import Job, Task
+from ...workload_format.compact_workload import (
     JobExpansionInfo, ExpandedJob, TaskIdAllocator,
 )
-from ..workload_generator.inference_trace_expander import InferenceTraceExpander
-from ..workload_generator.inference_profile import InferenceProfileStore
-from ..workload_generator.workload_builder import WorkloadBuilder
-from ..workload_generator.aicb_parser import AicbParser
+from ...workload_generator.inference_trace_expander import InferenceTraceExpander
+from ...workload_generator.inference_profile import InferenceProfileStore
+from ...workload_generator.workload_builder import WorkloadBuilder
+from ...workload_generator.aicb_parser import AicbParser
 class JobExpander:
     """Expands a single Job (Job + JobExpansionInfo) into ExpandedJob on demand.
 

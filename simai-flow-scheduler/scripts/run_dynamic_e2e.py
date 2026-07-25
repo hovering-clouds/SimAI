@@ -28,8 +28,8 @@ from src.static_analysis.passes.routing import BfsRouteTable
 from src.static_analysis.passes.task_serializer import ExecutionPlan
 from src.workload_format.compact_workload import JobDAG, TaskIdAllocator
 from src.executor.dynamic_executor import DynamicExecutor
-from src.executor.job_expander import JobExpander
-from src.executor.job_policy import FifoJobPolicy
+from src.executor.dynamic.job_expander import JobExpander
+from src.executor.dynamic.job_policy import FifoJobPolicy
 from src.executor.policies.default_policy import DefaultSchedulingPolicy
 
 

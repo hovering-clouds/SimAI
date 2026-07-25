@@ -13,7 +13,7 @@ each job's pattern r = LCM / T times around the unified circle.
 
 from dataclasses import dataclass
 
-from .communication_pattern import CommunicationPattern
+from .cassini_communication_pattern import CommunicationPattern
 
 # Upper bound on unified perimeter (50 seconds in microseconds) to prevent
 # unbounded LCM growth when jobs have coprime iteration times.
