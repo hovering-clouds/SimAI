@@ -3,7 +3,7 @@ Workload generator module - AICB to P2P Workload conversion.
 """
 
 from .aicb_parser import AicbParser, AicbHeader, AicbWorkItem
-from .rank_grouper import RankGrouper
+from .rank_grouper import RankGrouper, MegatronRankGrouper, VllmRankGrouper
 from .collective_expander import CollectiveExpander, FlowTask
 from .workload_builder import WorkloadBuilder, FlowGroupResult, ItemTasks
 from .builders.zero_workload_builder import ZeroWorkloadBuilder
@@ -14,6 +14,8 @@ __all__ = [
     "AicbHeader",
     "AicbWorkItem",
     "RankGrouper",
+    "MegatronRankGrouper",
+    "VllmRankGrouper",
     "CollectiveExpander",
     "FlowTask",
     "WorkloadBuilder",

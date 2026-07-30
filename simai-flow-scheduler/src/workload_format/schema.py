@@ -100,11 +100,23 @@ class Network:
 
 @dataclass
 class ParallelismConfig:
-    """Parallelism configuration for a job."""
+    """Parallelism configuration for a job.
+
+    Layout convention (3D): [PP][DP][TP]
+    - tp: tensor parallel size
+    - dp: total model replicas (including EP groups as sub-division)
+    - pp: pipeline parallel size
+    - ep: expert groups (interpretation depends on EP partitioning strategy)
+    """
     tp: int = 1
     dp: int = 1
     pp: int = 1
     ep: int = 1
+
+    @property
+    def world_size(self) -> int:
+        """Total GPUs: tp × dp × pp (ep is a sub-division of dp, not a multiplier)."""
+        return self.tp * self.dp * self.pp
 
 
 @dataclass
