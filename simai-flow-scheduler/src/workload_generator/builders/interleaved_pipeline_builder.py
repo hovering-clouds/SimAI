@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from ...workload_format.schema import CommType, Job, P2PWorkload, Phase, TaskType
 from ..aicb_parser import AicbHeader, AicbWorkItem
 from ..collective_expander import FlowTask
-from ..rank_grouper import RankGrouper
+from ..rank_grouper import MegatronRankGrouper
 from ..workload_builder import ItemTasks, WorkloadBuilder
 from .zero_semantics import is_zero_workload
 
@@ -74,7 +74,7 @@ class InterleavedPipelineWorkloadBuilder(WorkloadBuilder):
         self.virtual_pipeline_size = virtual_pipeline_size
         self.task_info = task_info if task_info is not None else {}
         self._active_job: Job | None = None
-        self._active_grouper: RankGrouper | None = None
+        self._active_grouper: MegatronRankGrouper | None = None
         self._active_ga = 0
         self._items_per_ga = 0
         self._layer_to_chunk: dict[int, int] = {}
@@ -111,7 +111,7 @@ class InterleavedPipelineWorkloadBuilder(WorkloadBuilder):
             )
 
         self._active_job = job
-        self._active_grouper = RankGrouper(job.assigned_nodes, job.parallelism)
+        self._active_grouper = MegatronRankGrouper(job.assigned_nodes, job.parallelism)
         if self._active_grouper.pp > 1 and aicb_header.pp_comm_size <= 0:
             raise ValueError(
                 "interleaved_1f1b requires a positive pp_comm_size when pp > 1"
@@ -241,7 +241,7 @@ class InterleavedPipelineWorkloadBuilder(WorkloadBuilder):
 
     def _generate_pp_flows(
         self,
-        grouper: RankGrouper,
+        grouper: MegatronRankGrouper,
         aicb_header: AicbHeader,
         ga_groups: list[list[ItemTasks]],
         items_per_ga: int,
@@ -266,70 +266,69 @@ class InterleavedPipelineWorkloadBuilder(WorkloadBuilder):
                 destination_layer = self._chunk_layers[destination_chunk][0]
 
                 for dp_idx in range(grouper.dp):
-                    for ep_idx in range(grouper.ep):
-                        for tp_idx in range(grouper.tp):
-                            src = grouper.get_pp_rank(
-                                source_stage, dp_idx, ep_idx, tp_idx,
-                            )
-                            dst = grouper.get_pp_rank(
-                                destination_stage, dp_idx, ep_idx, tp_idx,
-                            )
-                            fwd = FlowTask(
-                                task_id=task_id_counter,
-                                job_id=job_id,
-                                type=TaskType.FLOW,
-                                src=src,
-                                dst=dst,
-                                size_bytes=aicb_header.pp_comm_size,
-                                comm_type=CommType.PP_SEND,
-                                phase=Phase.FORWARD,
-                                layer_id=source_layer,
-                                iteration=microbatch_id,
-                                item_id=ga_group[
-                                    source_layer
-                                ].fwd_computes[src].item_id,
-                            )
-                            task_id_counter += 1
-                            bwd = FlowTask(
-                                task_id=task_id_counter,
-                                job_id=job_id,
-                                type=TaskType.FLOW,
-                                src=dst,
-                                dst=src,
-                                size_bytes=aicb_header.pp_comm_size,
-                                comm_type=CommType.PP_SEND,
-                                phase=Phase.BACKWARD_INPUT,
-                                layer_id=destination_layer,
-                                iteration=microbatch_id,
-                                item_id=ga_group[
-                                    destination_layer
-                                ].ig_computes[dst].item_id,
-                            )
-                            task_id_counter += 1
-                            result.all_flows.extend((fwd, bwd))
-                            result.boundaries.extend((
-                                _InterleavedBoundary(
-                                    fwd, microbatch_id,
-                                    source_chunk, destination_chunk,
-                                    source_stage, destination_stage,
-                                    source_layer, destination_layer,
-                                    logical_boundary, "forward",
-                                ),
-                                _InterleavedBoundary(
-                                    bwd, microbatch_id,
-                                    destination_chunk, source_chunk,
-                                    destination_stage, source_stage,
-                                    destination_layer, source_layer,
-                                    logical_boundary, "backward",
-                                ),
-                            ))
+                    for tp_idx in range(grouper.tp):
+                        src = grouper.get_pp_rank(
+                            source_stage, dp_idx, tp_idx,
+                        )
+                        dst = grouper.get_pp_rank(
+                            destination_stage, dp_idx, tp_idx,
+                        )
+                        fwd = FlowTask(
+                            task_id=task_id_counter,
+                            job_id=job_id,
+                            type=TaskType.FLOW,
+                            src=src,
+                            dst=dst,
+                            size_bytes=aicb_header.pp_comm_size,
+                            comm_type=CommType.PP_SEND,
+                            phase=Phase.FORWARD,
+                            layer_id=source_layer,
+                            iteration=microbatch_id,
+                            item_id=ga_group[
+                                source_layer
+                            ].fwd_computes[src].item_id,
+                        )
+                        task_id_counter += 1
+                        bwd = FlowTask(
+                            task_id=task_id_counter,
+                            job_id=job_id,
+                            type=TaskType.FLOW,
+                            src=dst,
+                            dst=src,
+                            size_bytes=aicb_header.pp_comm_size,
+                            comm_type=CommType.PP_SEND,
+                            phase=Phase.BACKWARD_INPUT,
+                            layer_id=destination_layer,
+                            iteration=microbatch_id,
+                            item_id=ga_group[
+                                destination_layer
+                            ].ig_computes[dst].item_id,
+                        )
+                        task_id_counter += 1
+                        result.all_flows.extend((fwd, bwd))
+                        result.boundaries.extend((
+                            _InterleavedBoundary(
+                                fwd, microbatch_id,
+                                source_chunk, destination_chunk,
+                                source_stage, destination_stage,
+                                source_layer, destination_layer,
+                                logical_boundary, "forward",
+                            ),
+                            _InterleavedBoundary(
+                                bwd, microbatch_id,
+                                destination_chunk, source_chunk,
+                                destination_stage, source_stage,
+                                destination_layer, source_layer,
+                                logical_boundary, "backward",
+                            ),
+                        ))
         return result, task_id_counter
 
     def _wire_pp_dependencies(
         self,
         pp_result: InterleavedPPFlowResult,
         ga_groups: list[list[ItemTasks]],
-        grouper: RankGrouper,
+        grouper: MegatronRankGrouper,
     ):
         del grouper
         for boundary in pp_result.boundaries:
@@ -385,7 +384,7 @@ class InterleavedPipelineWorkloadBuilder(WorkloadBuilder):
 
     def _record_compute_info(self, workload: P2PWorkload) -> None:
         grouper = self._require_grouper()
-        stage_size = grouper.dp * grouper.ep * grouper.tp
+        stage_size = grouper.dp * grouper.tp
         node_to_stage = {
             node: index // stage_size
             for index, node in enumerate(grouper.nodes)
@@ -418,7 +417,7 @@ class InterleavedPipelineWorkloadBuilder(WorkloadBuilder):
                 logical_stage_id=chunk * grouper.pp + stage,
             )
 
-    def _require_grouper(self) -> RankGrouper:
+    def _require_grouper(self) -> MegatronRankGrouper:
         if self._active_grouper is None:
             raise RuntimeError("Interleaved builder has no active job")
         return self._active_grouper

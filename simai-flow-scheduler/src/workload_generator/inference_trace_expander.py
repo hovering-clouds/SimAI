@@ -31,7 +31,7 @@ from ..workload_format.schema import (
 )
 from .collective_expander import FlowTask, AllReduceExpander, AlltoAllExpander
 from .inference_profile import InferenceProfileStore, LayerProfile
-from .rank_grouper import RankGrouper
+from .rank_grouper import MegatronRankGrouper
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -377,10 +377,10 @@ class InferenceTraceExpander:
             return list(self._assigned_nodes[offset:offset + ws])
         return list(range(offset, offset + ws))
 
-    def _grouper(self, replica_id: int) -> RankGrouper:
-        return RankGrouper(
+    def _grouper(self, replica_id: int) -> MegatronRankGrouper:
+        return MegatronRankGrouper(
             self._replica_ranks(replica_id),
-            ParallelismConfig(tp=self._tp, ep=self._ep, pp=self._pp),
+            ParallelismConfig(tp=self._tp, dp=self._ep, pp=self._pp, ep=self._ep),
         )
 
     def _stage_ranks(self, replica_id: int, stage_id: int) -> list[int]:
@@ -391,11 +391,11 @@ class InferenceTraceExpander:
             return list(self._assigned_nodes[offset:offset + stage_size])
         return list(range(offset, offset + stage_size))
 
-    def _stage_grouper(self, replica_id: int, stage_id: int) -> RankGrouper:
-        """RankGrouper for a specific PP stage (dp=1, pp=1, only tp+ep)."""
-        return RankGrouper(
+    def _stage_grouper(self, replica_id: int, stage_id: int) -> MegatronRankGrouper:
+        """MegatronRankGrouper for a specific PP stage (dp=ep, pp=1, only tp+ep)."""
+        return MegatronRankGrouper(
             self._stage_ranks(replica_id, stage_id),
-            ParallelismConfig(tp=self._tp, ep=self._ep, pp=1),
+            ParallelismConfig(tp=self._tp, dp=self._ep, pp=1, ep=self._ep),
         )
 
     @staticmethod
@@ -511,7 +511,7 @@ class InferenceTraceExpander:
                     else:
                         # TP AllReduce: one AllReduce per EP group
                         for ep_idx in range(self._ep):
-                            tp_group = grouper.get_tp_group(0, 0, ep_idx)
+                            tp_group = grouper.get_tp_group(0, ep_idx)
                             flows = self._ar.expand_allreduce(
                                 tp_group, comm_size, "ring", job_id, task_id, "tp")
                             for fl in flows:

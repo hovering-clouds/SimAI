@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from ...workload_format.schema import Job, Meta, P2PWorkload, Phase
 from ..aicb_parser import AicbHeader, AicbWorkItem
 from ..collective_expander import FlowTask
-from ..rank_grouper import RankGrouper
+from ..rank_grouper import MegatronRankGrouper
 from ..workload_builder import FlowGroupResult, ItemTasks, WorkloadBuilder
 from .zero_semantics import (
     ZeroItemKind,
@@ -62,7 +62,7 @@ class ZeroWorkloadBuilder(WorkloadBuilder):
                 "AICB row format; use WorkloadBuilder for generic workloads."
             )
 
-        grouper = RankGrouper(job.assigned_nodes, job.parallelism)
+        grouper = MegatronRankGrouper(job.assigned_nodes, job.parallelism)
         num_pre_items = self._count_zero_pre_items(aicb_items)
         num_post_items = self._count_zero_post_items(aicb_items)
         ga_item_indices = self._split_zero_ga_item_indices(
@@ -140,7 +140,7 @@ class ZeroWorkloadBuilder(WorkloadBuilder):
         self,
         item: AicbWorkItem,
         ranks: list[int],
-        grouper: RankGrouper,
+        grouper: MegatronRankGrouper,
         layer_id: int,
         iteration: int,
         item_id: int,
@@ -384,7 +384,7 @@ class ZeroWorkloadBuilder(WorkloadBuilder):
         self,
         pp_result,  # PPFlowResult
         ga_groups: list[list[ItemTasks]],
-        grouper: RankGrouper,
+        grouper: MegatronRankGrouper,
     ):
         """Wire PP dependencies for ZeRO groups with explicit comm-only rows."""
         for ga_idx, ga_group in enumerate(ga_groups):
@@ -403,28 +403,27 @@ class ZeroWorkloadBuilder(WorkloadBuilder):
                 bwd_flows = pp_result.backward_flows[(ga_idx, pp_boundary)]
 
                 for dp_idx in range(grouper.dp):
-                    for ep_idx in range(grouper.ep):
-                        for tp_idx in range(grouper.tp):
-                            src_rank = grouper.get_pp_rank(
-                                pp_boundary, dp_idx, ep_idx, tp_idx)
-                            dst_rank = grouper.get_pp_rank(
-                                pp_boundary + 1, dp_idx, ep_idx, tp_idx)
+                    for tp_idx in range(grouper.tp):
+                        src_rank = grouper.get_pp_rank(
+                            pp_boundary, dp_idx, tp_idx)
+                        dst_rank = grouper.get_pp_rank(
+                            pp_boundary + 1, dp_idx, tp_idx)
 
-                            fwd_pp = fwd_flows[src_rank]
-                            self._wire_to_flow_sender(
-                                fwd_pp, last_fwd_item.fwd_computes,
-                                last_fwd_item.fwd_result, src_rank)
-                            if dst_rank in first_fwd_item.fwd_computes:
-                                first_fwd_item.fwd_computes[dst_rank].deps.append(
-                                    fwd_pp.task_id)
+                        fwd_pp = fwd_flows[src_rank]
+                        self._wire_to_flow_sender(
+                            fwd_pp, last_fwd_item.fwd_computes,
+                            last_fwd_item.fwd_result, src_rank)
+                        if dst_rank in first_fwd_item.fwd_computes:
+                            first_fwd_item.fwd_computes[dst_rank].deps.append(
+                                fwd_pp.task_id)
 
-                            bwd_pp = bwd_flows[dst_rank]
-                            self._wire_to_flow_sender(
-                                bwd_pp, first_model_ig_item.ig_computes,
-                                first_model_ig_item.ig_result, dst_rank)
-                            if src_rank in last_model_ig_item.ig_computes:
-                                last_model_ig_item.ig_computes[src_rank].deps.append(
-                                    bwd_pp.task_id)
+                        bwd_pp = bwd_flows[dst_rank]
+                        self._wire_to_flow_sender(
+                            bwd_pp, first_model_ig_item.ig_computes,
+                            first_model_ig_item.ig_result, dst_rank)
+                        if src_rank in last_model_ig_item.ig_computes:
+                            last_model_ig_item.ig_computes[src_rank].deps.append(
+                                bwd_pp.task_id)
 
     # ------------------------------------------------------------------
     # Per-rank dependency helpers

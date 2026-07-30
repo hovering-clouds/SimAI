@@ -9,7 +9,7 @@ from ..passes.routing import BfsRouteTable, BfsStrategy, RouteTable
 from ..passes.topology_loader import NetworkTopology
 from ..passes.task_serializer import CppReferenceSerializer, OneFOneBSerializer, ExecutionPlan
 from ...workload_format.schema import P2PWorkload
-from ...workload_generator.rank_grouper import RankGrouper
+from ...workload_generator.rank_grouper import MegatronRankGrouper
 
 
 @dataclass
@@ -105,9 +105,9 @@ class OneFOneBAnalyzer:
         node_to_stage: dict[int, int] = {}
         pp = 1
         for job in workload.jobs:
-            grouper = RankGrouper(job.assigned_nodes, job.parallelism)
+            grouper = MegatronRankGrouper(job.assigned_nodes, job.parallelism)
             pp = grouper.pp
-            stage_size = grouper.dp * grouper.ep * grouper.tp
+            stage_size = grouper.dp * grouper.tp
             for stage_id in range(grouper.pp):
                 for i in range(stage_size):
                     node = grouper.nodes[stage_id * stage_size + i]

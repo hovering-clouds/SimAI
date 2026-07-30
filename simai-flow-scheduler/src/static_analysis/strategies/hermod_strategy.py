@@ -11,7 +11,7 @@ from ..passes.task_serializer import CppReferenceSerializer, OneFOneBSerializer,
 from ..passes.topology_loader import NetworkTopology
 from ...workload_format.schema import P2PWorkload
 from ...workload_generator.aicb_parser import AicbHeader, AicbParser, AicbWorkItem
-from ...workload_generator.rank_grouper import RankGrouper
+from ...workload_generator.rank_grouper import MegatronRankGrouper
 
 
 @dataclass
@@ -50,9 +50,9 @@ class HermodAnalyzer:
         node_to_stage = {}
         pp = 1
         for job in workload.jobs:
-            grouper = RankGrouper(job.assigned_nodes, job.parallelism)
+            grouper = MegatronRankGrouper(job.assigned_nodes, job.parallelism)
             pp = max(pp, grouper.pp)
-            stage_size = grouper.dp * grouper.ep * grouper.tp
+            stage_size = grouper.dp * grouper.tp
             for stage_id in range(grouper.pp):
                 for node in grouper.nodes[stage_id * stage_size:(stage_id + 1) * stage_size]:
                     node_to_stage[node] = stage_id

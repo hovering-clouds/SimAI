@@ -27,7 +27,7 @@ from .collective_expander import (
     FlowTask,
     ReduceScatterExpander,
 )
-from .rank_grouper import RankGrouper
+from .rank_grouper import MegatronRankGrouper
 
 
 @dataclass
@@ -130,7 +130,7 @@ class WorkloadBuilder:
         comm_algo: str = "ring",
     ) -> P2PWorkload:
         """Original generic AICB expansion path."""
-        grouper = RankGrouper(job.assigned_nodes, job.parallelism)
+        grouper = MegatronRankGrouper(job.assigned_nodes, job.parallelism)
 
         # Validate structure
         num_pre_items = self._count_pre_items(aicb_items)
@@ -293,7 +293,7 @@ class WorkloadBuilder:
         self,
         comm_type_str: str,
         comm_size: int,
-        grouper: RankGrouper,
+        grouper: MegatronRankGrouper,
         phase: Phase,
         layer_id: int,
         iteration: int,
@@ -337,28 +337,27 @@ class WorkloadBuilder:
         return result, task_id_counter
 
     def _iter_subgroups(
-        self, context: str, grouper: RankGrouper
+        self, context: str, grouper: MegatronRankGrouper
     ) -> Iterator[list[int]]:
         """Yield all parallel subgroups for the given comm context."""
         if context == "tp":
             for pp_idx in range(grouper.pp):
                 for dp_idx in range(grouper.dp):
-                    for ep_idx in range(grouper.ep):
-                        yield grouper.get_tp_group(pp_idx, dp_idx, ep_idx)
+                    yield grouper.get_tp_group(pp_idx, dp_idx)
         elif context == "dp":
+            for pp_idx in range(grouper.pp):
+                for tp_idx in range(grouper.tp):
+                    yield grouper.get_dp_group(pp_idx, tp_idx)
+        elif context == "ep":
+            for pp_idx in range(grouper.pp):
+                for dp_ep_idx in range(grouper.dp_ep):
+                    for tp_idx in range(grouper.tp):
+                        yield grouper.get_ep_group(pp_idx, dp_ep_idx, tp_idx)
+        elif context == "dp_ep":
             for pp_idx in range(grouper.pp):
                 for ep_idx in range(grouper.ep):
                     for tp_idx in range(grouper.tp):
-                        yield grouper.get_dp_group(pp_idx, ep_idx, tp_idx)
-        elif context == "ep":
-            for pp_idx in range(grouper.pp):
-                for dp_idx in range(grouper.dp):
-                    for tp_idx in range(grouper.tp):
-                        yield grouper.get_ep_group(pp_idx, dp_idx, tp_idx)
-        elif context == "dp_ep":
-            for pp_idx in range(grouper.pp):
-                for tp_idx in range(grouper.tp):
-                    yield grouper.get_dp_ep_group(pp_idx, tp_idx)
+                        yield grouper.get_dp_ep_group(pp_idx, ep_idx, tp_idx)
 
     def _call_expander(
         self,
@@ -630,7 +629,7 @@ class WorkloadBuilder:
 
     def _generate_pp_flows(
         self,
-        grouper: RankGrouper,
+        grouper: MegatronRankGrouper,
         aicb_header: AicbHeader,
         ga_groups: list[list[ItemTasks]],
         items_per_ga: int,
@@ -639,7 +638,7 @@ class WorkloadBuilder:
     ) -> tuple["PPFlowResult", int]:
         """Generate PP flow tasks for all GA steps and PP stage boundaries.
 
-        For each (ga_step, pp_boundary, dp, ep, tp):
+        For each (ga_step, pp_boundary, dp, tp):
           - Forward PP flow: stage k → stage k+1 (activation)
           - Backward PP flow: stage k+1 → stage k (gradient)
         """
@@ -654,44 +653,43 @@ class WorkloadBuilder:
                 bwd_flows: dict[int, FlowTask] = {}
 
                 for dp_idx in range(grouper.dp):
-                    for ep_idx in range(grouper.ep):
-                        for tp_idx in range(grouper.tp):
-                            src_rank = grouper.get_pp_rank(
-                                pp_boundary, dp_idx, ep_idx, tp_idx)
-                            dst_rank = grouper.get_pp_rank(
-                                pp_boundary + 1, dp_idx, ep_idx, tp_idx)
+                    for tp_idx in range(grouper.tp):
+                        src_rank = grouper.get_pp_rank(
+                            pp_boundary, dp_idx, tp_idx)
+                        dst_rank = grouper.get_pp_rank(
+                            pp_boundary + 1, dp_idx, tp_idx)
 
-                            fwd_flow = FlowTask(
-                                task_id=task_id_counter,
-                                job_id=job_id,
-                                type=TaskType.FLOW,
-                                src=src_rank,
-                                dst=dst_rank,
-                                size_bytes=aicb_header.pp_comm_size,
-                                comm_type=CommType.PP_SEND,
-                                phase=Phase.FORWARD,
-                                layer_id=items_per_ga - 1,
-                                iteration=ga_idx,
-                            )
-                            fwd_flows[src_rank] = fwd_flow
-                            all_flows.append(fwd_flow)
-                            task_id_counter += 1
+                        fwd_flow = FlowTask(
+                            task_id=task_id_counter,
+                            job_id=job_id,
+                            type=TaskType.FLOW,
+                            src=src_rank,
+                            dst=dst_rank,
+                            size_bytes=aicb_header.pp_comm_size,
+                            comm_type=CommType.PP_SEND,
+                            phase=Phase.FORWARD,
+                            layer_id=items_per_ga - 1,
+                            iteration=ga_idx,
+                        )
+                        fwd_flows[src_rank] = fwd_flow
+                        all_flows.append(fwd_flow)
+                        task_id_counter += 1
 
-                            bwd_flow = FlowTask(
-                                task_id=task_id_counter,
-                                job_id=job_id,
-                                type=TaskType.FLOW,
-                                src=dst_rank,
-                                dst=src_rank,
-                                size_bytes=aicb_header.pp_comm_size,
-                                comm_type=CommType.PP_SEND,
-                                phase=Phase.BACKWARD_INPUT,
-                                layer_id=0,
-                                iteration=ga_idx,
-                            )
-                            bwd_flows[dst_rank] = bwd_flow
-                            all_flows.append(bwd_flow)
-                            task_id_counter += 1
+                        bwd_flow = FlowTask(
+                            task_id=task_id_counter,
+                            job_id=job_id,
+                            type=TaskType.FLOW,
+                            src=dst_rank,
+                            dst=src_rank,
+                            size_bytes=aicb_header.pp_comm_size,
+                            comm_type=CommType.PP_SEND,
+                            phase=Phase.BACKWARD_INPUT,
+                            layer_id=0,
+                            iteration=ga_idx,
+                        )
+                        bwd_flows[dst_rank] = bwd_flow
+                        all_flows.append(bwd_flow)
+                        task_id_counter += 1
 
                 forward_pp[(ga_idx, pp_boundary)] = fwd_flows
                 backward_pp[(ga_idx, pp_boundary)] = bwd_flows
@@ -706,7 +704,7 @@ class WorkloadBuilder:
         self,
         pp_result: "PPFlowResult",
         ga_groups: list[list[ItemTasks]],
-        grouper: RankGrouper,
+        grouper: MegatronRankGrouper,
     ):
         """Wire PP flow sender/receiver dependencies.
 
@@ -727,28 +725,27 @@ class WorkloadBuilder:
                 bwd_flows = pp_result.backward_flows[(ga_idx, pp_boundary)]
 
                 for dp_idx in range(grouper.dp):
-                    for ep_idx in range(grouper.ep):
-                        for tp_idx in range(grouper.tp):
-                            src_rank = grouper.get_pp_rank(
-                                pp_boundary, dp_idx, ep_idx, tp_idx)
-                            dst_rank = grouper.get_pp_rank(
-                                pp_boundary + 1, dp_idx, ep_idx, tp_idx)
+                    for tp_idx in range(grouper.tp):
+                        src_rank = grouper.get_pp_rank(
+                            pp_boundary, dp_idx, tp_idx)
+                        dst_rank = grouper.get_pp_rank(
+                            pp_boundary + 1, dp_idx, tp_idx)
 
-                            # Forward PP: src_rank sends activation after L{vpp-1}.fwd
-                            fwd_pp = fwd_flows[src_rank]
-                            self._wire_to_flow_sender(
-                                fwd_pp, last_item.fwd_computes,
-                                last_item.fwd_result, src_rank)
-                            # dst_rank's L0.fwd waits for the PP flow
-                            first_item.fwd_computes[dst_rank].deps.append(fwd_pp.task_id)
+                        # Forward PP: src_rank sends activation after L{vpp-1}.fwd
+                        fwd_pp = fwd_flows[src_rank]
+                        self._wire_to_flow_sender(
+                            fwd_pp, last_item.fwd_computes,
+                            last_item.fwd_result, src_rank)
+                        # dst_rank's L0.fwd waits for the PP flow
+                        first_item.fwd_computes[dst_rank].deps.append(fwd_pp.task_id)
 
-                            # Backward PP: dst_rank sends gradient after L0.ig
-                            bwd_pp = bwd_flows[dst_rank]
-                            self._wire_to_flow_sender(
-                                bwd_pp, first_item.ig_computes,
-                                first_item.ig_result, dst_rank)
-                            # src_rank's L{vpp-1}.ig waits for the PP flow
-                            last_item.ig_computes[src_rank].deps.append(bwd_pp.task_id)
+                        # Backward PP: dst_rank sends gradient after L0.ig
+                        bwd_pp = bwd_flows[dst_rank]
+                        self._wire_to_flow_sender(
+                            bwd_pp, first_item.ig_computes,
+                            first_item.ig_result, dst_rank)
+                        # src_rank's L{vpp-1}.ig waits for the PP flow
+                        last_item.ig_computes[src_rank].deps.append(bwd_pp.task_id)
 
     def _wire_to_flow_sender(
         self,

@@ -21,7 +21,7 @@ from .bidirectional_pipeline_builder import (
     BidirectionalPipelineTaskInfo,
     BidirectionalPipelineWorkloadBuilder,
 )
-from ..rank_grouper import RankGrouper
+from ..rank_grouper import MegatronRankGrouper
 from ..workload_builder import WorkloadBuilder
 from .zero_semantics import is_zero_workload
 
@@ -361,7 +361,7 @@ class DualPipePipelineWorkloadBuilder(BidirectionalPipelineWorkloadBuilder):
             raise ValueError(
                 "DualPipe does not support ambiguous DeepSpeed ZeRO/FSDP rows"
             )
-        grouper = RankGrouper(job.assigned_nodes, job.parallelism)
+        grouper = MegatronRankGrouper(job.assigned_nodes, job.parallelism)
         self._validate_dualpipe_shape(grouper.pp, aicb_header.ga, job.job_id)
         if aicb_header.pp_comm_size <= 0:
             raise ValueError("DualPipe requires a positive pp_comm_size")
@@ -441,14 +441,13 @@ class DualPipePipelineWorkloadBuilder(BidirectionalPipelineWorkloadBuilder):
     def _build_dualpipe_sidecar(
         self,
         workload: P2PWorkload,
-        grouper: RankGrouper,
+        grouper: MegatronRankGrouper,
         header: AicbHeader,
     ) -> None:
         stage_by_node = {
-            grouper.get_pp_rank(stage, dp_idx, ep_idx, tp_idx): stage
+            grouper.get_pp_rank(stage, dp_idx, tp_idx): stage
             for stage in range(grouper.pp)
             for dp_idx in range(grouper.dp)
-            for ep_idx in range(grouper.ep)
             for tp_idx in range(grouper.tp)
         }
         schedules = {

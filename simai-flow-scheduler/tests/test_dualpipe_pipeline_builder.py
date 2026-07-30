@@ -65,7 +65,8 @@ def _build(
     overlap_model="conservative",
     overlap_factor=None,
 ):
-    nodes = [10 + index * 3 for index in range(pp * tp * ep * dp)]
+    effective_dp = dp * ep  # new model: dp includes the ep factor
+    nodes = [10 + index * 3 for index in range(pp * tp * effective_dp)]
     header = AicbHeader(
         tp=tp,
         ep=ep,
@@ -84,7 +85,7 @@ def _build(
     job = Job(
         job_id=0,
         assigned_nodes=nodes,
-        parallelism=ParallelismConfig(tp=tp, dp=dp, pp=pp, ep=ep),
+        parallelism=ParallelismConfig(tp=tp, dp=effective_dp, pp=pp, ep=ep),
     )
     sidecar = {}
     workload = DualPipePipelineWorkloadBuilder(

@@ -18,7 +18,7 @@ from ...workload_format.schema import (
     Task,
 )
 from ..aicb_parser import AicbHeader, AicbWorkItem
-from ..rank_grouper import RankGrouper
+from ..rank_grouper import MegatronRankGrouper
 from ..workload_builder import ItemTasks, WorkloadBuilder
 from .zero_semantics import is_zero_workload
 
@@ -49,7 +49,7 @@ class ZeroBubblePipelineWorkloadBuilder(WorkloadBuilder):
     ):
         super().__init__()
         self.task_info = task_info if task_info is not None else {}
-        self._active_grouper: RankGrouper | None = None
+        self._active_grouper: MegatronRankGrouper | None = None
 
     def build_from_aicb(
         self,
@@ -66,7 +66,7 @@ class ZeroBubblePipelineWorkloadBuilder(WorkloadBuilder):
         if aicb_header.ga < 1:
             raise ValueError("zero_bubble requires ga >= 1")
 
-        self._active_grouper = RankGrouper(
+        self._active_grouper = MegatronRankGrouper(
             job.assigned_nodes, job.parallelism,
         )
         if self._active_grouper.pp > 1 and aicb_header.pp_comm_size <= 0:
@@ -120,7 +120,7 @@ class ZeroBubblePipelineWorkloadBuilder(WorkloadBuilder):
     def _record_task_info(self, workload: P2PWorkload) -> None:
         grouper = self._require_grouper()
         node_to_stage: dict[int, int] = {}
-        stage_width = grouper.dp * grouper.ep * grouper.tp
+        stage_width = grouper.dp * grouper.tp
         for stage_id in range(grouper.pp):
             start = stage_id * stage_width
             for node in grouper.nodes[start:start + stage_width]:
@@ -173,7 +173,7 @@ class ZeroBubblePipelineWorkloadBuilder(WorkloadBuilder):
             return "OPT"
         return "OTHER"
 
-    def _require_grouper(self) -> RankGrouper:
+    def _require_grouper(self) -> MegatronRankGrouper:
         if self._active_grouper is None:
             raise RuntimeError("zero_bubble builder has no active rank grouper")
         return self._active_grouper

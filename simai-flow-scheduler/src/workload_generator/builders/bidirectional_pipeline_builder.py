@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from ...workload_format.schema import CommType, Job, P2PWorkload, Phase, TaskType
 from ..aicb_parser import AicbHeader, AicbWorkItem
 from ..collective_expander import FlowTask
-from ..rank_grouper import RankGrouper
+from ..rank_grouper import MegatronRankGrouper
 from ..workload_builder import ItemTasks, WorkloadBuilder
 from .zero_semantics import is_zero_workload
 
@@ -70,7 +70,7 @@ class BidirectionalPipelineWorkloadBuilder(WorkloadBuilder):
             raise ValueError("gradient_sync_bytes must be positive when provided")
         self.gradient_sync_bytes = gradient_sync_bytes
         self._active_job: Job | None = None
-        self._active_grouper: RankGrouper | None = None
+        self._active_grouper: MegatronRankGrouper | None = None
         self._active_ga = 0
 
     def build_from_aicb(
@@ -85,7 +85,7 @@ class BidirectionalPipelineWorkloadBuilder(WorkloadBuilder):
                 "bidirectional does not support the DeepSpeed ZeRO/FSDP "
                 "AICB row format"
             )
-        grouper = RankGrouper(job.assigned_nodes, job.parallelism)
+        grouper = MegatronRankGrouper(job.assigned_nodes, job.parallelism)
         self._validate_shape(grouper.pp, aicb_header.ga, job.job_id)
         if aicb_header.pp_comm_size <= 0:
             raise ValueError(
@@ -111,7 +111,7 @@ class BidirectionalPipelineWorkloadBuilder(WorkloadBuilder):
 
     def _generate_pp_flows(
         self,
-        grouper: RankGrouper,
+        grouper: MegatronRankGrouper,
         aicb_header: AicbHeader,
         ga_groups: list[list[ItemTasks]],
         items_per_ga: int,
@@ -133,68 +133,67 @@ class BidirectionalPipelineWorkloadBuilder(WorkloadBuilder):
                     destination_stage = grouper.pp - 2 - logical_boundary
 
                 for dp_idx in range(grouper.dp):
-                    for ep_idx in range(grouper.ep):
-                        for tp_idx in range(grouper.tp):
-                            source = grouper.get_pp_rank(
-                                source_stage, dp_idx, ep_idx, tp_idx,
-                            )
-                            destination = grouper.get_pp_rank(
-                                destination_stage, dp_idx, ep_idx, tp_idx,
-                            )
-                            activation = FlowTask(
-                                task_id=task_id_counter,
-                                job_id=job_id,
-                                type=TaskType.FLOW,
-                                src=source,
-                                dst=destination,
-                                size_bytes=aicb_header.pp_comm_size,
-                                comm_type=CommType.PP_SEND,
-                                phase=Phase.FORWARD,
-                                layer_id=items_per_ga - 1,
-                                iteration=microbatch_id,
-                            )
-                            task_id_counter += 1
-                            gradient = FlowTask(
-                                task_id=task_id_counter,
-                                job_id=job_id,
-                                type=TaskType.FLOW,
-                                src=destination,
-                                dst=source,
-                                size_bytes=aicb_header.pp_comm_size,
-                                comm_type=CommType.PP_SEND,
-                                phase=Phase.BACKWARD_INPUT,
-                                layer_id=0,
-                                iteration=microbatch_id,
-                            )
-                            task_id_counter += 1
-                            result.all_flows.extend((activation, gradient))
-                            result.boundaries.extend((
-                                _BidirectionalBoundary(
-                                    activation,
-                                    microbatch_id,
-                                    pipeline_id,
-                                    direction,
-                                    source_stage,
-                                    destination_stage,
-                                    logical_boundary,
-                                ),
-                                _BidirectionalBoundary(
-                                    gradient,
-                                    microbatch_id,
-                                    pipeline_id,
-                                    direction,
-                                    destination_stage,
-                                    source_stage,
-                                    logical_boundary,
-                                ),
-                            ))
+                    for tp_idx in range(grouper.tp):
+                        source = grouper.get_pp_rank(
+                            source_stage, dp_idx, tp_idx,
+                        )
+                        destination = grouper.get_pp_rank(
+                            destination_stage, dp_idx, tp_idx,
+                        )
+                        activation = FlowTask(
+                            task_id=task_id_counter,
+                            job_id=job_id,
+                            type=TaskType.FLOW,
+                            src=source,
+                            dst=destination,
+                            size_bytes=aicb_header.pp_comm_size,
+                            comm_type=CommType.PP_SEND,
+                            phase=Phase.FORWARD,
+                            layer_id=items_per_ga - 1,
+                            iteration=microbatch_id,
+                        )
+                        task_id_counter += 1
+                        gradient = FlowTask(
+                            task_id=task_id_counter,
+                            job_id=job_id,
+                            type=TaskType.FLOW,
+                            src=destination,
+                            dst=source,
+                            size_bytes=aicb_header.pp_comm_size,
+                            comm_type=CommType.PP_SEND,
+                            phase=Phase.BACKWARD_INPUT,
+                            layer_id=0,
+                            iteration=microbatch_id,
+                        )
+                        task_id_counter += 1
+                        result.all_flows.extend((activation, gradient))
+                        result.boundaries.extend((
+                            _BidirectionalBoundary(
+                                activation,
+                                microbatch_id,
+                                pipeline_id,
+                                direction,
+                                source_stage,
+                                destination_stage,
+                                logical_boundary,
+                            ),
+                            _BidirectionalBoundary(
+                                gradient,
+                                microbatch_id,
+                                pipeline_id,
+                                direction,
+                                destination_stage,
+                                source_stage,
+                                logical_boundary,
+                            ),
+                        ))
         return result, task_id_counter
 
     def _wire_pp_dependencies(
         self,
         pp_result: BidirectionalPPFlowResult,
         ga_groups: list[list[ItemTasks]],
-        grouper: RankGrouper,
+        grouper: MegatronRankGrouper,
     ):
         for boundary in pp_result.boundaries:
             ga_group = ga_groups[boundary.microbatch_id]
@@ -246,7 +245,7 @@ class BidirectionalPipelineWorkloadBuilder(WorkloadBuilder):
 
     def _record_compute_info(self, workload: P2PWorkload) -> None:
         grouper = self._require_grouper()
-        stage_width = grouper.dp * grouper.ep * grouper.tp
+        stage_width = grouper.dp * grouper.tp
         node_to_stage: dict[int, int] = {}
         for stage_id in range(grouper.pp):
             start = stage_id * stage_width
@@ -316,7 +315,7 @@ class BidirectionalPipelineWorkloadBuilder(WorkloadBuilder):
     def _append_chimera_gradient_sync(
         self,
         workload: P2PWorkload,
-        grouper: RankGrouper,
+        grouper: MegatronRankGrouper,
         aicb_header: AicbHeader,
         sync_bytes: int,
         comm_algo: str,
@@ -328,10 +327,9 @@ class BidirectionalPipelineWorkloadBuilder(WorkloadBuilder):
             node: stage
             for stage in range(grouper.pp)
             for dp_idx in range(grouper.dp)
-            for ep_idx in range(grouper.ep)
             for tp_idx in range(grouper.tp)
             for node in [
-                grouper.get_pp_rank(stage, dp_idx, ep_idx, tp_idx)
+                grouper.get_pp_rank(stage, dp_idx, tp_idx)
             ]
         }
 
@@ -371,61 +369,60 @@ class BidirectionalPipelineWorkloadBuilder(WorkloadBuilder):
         sync_tasks = []
         for model_shard in range(grouper.pp):
             mirror_stage = grouper.pp - 1 - model_shard
-            for ep_idx in range(grouper.ep):
-                for tp_idx in range(grouper.tp):
-                    ranks = [
-                        grouper.get_pp_rank(
-                            model_shard, dp_idx, ep_idx, tp_idx,
-                        )
-                        for dp_idx in range(grouper.dp)
-                    ] + [
-                        grouper.get_pp_rank(
-                            mirror_stage, dp_idx, ep_idx, tp_idx,
-                        )
-                        for dp_idx in range(grouper.dp)
-                    ]
-                    flows = self.expanders["ALLREDUCE"].expand_allreduce(
-                        ranks,
-                        sync_bytes,
-                        comm_algo,
-                        workload.jobs[0].job_id,
-                        task_id,
-                        "dp",
+            for tp_idx in range(grouper.tp):
+                ranks = [
+                    grouper.get_pp_rank(
+                        model_shard, dp_idx, tp_idx,
                     )
-                    task_id += len(flows)
-                    for flow in flows:
-                        flow.phase = Phase.BACKWARD_WEIGHT
-                        flow.layer_id = model_shard
-                        flow.iteration = aicb_header.ga
-                        flow.item_id = -1
-                        if not flow.deps:
-                            source_stage = node_to_stage[flow.src]
-                            replica_id = (
-                                0 if source_stage == model_shard else 1
-                            )
-                            flow.deps.extend(
-                                local_terminals(flow.src, replica_id)
-                            )
-                        sync_tasks.append(flow.to_task())
+                    for dp_idx in range(grouper.dp)
+                ] + [
+                    grouper.get_pp_rank(
+                        mirror_stage, dp_idx, tp_idx,
+                    )
+                    for dp_idx in range(grouper.dp)
+                ]
+                flows = self.expanders["ALLREDUCE"].expand_allreduce(
+                    ranks,
+                    sync_bytes,
+                    comm_algo,
+                    workload.jobs[0].job_id,
+                    task_id,
+                    "dp",
+                )
+                task_id += len(flows)
+                for flow in flows:
+                    flow.phase = Phase.BACKWARD_WEIGHT
+                    flow.layer_id = model_shard
+                    flow.iteration = aicb_header.ga
+                    flow.item_id = -1
+                    if not flow.deps:
                         source_stage = node_to_stage[flow.src]
                         replica_id = (
                             0 if source_stage == model_shard else 1
                         )
-                        self.task_info[flow.task_id] = (
-                            BidirectionalPipelineTaskInfo(
-                                task_id=flow.task_id,
-                                job_id=flow.job_id,
-                                task_role="chimera_gradient_sync",
-                                microbatch_id=-1,
-                                pipeline_id=-1,
-                                direction="sync",
-                                physical_stage_id=source_stage,
-                                logical_stage_id=model_shard,
-                                module_replica_id=replica_id,
-                                model_shard_id=model_shard,
-                                mirror_physical_stage_id=mirror_stage,
-                            )
+                        flow.deps.extend(
+                            local_terminals(flow.src, replica_id)
                         )
+                    sync_tasks.append(flow.to_task())
+                    source_stage = node_to_stage[flow.src]
+                    replica_id = (
+                        0 if source_stage == model_shard else 1
+                    )
+                    self.task_info[flow.task_id] = (
+                        BidirectionalPipelineTaskInfo(
+                            task_id=flow.task_id,
+                            job_id=flow.job_id,
+                            task_role="chimera_gradient_sync",
+                            microbatch_id=-1,
+                            pipeline_id=-1,
+                            direction="sync",
+                            physical_stage_id=source_stage,
+                            logical_stage_id=model_shard,
+                            module_replica_id=replica_id,
+                            model_shard_id=model_shard,
+                            mirror_physical_stage_id=mirror_stage,
+                        )
+                    )
 
         workload.tasks.extend(sync_tasks)
         completion_by_rank: dict[int, list[int]] = {}
@@ -454,7 +451,7 @@ class BidirectionalPipelineWorkloadBuilder(WorkloadBuilder):
                 f"Job {job_id} bidirectional requires even microbatch count, got {ga}"
             )
 
-    def _require_grouper(self) -> RankGrouper:
+    def _require_grouper(self) -> MegatronRankGrouper:
         if self._active_grouper is None:
             raise RuntimeError("bidirectional builder has no active rank grouper")
         return self._active_grouper

@@ -22,7 +22,7 @@ from ...workload_format.schema import P2PWorkload, Phase, Task
 from ...workload_generator.builders.dualpipe_pipeline_builder import (
     build_dualpipe_schedule,
 )
-from ...workload_generator.rank_grouper import RankGrouper
+from ...workload_generator.rank_grouper import MegatronRankGrouper
 
 
 _BACKWARD_PHASES = (Phase.BACKWARD_INPUT, Phase.BACKWARD_WEIGHT)
@@ -344,8 +344,8 @@ class AdvancedPipelineSerializer(TaskSerializer):
     def _derive_layouts(self, workload: P2PWorkload) -> dict[int, _JobLayout]:
         layouts: dict[int, _JobLayout] = {}
         for job in workload.jobs:
-            grouper = RankGrouper(job.assigned_nodes, job.parallelism)
-            stage_size = grouper.dp * grouper.ep * grouper.tp
+            grouper = MegatronRankGrouper(job.assigned_nodes, job.parallelism)
+            stage_size = grouper.dp * grouper.tp
             node_to_stage: dict[int, int] = {}
             for stage_id in range(grouper.pp):
                 start = stage_id * stage_size
@@ -871,9 +871,9 @@ def build_pipeline_serializer(
     node_to_stage: dict[int, int] = {}
     pp = 1
     for job in workload.jobs:
-        grouper = RankGrouper(job.assigned_nodes, job.parallelism)
+        grouper = MegatronRankGrouper(job.assigned_nodes, job.parallelism)
         pp = max(pp, grouper.pp)
-        stage_size = grouper.dp * grouper.ep * grouper.tp
+        stage_size = grouper.dp * grouper.tp
         for stage_id in range(grouper.pp):
             start = stage_id * stage_size
             for node in grouper.nodes[start:start + stage_size]:

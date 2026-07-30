@@ -4,7 +4,7 @@ from scripts.utils.job_placement import (
     contention_spread_gpus,
 )
 from src.workload_format.schema import ParallelismConfig
-from src.workload_generator.rank_grouper import RankGrouper
+from src.workload_generator.rank_grouper import MegatronRankGrouper
 
 
 def _servers(nodes, gpus_per_server=4):
@@ -46,12 +46,12 @@ def test_contention_spread_preserves_rank_grouper_order_for_dp_groups():
         placement_clusters=2,
     )[0]
 
-    grouper = RankGrouper(
+    grouper = MegatronRankGrouper(
         nodes,
         ParallelismConfig(tp=2, dp=3, pp=2, ep=1),
     )
 
     for pp_idx in range(2):
         for tp_idx in range(2):
-            dp_group = grouper.get_dp_group(pp_idx=pp_idx, ep_idx=0, tp_idx=tp_idx)
+            dp_group = grouper.get_dp_group(pp_idx=pp_idx, tp_idx=tp_idx)
             assert _clusters(dp_group) == [0, 1]
