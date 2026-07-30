@@ -31,7 +31,7 @@ from ..workload_format.schema import (
 )
 from .collective_expander import FlowTask, AllReduceExpander, AlltoAllExpander
 from .inference_profile import InferenceProfileStore, LayerProfile
-from .rank_grouper import MegatronRankGrouper
+from .rank_grouper import VllmRankGrouper
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -377,8 +377,8 @@ class InferenceTraceExpander:
             return list(self._assigned_nodes[offset:offset + ws])
         return list(range(offset, offset + ws))
 
-    def _grouper(self, replica_id: int) -> MegatronRankGrouper:
-        return MegatronRankGrouper(
+    def _grouper(self, replica_id: int) -> VllmRankGrouper:
+        return VllmRankGrouper(
             self._replica_ranks(replica_id),
             ParallelismConfig(tp=self._tp, dp=self._ep, pp=self._pp, ep=self._ep),
         )
@@ -391,9 +391,9 @@ class InferenceTraceExpander:
             return list(self._assigned_nodes[offset:offset + stage_size])
         return list(range(offset, offset + stage_size))
 
-    def _stage_grouper(self, replica_id: int, stage_id: int) -> MegatronRankGrouper:
-        """MegatronRankGrouper for a specific PP stage (dp=ep, pp=1, only tp+ep)."""
-        return MegatronRankGrouper(
+    def _stage_grouper(self, replica_id: int, stage_id: int) -> VllmRankGrouper:
+        """VllmRankGrouper for a specific PP stage (dp=ep, pp=1, only tp+ep)."""
+        return VllmRankGrouper(
             self._stage_ranks(replica_id, stage_id),
             ParallelismConfig(tp=self._tp, dp=self._ep, pp=1, ep=self._ep),
         )
@@ -496,18 +496,18 @@ class InferenceTraceExpander:
 
                 if comm_size > 0:
                     if op_name == "moe":
-                        # EP AlltoAll: one AlltoAll per TP-rank position
-                        for tp_idx in range(self._tp):
-                            ep_group = grouper.get_ep_group(0, 0, tp_idx)
-                            flows = self._a2a.expand_alltoall(
-                                ep_group, comm_size, job_id, task_id, "ep")
-                            for fl in flows:
-                                fl.phase = phase
-                                fl.layer_id = layer_id
-                                fl.deps.append(compute[fl.src].task_id)
-                                flow_result.add(fl)
-                            all_tasks.extend(flows)
-                            task_id += len(flows)
+                        # EP AlltoAll (vLLM style): one AlltoAll across ALL
+                        # ranks in the PP stage (dp x tp).
+                        ep_group = grouper.get_ep_group(0)
+                        flows = self._a2a.expand_alltoall(
+                            ep_group, comm_size, job_id, task_id, "ep")
+                        for fl in flows:
+                            fl.phase = phase
+                            fl.layer_id = layer_id
+                            fl.deps.append(compute[fl.src].task_id)
+                            flow_result.add(fl)
+                        all_tasks.extend(flows)
+                        task_id += len(flows)
                     else:
                         # TP AllReduce: one AllReduce per EP group
                         for ep_idx in range(self._ep):
