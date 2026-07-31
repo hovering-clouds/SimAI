@@ -231,13 +231,24 @@ dp = all_gpus // (tp * pp)   # dp 现在包含 ep 的因子
 建议按以下次序逐步实施：
 
 ```
-Phase 1 ─ schema.py → rank_grouper.py（核心基础设施）
-Phase 2 ─ workload_builder.py + inference_trace_expander.py（生成器适配）
-Phase 3 ─ job_slicer.py + job_placement.py（切片与放置适配）
-Phase 4 ─ tests/（全面更新测试）
-Phase 5 ─ hermod_metadata.py（解除 EP 封锁，逐步验证）
-Phase 6 ─ 运行 e2e 脚本验证
+Phase 1 ─ schema.py → rank_grouper.py（核心基础设施）         ✅ 已完成
+Phase 2 ─ workload_builder.py + inference_trace_expander.py（生成器适配） ✅ 已完成
+Phase 3 ─ job_slicer.py + job_placement.py（切片与放置适配） ✅ 已完成
+Phase 4 ─ tests/（全面更新测试）                              ✅ 已完成（803 个测试通过）
+Phase 5 ─ hermod_metadata.py（解除 EP 封锁，逐步验证）        ⏭️ 已跳过
+Phase 6 ─ 运行 e2e 脚本验证                                   ⬜ 待办
 ```
+
+### Phase 5 跳过说明
+
+Hermod 的 coflow 分类逻辑（`hermod_priority.py::classify_coflow_type`）已有
+`EP_ALLTOALL → HermodCoflowType.EP` 分支，优先级计算（`_ctype_rank`）也给了 EP
+最高优先级（rank 0）。但 EP 任务被 `hermod_metadata.py` 的 `reject_ep=True` 在
+入口处拦截，永远到不了 `HermodPriorityAnalysis`。此外 `HermodEpMode` 枚举定义了
+`REJECT`/`ENABLE` 但只是存储传递，从未被分支逻辑读取（死代码）。
+
+后续若要启用 Hermod + EP：把 `reject_ep` 改为 `False`，让 `ep_mode` 真正生效或
+废弃，并验证 EP 任务在 `apply()` 中走通用 GA 分支而非落入 `else: raise`。
 
 每个 Phase 完成后建议运行现有测试确认回归覆盖。
 

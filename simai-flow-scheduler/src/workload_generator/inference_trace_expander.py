@@ -145,7 +145,10 @@ class InferenceTraceExpander:
             jobs=[Job(
                 job_id=job_id,
                 assigned_nodes=sorted(all_ranks),
-                parallelism=ParallelismConfig(tp=self._tp, ep=self._ep, pp=self._pp),
+                # dp = ep: in the VllmRankGrouper model, EP spans the whole
+                # PP stage (dp × tp ranks), so a replica holds dp=ep model copies.
+                parallelism=ParallelismConfig(
+                    tp=self._tp, dp=self._ep, pp=self._pp, ep=self._ep),
             )],
             tasks=[ft.to_task() for ft in all_flow_tasks],
         )

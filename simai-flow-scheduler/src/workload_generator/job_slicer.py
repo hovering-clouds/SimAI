@@ -56,7 +56,8 @@ class InferenceJobSlicer:
             jobs.append(Job(
                 job_id=idx,
                 assigned_nodes=list(nodes),
-                parallelism=ParallelismConfig(tp=tp, ep=ep, pp=pp),
+                # dp = ep: VllmRankGrouper model, EP spans the whole PP stage
+                parallelism=ParallelismConfig(tp=tp, dp=ep, pp=pp, ep=ep),
             ))
             info[idx] = JobExpansionInfo(
                 depends_on=depends_on,
@@ -67,7 +68,7 @@ class InferenceJobSlicer:
 
         return CompactWorkload(
             version="1.0",
-            meta=Meta(num_jobs=len(jobs), num_nodes=max(assigned_nodes) + 1),
+            meta=Meta(num_jobs=len(jobs), num_nodes=max(nodes) + 1),
             jobs=jobs,
             job_expansion_info=info,
         )
