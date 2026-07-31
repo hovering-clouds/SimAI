@@ -6,24 +6,28 @@ cross-server contention for experiment reproducibility.
 
 
 def resolve_parallelism(header, dp_override):
-    """Resolve TP/DP/PP/EP from AICB header with optional DP override."""
+    """Resolve TP/DP/PP/EP from AICB header with optional DP override.
+
+    New 3D model: total_gpus = tp * dp * pp (ep is sub-division of dp).
+    """
     tp, pp, ep = header.tp, header.pp, header.ep
     if dp_override and dp_override >= 1:
         dp = dp_override
-        total_gpus = tp * dp * pp * ep
+        total_gpus = tp * dp * pp
     else:
         total_gpus = header.all_gpus
-        dp = total_gpus // (tp * pp * ep)
+        dp = total_gpus // (tp * pp)
     return tp, dp, pp, ep, total_gpus
 
 
 def _replica_size(cfg):
-    """Number of GPUs for one DP replica across PP/EP/TP dimensions."""
-    return cfg["tp"] * cfg["pp"] * cfg["ep"]
+    """Number of GPUs for one DP replica (pp * tp)."""
+    return cfg["tp"] * cfg["pp"]
 
 
 def _job_size(cfg):
-    return cfg["tp"] * cfg["dp"] * cfg["pp"] * cfg["ep"]
+    """Total GPUs for a job: tp * dp * pp (ep is sub-division of dp)."""
+    return cfg["tp"] * cfg["dp"] * cfg["pp"]
 
 
 def _server_count(gpu_count, gpus_per_server):
@@ -71,7 +75,10 @@ def _take_from_server(server_id, size, gpus_per_server, server_free):
 
 
 def _assignment_from_dp_servers(cfg, dp_servers, gpus_per_server, server_free):
-    """Build assigned_nodes in RankGrouper's [PP][DP][EP][TP] order."""
+    """Build assigned_nodes in RankGrouper's [PP][DP][TP] order.
+
+    Each dp_idx corresponds to a full model replica (ep is a sub-division of dp).
+    """
     if len(dp_servers) != cfg["dp"]:
         raise RuntimeError(
             f"Expected {cfg['dp']} DP server assignments, got {len(dp_servers)}"
@@ -86,10 +93,9 @@ def _assignment_from_dp_servers(cfg, dp_servers, gpus_per_server, server_free):
     for pp_idx in range(cfg["pp"]):
         for dp_idx in range(cfg["dp"]):
             block = blocks[dp_idx]
-            for ep_idx in range(cfg["ep"]):
-                for tp_idx in range(cfg["tp"]):
-                    offset = pp_idx * (cfg["ep"] * cfg["tp"]) + ep_idx * cfg["tp"] + tp_idx
-                    nodes.append(block[offset])
+            for tp_idx in range(cfg["tp"]):
+                offset = pp_idx * cfg["tp"] + tp_idx
+                nodes.append(block[offset])
 
     expected = _job_size(cfg)
     if len(nodes) != expected:
@@ -107,7 +113,7 @@ def contiguous_gpus(job_configs):
     assignments = []
     offset = 0
     for cfg in job_configs:
-        n = cfg["tp"] * cfg["dp"] * cfg["pp"] * cfg["ep"]
+        n = cfg["tp"] * cfg["dp"] * cfg["pp"]
         assignments.append(list(range(offset, offset + n)))
         offset += n
     return assignments

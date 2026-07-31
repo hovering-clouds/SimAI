@@ -84,14 +84,16 @@ class TrainingJobSlicer:
         job_group_id: int = 0,
     ) -> CompactWorkload:
         header, _ = AicbParser().parse(trace_path)
-        world_size = header.tp * header.pp * header.ep
+        # New 3D model: total_gpus = tp * dp * pp (ep is sub-division of dp)
+        # dp = total_gpus / (tp * pp), ep is recorded separately for the grouper
+        world_size = header.tp * header.pp
 
         if assigned_nodes is not None:
             if len(assigned_nodes) % world_size != 0:
                 raise ValueError(
                     f"TrainingJobSlicer: assigned_nodes has {len(assigned_nodes)} nodes, "
                     f"which is not a multiple of world_size={world_size} "
-                    f"(tp={header.tp} pp={header.pp} ep={header.ep})"
+                    f"(tp={header.tp} pp={header.pp})"
                 )
             dp = len(assigned_nodes) // world_size
         else:
