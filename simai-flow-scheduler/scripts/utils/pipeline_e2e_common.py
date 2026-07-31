@@ -108,7 +108,7 @@ def run_pipeline_e2e_cli(mode: str) -> None:
 
     print(f"[1/4] Parse AICB: {args.aicb}")
     header, items = AicbParser().parse(args.aicb)
-    dp = header.all_gpus // (header.tp * header.pp * header.ep)
+    dp = header.all_gpus // (header.tp * header.pp)
     job = Job(
         job_id=0,
         name=Path(args.aicb).stem,

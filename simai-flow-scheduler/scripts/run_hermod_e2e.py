@@ -88,7 +88,7 @@ def build_workload(
     if ep_mode != HermodEpMode.REJECT:
         raise NotImplementedError("Hermod EP experiments are not implemented")
     header, items = AicbParser().parse(aicb_path)
-    header_dp = header.all_gpus // (header.tp * header.pp * header.ep)
+    header_dp = header.all_gpus // (header.tp * header.pp)
     dp = dp_override if dp_override is not None else header_dp
     if dp < 1:
         raise ValueError("--dp must be >= 1")
@@ -141,7 +141,7 @@ def main():
         args.aicb, args.dp, ep_mode, args.placement, args.gpus_per_server,
     )
     topology = TopologyLoader().load(args.topo)
-    required_gpus = header.tp * dp * header.pp * header.ep
+    required_gpus = header.tp * dp * header.pp
     if required_gpus > topology.gpu_count:
         raise ValueError(f"Run config needs {required_gpus} GPUs but topology has {topology.gpu_count}")
 

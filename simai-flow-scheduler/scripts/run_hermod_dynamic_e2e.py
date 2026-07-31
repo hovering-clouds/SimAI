@@ -116,7 +116,7 @@ def build_compact_workload(
     for workload_index, spec in enumerate(workload_specs):
         aicb_path = spec["aicb"]
         header, _ = AicbParser().parse(aicb_path)
-        header_dp = header.all_gpus // (header.tp * header.pp * header.ep)
+        header_dp = header.all_gpus // (header.tp * header.pp)
         dp = spec.get("dp", header_dp)
         num_jobs = spec.get("num_jobs", 1)
         num_iters = spec.get("num_iters", 1)

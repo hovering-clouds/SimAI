@@ -68,7 +68,7 @@ parser = AicbParser()
 header, items = parser.parse(TRAINING_AICB)
 
 tp   = header.tp
-dp   = header.all_gpus // header.tp
+dp   = header.all_gpus // (header.tp * header.pp)
 pp   = header.pp
 ep   = header.ep
 total_gpus = header.all_gpus

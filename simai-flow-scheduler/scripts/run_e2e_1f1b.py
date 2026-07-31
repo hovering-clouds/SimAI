@@ -37,8 +37,7 @@ def main():
 
     aicb_file = args.aicb
     topo_file = args.topo
-    output_dir = args.output or os.path.join(
-        "outputs", os.path.splitext(os.path.basename(aicb_file))[0] + "_1f1b")
+    output_dir = args.output or "outputs/e2e_1f1b"
     os.makedirs(output_dir, exist_ok=True)
 
     # ============================================================
@@ -49,7 +48,7 @@ def main():
     print("=" * 60)
     parser = AicbParser()
     header, items = parser.parse(aicb_file)
-    dp = header.all_gpus // (header.tp * header.pp * header.ep)
+    dp = header.all_gpus // (header.tp * header.pp)
     print(f"  Header: tp={header.tp}, dp={dp}, pp={header.pp}, ep={header.ep}, "
           f"ga={header.ga}, vpp={header.vpp}, all_gpus={header.all_gpus}")
     print(f"  Work items: {len(items)}")
@@ -65,7 +64,7 @@ def main():
     tp = header.tp
     pp = header.pp
     ep = header.ep
-    dp = header.all_gpus // (tp * pp * ep)
+    dp = header.all_gpus // (tp * pp)
     total_gpus = header.all_gpus
 
     job = Job(

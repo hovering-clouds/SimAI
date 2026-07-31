@@ -5,9 +5,14 @@ Loads a pre-computed ExecutionResult (from run_e2e.py) and a P2PWorkload,
 then generates Chrome Trace files in various modes.
 
 Usage:
-    python scripts/visualize.py
+    python scripts/visualize.py                                   # defaults
+    python scripts/visualize.py --output-dir outputs/inference_e2e/
+    python scripts/visualize.py -w out/wl.json -r out/res.json -o out/tl.json
+    python scripts/visualize.py --output-dir out/ --mode compact --show-arrows
+    python scripts/visualize.py --output-dir out/ --mode detail --time-range 1000,2000
 """
 
+import argparse
 import os
 import sys
 
@@ -23,41 +28,61 @@ from src.executor.visualizer import (
     ChromeTraceFlowDetail,
 )
 
-# ── Configuration ──────────────────────────────────────────────
+# ── Defaults (overridable via CLI) ──────────────────────────────
 
-# Output directory from run_e2e.py (must contain workload.json and execution_result.json)
-OUTPUT_DIR = "outputs/mfs_e2e_2p2d"
-
-# workload file name (default: workload.json; for puppeteer: workload_route-tte.json, etc.)
-WORKLOAD_FILE = "workload_2p2d.json"
-
-# Result file name (default: execution_result.json; for puppeteer: result_route-tte.json, etc.)
-RESULT_FILE = "default_execution_result_2p2d.json"
-
-# Visualization mode: "verbose" | "compact" | "detail"
-MODE = "verbose"
-
-# Show dependency arrows (compact mode only)
-SHOW_ARROWS = False
-
-# Time window for detail mode (microseconds) — only used when MODE = "detail"
-DETAIL_TIME_RANGE = (5625400, 5903810)
-
-# Output file path (None = auto-generate from mode name)
-OUTPUT_FILE = "default_execution_timeline_verbose_2p2d.json"
-
-# ───────────────────────────────────────────────────────────────
+DEFAULT_OUTPUT_DIR = "outputs/e2e_gpipe/ep2/"
+DEFAULT_WORKLOAD_FILE = "workload.json"
+DEFAULT_RESULT_FILE = "execution_result.json"
+DEFAULT_MODE = "verbose"
+DEFAULT_OUTPUT_FILE = "execution_timeline.json"
+DEFAULT_TIME_RANGE = (5625400, 5903810)
 
 
 def main():
-    workload_path = os.path.join(OUTPUT_DIR, WORKLOAD_FILE)
-    result_path = os.path.join(OUTPUT_DIR, RESULT_FILE)
+    parser = argparse.ArgumentParser(
+        description="Convert execution results to Chrome Trace JSON.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--output-dir", default=DEFAULT_OUTPUT_DIR,
+        help="Directory containing workload.json and execution_result.json.",
+    )
+    parser.add_argument(
+        "--workload", "-w", default=None,
+        help="Path to workload.json (overrides --output-dir).",
+    )
+    parser.add_argument(
+        "--result", "-r", default=None,
+        help="Path to execution_result.json (overrides --output-dir).",
+    )
+    parser.add_argument(
+        "--output", "-o", default=None,
+        help="Output trace file path (default: <output-dir>/execution_timeline.json).",
+    )
+    parser.add_argument(
+        "--mode", "-m", default=DEFAULT_MODE,
+        choices=["verbose", "compact", "detail"],
+        help="Visualization mode.",
+    )
+    parser.add_argument(
+        "--show-arrows", action="store_true",
+        help="Show dependency arrows (compact mode only).",
+    )
+    parser.add_argument(
+        "--time-range", default=None,
+        help="Detail mode time window as START,END in microseconds.",
+    )
+    args = parser.parse_args()
+
+    workload_path = args.workload or os.path.join(args.output_dir, DEFAULT_WORKLOAD_FILE)
+    result_path = args.result or os.path.join(args.output_dir, DEFAULT_RESULT_FILE)
+    output_path = args.output or os.path.join(args.output_dir, DEFAULT_OUTPUT_FILE)
 
     if not os.path.exists(workload_path):
-        print(f"Error: {workload_path} not found. Run run_e2e.py first.")
+        print(f"Error: {workload_path} not found. Run the e2e script first.")
         sys.exit(1)
     if not os.path.exists(result_path):
-        print(f"Error: {result_path} not found. Run run_e2e.py first.")
+        print(f"Error: {result_path} not found. Run the e2e script first.")
         sys.exit(1)
 
     print(f"Loading workload from: {workload_path}")
@@ -70,28 +95,19 @@ def main():
     print(f"  Tasks: {len(result.per_task)}")
 
     # Build visualizer
-    if MODE == "verbose":
+    if args.mode == "verbose":
         viz = ChromeTraceVerbose(workload)
-        suffix = "verbose"
-    elif MODE == "compact":
-        viz = ChromeTraceCompact(workload, show_arrows=SHOW_ARROWS)
-        suffix = "compact"
-    elif MODE == "detail":
-        start_us, end_us = DETAIL_TIME_RANGE
+    elif args.mode == "compact":
+        viz = ChromeTraceCompact(workload, show_arrows=args.show_arrows)
+    else:  # detail
+        if args.time_range:
+            start_us, end_us = (int(x) for x in args.time_range.split(","))
+        else:
+            start_us, end_us = DEFAULT_TIME_RANGE
         viz = ChromeTraceFlowDetail(workload, start_us, end_us)
-        suffix = f"detail_{start_us}_{end_us}"
-    else:
-        print(f"Error: unknown mode '{MODE}'")
-        sys.exit(1)
 
-    # Export
-    if OUTPUT_FILE is None:
-        out_path = os.path.join(OUTPUT_DIR, f"execution_timeline_{suffix}.json")
-    else:
-        out_path = os.path.join(OUTPUT_DIR, OUTPUT_FILE)
-
-    viz.export(result, out_path)
-    print(f"Trace saved to: {out_path}")
+    viz.export(result, output_path)
+    print(f"Trace saved to: {output_path}")
     print("Open in chrome://tracing to view.")
 
 

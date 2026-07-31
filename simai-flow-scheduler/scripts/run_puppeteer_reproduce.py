@@ -203,14 +203,14 @@ def main():
     parser_aicb = AicbParser()
     header, items = parser_aicb.parse(aicb_file)
     print(f"  Model: {os.path.basename(aicb_file)}")
-    print(f"  Header: tp={header.tp}, dp={header.all_gpus // header.tp}, "
+    print(f"  Header: tp={header.tp}, dp={header.all_gpus // (header.tp * header.pp)}, "
           f"pp={header.pp}, ga={header.ga}, all_gpus={header.all_gpus}")
 
     # ---- Build P2PWorkload ----
     tp = header.tp
     pp = header.pp
     ep = header.ep
-    required_gpus = tp * dp * pp * ep
+    required_gpus = tp * dp * pp
     print(f"  Run config: tp={tp}, dp={dp}, pp={pp}, ep={ep}, "
           f"assigned_gpus={required_gpus}")
 

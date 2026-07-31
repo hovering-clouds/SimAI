@@ -500,8 +500,8 @@ def main():
     ap = AicbParser()
     header, items = ap.parse(aicb_file)
     tp, pp, ep = header.tp, header.pp, header.ep
-    dp = args.dp or cfg.get("dp") or (header.all_gpus // (tp * pp * ep))
-    total_gpus = tp * dp * pp * ep
+    dp = args.dp or cfg.get("dp") or (header.all_gpus // (tp * pp))
+    total_gpus = tp * dp * pp
     print(f"  model: {os.path.basename(aicb_file)}")
     print(f"  tp={tp} dp={dp} pp={pp} ep={ep}  gpus={total_gpus}")
 
