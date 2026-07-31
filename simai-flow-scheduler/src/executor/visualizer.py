@@ -37,6 +37,10 @@ COMM_TYPE_ABBREV = {
     CommType.DP_REDUCESCATTER: "dp_rs",
     CommType.DP_ALLTOALL: "dp_a2a",
     CommType.EP_ALLTOALL: "ep_a2a",
+    CommType.DP_EP_ALLREDUCE: "dp_ep_ar",
+    CommType.DP_EP_ALLGATHER: "dp_ep_ag",
+    CommType.DP_EP_REDUCESCATTER: "dp_ep_rs",
+    CommType.DP_EP_ALLTOALL: "dp_ep_a2a",
     CommType.PP_SEND: "pp_snd",
     CommType.PP_RECV: "pp_rcv",
 }

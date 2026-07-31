@@ -44,6 +44,11 @@ class CommType(str, Enum):
     DP_BROADCAST = "dp_broadcast"
     # Expert Parallel
     EP_ALLTOALL = "ep_alltoall"
+    # Expert Data Parallel (weight-grad sync within an expert shard)
+    DP_EP_ALLREDUCE = "dp_ep_allreduce"
+    DP_EP_ALLGATHER = "dp_ep_allgather"
+    DP_EP_REDUCESCATTER = "dp_ep_reducescatter"
+    DP_EP_ALLTOALL = "dp_ep_alltoall"
     # Pipeline Parallel
     PP_SEND = "pp_send"
     PP_RECV = "pp_recv"

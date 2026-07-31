@@ -50,6 +50,8 @@ _COLLECTIVE_TYPES = frozenset({
     CommType.DP_ALLREDUCE, CommType.DP_ALLGATHER,
     CommType.DP_REDUCESCATTER, CommType.DP_ALLTOALL,
     CommType.EP_ALLTOALL,
+    CommType.DP_EP_ALLREDUCE, CommType.DP_EP_ALLGATHER,
+    CommType.DP_EP_REDUCESCATTER, CommType.DP_EP_ALLTOALL,
 })
 
 

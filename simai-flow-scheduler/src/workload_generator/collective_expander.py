@@ -33,6 +33,11 @@ _COMM_TYPE_MAP: dict[tuple[str, str], CommType] = {
     ("BROADCAST", "dp"): CommType.DP_BROADCAST,
     # context="ep"
     ("ALLTOALL", "ep"): CommType.EP_ALLTOALL,
+    # context="dp_ep" (data-parallel within an expert shard)
+    ("ALLREDUCE", "dp_ep"): CommType.DP_EP_ALLREDUCE,
+    ("ALLGATHER", "dp_ep"): CommType.DP_EP_ALLGATHER,
+    ("REDUCESCATTER", "dp_ep"): CommType.DP_EP_REDUCESCATTER,
+    ("ALLTOALL", "dp_ep"): CommType.DP_EP_ALLTOALL,
 }
 
 
