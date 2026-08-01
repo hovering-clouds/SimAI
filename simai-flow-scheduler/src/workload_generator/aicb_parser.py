@@ -170,7 +170,8 @@ class AicbParser:
                 all_gpus = int(tokens[i + 1])
                 i += 2
             elif tok in ("pp_comm", "pp_comm:"):
-                pp_comm_size = int(tokens[i + 1])
+                # aicb may write pp_comm as a float literal (e.g. 16777216.0)
+                pp_comm_size = int(float(tokens[i + 1]))
                 i += 2
             elif tok in ("checkpoints:", "checkpoint_initiates:"):
                 count = int(tokens[i + 1])
