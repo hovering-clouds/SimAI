@@ -8,7 +8,11 @@ import json
 from pathlib import Path
 
 from ...workload_generator.aicb_parser import AicbHeader, AicbWorkItem
-from .hermod_priority import classify_coflow_type, HermodCoflowType
+from .hermod_priority import (
+    classify_coflow_type,
+    HermodCoflowType,
+    HermodEpMode,
+)
 from ...workload_format.schema import P2PWorkload
 
 
@@ -32,17 +36,13 @@ class HermodAicbMetadataAdapter:
         header: AicbHeader,
         aicb_items: list[AicbWorkItem] | None = None,
         *,
-        reject_ep: bool = True,
+        ep_mode: HermodEpMode = HermodEpMode.REJECT,
     ):
         if header.ga < 1:
             raise ValueError("Hermod AICB adapter requires header.ga >= 1")
-        if not reject_ep:
-            raise NotImplementedError(
-                "Hermod EP metadata is not implemented; EP experiments remain disabled"
-            )
         self.header = header
         self.aicb_items = aicb_items
-        self.reject_ep = reject_ep
+        self.ep_mode = ep_mode
 
     def _transformer_lids(self, workload: P2PWorkload) -> tuple[dict[int, int], dict[int, str]]:
         """Recover local Transformer-layer IDs from one AICB GA block.
@@ -69,14 +69,35 @@ class HermodAicbMetadataAdapter:
         if not item_by_lid:
             raise ValueError("AICB workload contains no source items for strict Hermod LID mapping")
 
-        lids: dict[int, int] = {}
-        operations: dict[int, str] = {}
-        next_transformer_lid = 1
-        awaiting_mlp = False
-        for flat_lid, item_id in sorted(item_by_lid.items()):
+        operations = {}
+        for flat_lid, item_id in item_by_lid.items():
             if item_id < 0 or item_id >= len(self.aicb_items):
                 raise ValueError(f"AICB item ID {item_id} is outside the supplied source trace")
-            name = self.aicb_items[item_id].name
+            operations[flat_lid] = self.aicb_items[item_id].name
+        names = set(operations.values())
+        gpt_names = {"embedding_layer", "attention_layer", "mlp_layer"}
+        mixtral_names = {
+            "embedding_layer", "attention_column", "attention_row",
+            "mlp_moelayer", "final_column",
+        }
+        if names <= gpt_names:
+            lids = self._gpt_lids(operations)
+        elif names <= mixtral_names:
+            lids = self._mixtral_lids(operations)
+        else:
+            unknown = sorted(names - gpt_names - mixtral_names)
+            raise ValueError(
+                "Strict Hermod LID mapping does not recognize AICB operations "
+                f"{unknown!r}; add an explicit model-layer rule before using this trace"
+            )
+        return lids, operations
+
+    @staticmethod
+    def _gpt_lids(operations: dict[int, str]) -> dict[int, int]:
+        lids: dict[int, int] = {}
+        next_transformer_lid = 1
+        awaiting_mlp = False
+        for flat_lid, name in sorted(operations.items()):
             if name == "embedding_layer":
                 if flat_lid != 0 or awaiting_mlp:
                     raise ValueError("Unexpected embedding_layer in a Hermod GA block")
@@ -97,13 +118,83 @@ class HermodAicbMetadataAdapter:
                     f"Strict Hermod LID mapping does not recognize AICB operation {name!r}; "
                     "add an explicit model-layer rule before using this trace"
                 )
-            operations[flat_lid] = name
         if awaiting_mlp:
             raise ValueError("AICB GA block ends with attention_layer without mlp_layer")
-        return lids, operations
+        return lids
 
     @staticmethod
-    def _compute_coflow_id(task) -> str | None:
+    def _mixtral_lids(operations: dict[int, str]) -> dict[int, int]:
+        """Map one Mixtral GA block to local Transformer/MoE layer IDs.
+
+        AICB emits attention and MoE internals as separate rows.  One
+        ``attention_column`` starts a logical layer; its ``attention_row`` and
+        all following ``mlp_moelayer`` rows share that LID.  ``final_column``
+        is the output boundary of the last local layer.
+        """
+        lids: dict[int, int] = {}
+        current_lid = 0
+        saw_attention_row = False
+        saw_mlp = False
+        for flat_lid, name in sorted(operations.items()):
+            if name == "embedding_layer":
+                if flat_lid != 0 or current_lid:
+                    raise ValueError("Unexpected embedding_layer in a Mixtral GA block")
+                lids[flat_lid] = 0
+            elif name == "attention_column":
+                if current_lid and not (saw_attention_row and saw_mlp):
+                    raise ValueError(
+                        "Mixtral attention_column starts before the preceding MoE layer is complete"
+                    )
+                current_lid += 1
+                saw_attention_row = False
+                saw_mlp = False
+                lids[flat_lid] = current_lid
+            elif name == "attention_row":
+                if current_lid < 1 or saw_attention_row:
+                    raise ValueError("Unexpected attention_row in a Mixtral GA block")
+                saw_attention_row = True
+                lids[flat_lid] = current_lid
+            elif name == "mlp_moelayer":
+                if current_lid < 1 or not saw_attention_row:
+                    raise ValueError("mlp_moelayer has no preceding attention pair")
+                saw_mlp = True
+                lids[flat_lid] = current_lid
+            elif name == "final_column":
+                if current_lid < 1 or not (saw_attention_row and saw_mlp):
+                    raise ValueError("final_column has no complete preceding Mixtral layer")
+                lids[flat_lid] = current_lid
+            else:
+                raise ValueError(f"Unexpected Mixtral operation {name!r}")
+        if current_lid < 1 or not (saw_attention_row and saw_mlp):
+            raise ValueError("Mixtral GA block ends with an incomplete Transformer/MoE layer")
+        return lids
+
+    @staticmethod
+    def _job_layout(workload: P2PWorkload) -> dict[int, tuple[dict[int, int], int]]:
+        layouts = {}
+        for job in workload.jobs:
+            stage_size = job.parallelism.dp * job.parallelism.tp
+            layouts[job.job_id] = (
+                {node: index // stage_size for index, node in enumerate(job.assigned_nodes)},
+                job.parallelism.pp,
+            )
+        return layouts
+
+    @staticmethod
+    def _stage_id(task, layouts: dict[int, tuple[dict[int, int], int]]) -> int:
+        layout = layouts.get(task.job_id)
+        if layout is None:
+            return 0
+        node_to_stage, _ = layout
+        if task.src not in node_to_stage:
+            raise ValueError(
+                f"Hermod task {task.task_id} source node {task.src} is not assigned to its job"
+            )
+        return node_to_stage[task.src]
+
+    def _compute_coflow_id(
+        self, task, layouts: dict[int, tuple[dict[int, int], int]],
+    ) -> str | None:
         """Synthesise a stable coflow identifier from existing Task fields.
 
         Used as an opaque grouping key by HermodPriorityAnalysis.  No code
@@ -112,7 +203,27 @@ class HermodAicbMetadataAdapter:
         ct = classify_coflow_type(task.comm_type)
         if ct is None:
             return None
-        return f"j{task.job_id}:i{task.iteration}:{task.phase.value}:{ct.value}"
+        prefix = f"j{task.job_id}:i{task.iteration}:{task.phase.value}:{ct.value}"
+        if ct == HermodCoflowType.PP:
+            layout = layouts.get(task.job_id)
+            if layout is None:
+                # Synthetic unit workloads without Job metadata retain one PP
+                # coflow per phase for backwards compatibility.
+                return prefix
+            node_to_stage, _ = layout
+            if task.src not in node_to_stage or task.dst not in node_to_stage:
+                raise ValueError(f"Hermod PP task {task.task_id} has an unassigned endpoint")
+            src_stage, dst_stage = node_to_stage[task.src], node_to_stage[task.dst]
+            if abs(src_stage - dst_stage) != 1:
+                raise ValueError(
+                    f"Hermod PP task {task.task_id} does not cross adjacent pipeline stages"
+                )
+            return f"{prefix}:boundary{min(src_stage, dst_stage)}"
+        stage_id = self._stage_id(task, layouts)
+        return (
+            f"{prefix}:stage{stage_id}:item{task.item_id}:"
+            f"{task.comm_type.value}"
+        )
 
     def apply(self, workload: P2PWorkload) -> dict[int, HermodMetadataRecord]:
         records: dict[int, HermodMetadataRecord] = {}
@@ -123,31 +234,57 @@ class HermodAicbMetadataAdapter:
         if not layer_task_ids:
             raise ValueError("AICB workload contains no GA-layer tasks for Hermod")
         transformer_lids, operations = self._transformer_lids(workload)
-        last_lid = max(transformer_lids.values(), default=None)
+        local_layer_count = max(transformer_lids.values(), default=None)
+        layouts = self._job_layout(workload)
         for task in workload.get_flow_tasks():
-            coflow_id = self._compute_coflow_id(task)
+            coflow_id = self._compute_coflow_id(task, layouts)
             if coflow_id is None:
                 continue
             coflow_type = classify_coflow_type(task.comm_type)
-            if coflow_type == HermodCoflowType.EP and self.reject_ep:
+            if coflow_type == HermodCoflowType.EP and self.ep_mode == HermodEpMode.REJECT:
                 raise ValueError(
                     f"Hermod EP is disabled: task {task.task_id} is {task.comm_type.value}. "
-                    "Use a validated EP path before enabling it."
+                    "Use ep_mode='enable' for a validated EP workload."
                 )
 
             if 0 <= task.iteration < self.header.ga:
                 mid = task.iteration
                 provenance = "aicb_ga_step"
-                lid = transformer_lids.get(task.layer_id, task.layer_id)
+                local_lid = transformer_lids.get(task.layer_id, task.layer_id)
+                stage_id = self._stage_id(task, layouts)
+                if coflow_type == HermodCoflowType.PP and local_layer_count is not None:
+                    src_stage = stage_id
+                    lid = (
+                        (src_stage + 1) * local_layer_count
+                        if task.phase.value == "forward"
+                        else src_stage * local_layer_count + 1
+                    )
+                elif local_layer_count is not None:
+                    lid = stage_id * local_layer_count + local_lid
+                else:
+                    lid = local_lid
                 operation = operations.get(task.layer_id)
-                mapping_rule = ("attention_mlp_transformer_layer"
-                                if task.layer_id in transformer_lids else "flat_aicb_position")
+                if operation in {"attention_layer", "mlp_layer"}:
+                    mapping_rule = "attention_mlp_transformer_layer"
+                elif operation in {
+                    "attention_column", "attention_row", "mlp_moelayer", "final_column",
+                }:
+                    mapping_rule = "mixtral_attention_moe_transformer_layer"
+                else:
+                    mapping_rule = (
+                        "model_stage_boundary"
+                        if coflow_type == HermodCoflowType.PP else "flat_aicb_position"
+                    )
             elif coflow_type == HermodCoflowType.DP:
                 # AICB pre/post DP operations occur outside a GA layer block;
                 # §4.1.2 places them after the final microbatch.
                 mid = self.header.ga - 1
                 provenance = "aicb_dp_post_ga"
-                lid = last_lid + 1 if last_lid is not None else task.layer_id
+                job_pp = layouts.get(task.job_id, ({}, 1))[1]
+                lid = (
+                    local_layer_count * job_pp + 1
+                    if local_layer_count is not None else task.layer_id
+                )
                 operation = None
                 mapping_rule = "post_ga_boundary"
             else:

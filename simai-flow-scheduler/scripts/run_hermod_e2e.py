@@ -34,6 +34,7 @@ CONFIG_KEYS = {
 CONFIG_PIPELINES = {"gpipe", "1f1b"}
 CONFIG_MODES = {"default", "puppeteer", "hermod"}
 CONFIG_VARIANTS = {variant.value for variant in HermodScheduleVariant}
+CONFIG_EP_MODES = {mode.value for mode in HermodEpMode}
 
 
 def load_config(path: str) -> dict:
@@ -71,8 +72,8 @@ def load_config(path: str) -> dict:
         raise ValueError(f"Unsupported Hermod pipeline: {data['pipeline']!r}")
     if "variant" in data and data["variant"] not in CONFIG_VARIANTS:
         raise ValueError(f"Unsupported Hermod variant: {data['variant']!r}")
-    if "ep_mode" in data and data["ep_mode"] != HermodEpMode.REJECT.value:
-        raise ValueError("Hermod EP is not implemented; ep_mode must be 'reject'")
+    if "ep_mode" in data and data["ep_mode"] not in CONFIG_EP_MODES:
+        raise ValueError(f"Unsupported Hermod ep_mode: {data['ep_mode']!r}")
     if "modes" in data:
         if not isinstance(data["modes"], list) or not all(
             isinstance(mode, str) and mode in CONFIG_MODES for mode in data["modes"]
@@ -85,13 +86,16 @@ def build_workload(
     aicb_path: str, dp_override: int | None, ep_mode: HermodEpMode,
     placement: str = "contiguous", gpus_per_server: int = 8,
 ):
-    if ep_mode != HermodEpMode.REJECT:
-        raise NotImplementedError("Hermod EP experiments are not implemented")
     header, items = AicbParser().parse(aicb_path)
     header_dp = header.all_gpus // (header.tp * header.pp)
     dp = dp_override if dp_override is not None else header_dp
     if dp < 1:
         raise ValueError("--dp must be >= 1")
+    if dp % header.ep:
+        raise ValueError(
+            f"Hermod Megatron EP requires dp ({dp}) to be divisible by "
+            f"the AICB ep size ({header.ep}); use --dp with a compatible value"
+        )
     parallelism = ParallelismConfig(tp=header.tp, dp=dp, pp=header.pp, ep=header.ep)
     job = Job(
         job_id=0,
@@ -101,7 +105,7 @@ def build_workload(
     )
     workload = WorkloadBuilder().build_from_aicb(header, items, job, comm_algo="ring")
     records = HermodAicbMetadataAdapter(
-        header, items, reject_ep=(ep_mode == HermodEpMode.REJECT),
+        header, items, ep_mode=ep_mode,
     ).apply(workload)
     return header, dp, workload, records
 
@@ -120,8 +124,8 @@ def main():
                         help="Override AICB header DP to synthesize DP collectives (as in Puppeteer experiments).")
     parser.add_argument("--pipeline", choices=["gpipe", "1f1b"], default="1f1b",
                         help="Compute pipeline serializer; add future modes in HermodAnalyzer.")
-    parser.add_argument("--ep-mode", choices=[HermodEpMode.REJECT.value], default="reject",
-                        help="EP is intentionally unavailable until its separate path is validated.")
+    parser.add_argument("--ep-mode", choices=sorted(CONFIG_EP_MODES), default="reject",
+                        help="Enable validated EP coflows or reject them explicitly.")
     parser.add_argument("--modes", nargs="+", choices=["default", "puppeteer", "hermod"],
                         default=["default", "puppeteer", "hermod"])
     parser.add_argument("--k-paths", type=int, default=4)

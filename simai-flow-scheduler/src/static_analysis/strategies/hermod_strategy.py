@@ -9,7 +9,7 @@ from ..passes.hermod_priority import (
 from ..passes.routing import BfsStrategy, RouteTable
 from ..passes.task_serializer import CppReferenceSerializer, OneFOneBSerializer, ExecutionPlan
 from ..passes.topology_loader import NetworkTopology
-from ...workload_format.schema import P2PWorkload
+from ...workload_format.schema import Meta, P2PWorkload
 from ...workload_generator.aicb_parser import AicbHeader, AicbParser, AicbWorkItem
 from ...workload_generator.rank_grouper import MegatronRankGrouper
 
@@ -25,6 +25,7 @@ def build_hermod_records(
     workload: P2PWorkload,
     header: AicbHeader,
     aicb_items: list[AicbWorkItem] | None = None,
+    ep_mode: HermodEpMode = HermodEpMode.REJECT,
 ) -> dict[int, HermodMetadataRecord]:
     """Build Hermod metadata sidecar from a workload and its AICB source.
 
@@ -32,7 +33,9 @@ def build_hermod_records(
         records = build_hermod_records(workload, header, items)
         analysis = HermodAnalyzer(...).analyze(workload, hermod_records=records)
     """
-    return HermodAicbMetadataAdapter(header, aicb_items).apply(workload)
+    return HermodAicbMetadataAdapter(
+        header, aicb_items, ep_mode=ep_mode,
+    ).apply(workload)
 
 
 class HermodAnalyzer:
@@ -103,14 +106,32 @@ class HermodDynamicAnalyzer(HermodAnalyzer):
 
     def _build_hermod_records(self, workload) -> dict[int, HermodMetadataRecord]:
         """Build Hermod sidecar from AICB source files (parsed on demand)."""
-        for task in workload.get_flow_tasks():
-            if classify_coflow_type(task.comm_type) is None:
-                continue
-            src = self._trace_src_by_job.get(task.job_id)
+        records: dict[int, HermodMetadataRecord] = {}
+        relevant_job_ids = {
+            task.job_id for task in workload.get_flow_tasks()
+            if classify_coflow_type(task.comm_type) is not None
+        }
+        for job_id in sorted(relevant_job_ids):
+            src = self._trace_src_by_job.get(job_id)
             if src is None:
-                return {}
+                raise ValueError(f"Hermod dynamic analysis lacks an AICB source for job {job_id}")
             if src not in self._aicb_cache:
                 self._aicb_cache[src] = AicbParser().parse(Path(src))
             header, items = self._aicb_cache[src]
-            return build_hermod_records(workload, header, items)
-        return {}
+            job = self.jobs_by_id[job_id]
+            job_workload = P2PWorkload(
+                version=workload.version,
+                meta=Meta(num_jobs=1, num_nodes=len(job.assigned_nodes)),
+                jobs=[job],
+                tasks=[task for task in workload.tasks if task.job_id == job_id],
+            )
+            job_records = build_hermod_records(
+                job_workload, header, items, ep_mode=self.ep_mode,
+            )
+            duplicate = records.keys() & job_records.keys()
+            if duplicate:
+                raise ValueError(
+                    f"Duplicate Hermod task metadata IDs: {sorted(duplicate)}"
+                )
+            records.update(job_records)
+        return records

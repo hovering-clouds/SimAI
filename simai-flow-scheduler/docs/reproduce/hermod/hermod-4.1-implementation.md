@@ -3,14 +3,15 @@
 ## 目的与范围
 
 本实现复现 Hermod 论文 §4.1 的 **inter-coflow strict-priority** 思想：在共享链路上，
-按 PP/DP coflow 的 Hermod 优先级分层服务；同一优先级层内使用 progressive-filling
+按 EP/PP/DP coflow 的 Hermod 优先级分层服务；同一优先级层内使用 progressive-filling
 max-min fair 分配，避免多链路 flow 的瓶颈造成可用容量闲置。
 
-不在范围内：论文 §4.2 的 matching-based intra-coflow scheduling、EP 专用流量分配、
+不在范围内：matching-based intra-coflow scheduling、EP 专用流量匹配、
 交换机 DSCP/队列部署、动态路由，以及生产集群参数拟合。
 
-EP 的 collective/输入路径尚未单独验证，因此默认 `ep_mode=reject`。发现 EP flow 时，
-Hermod 会明确失败，避免将未验证结果纳入实验结论。
+EP 的 collective、Mixtral LID 和 static/dynamic 输入路径已验证。为避免旧实验静默改变，
+默认仍为 `ep_mode=reject`；EP 实验必须显式使用 `ep_mode=enable`。当前 Megatron rank
+语义把 EP 视为 DP 的子划分，因此要求 `dp % ep == 0`，EP 不额外增加 world size。
 
 ## 组件与数据流
 
@@ -19,7 +20,8 @@ AICB workload + JSON experiment config
   -> WorkloadBuilder
   -> HermodAicbMetadataAdapter
        GA step -> microbatch_id (MID)
-       GPT embedding/attention+MLP structure -> audited local Transformer LID
+       GPT or Mixtral operation groups -> audited stage-global Transformer LID
+       collective invocation + stage/boundary -> coflow ID
        writes hermod_metadata.json sidecar
   -> HermodAnalyzer (GPipe or 1F1B execution plan + BFS routes)
   -> HermodSchedulingPolicy / HermodAllocator
@@ -30,7 +32,7 @@ AICB workload + JSON experiment config
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/workload_generator/hermod_aicb_metadata.py` | 仅对 AICB 训练 workload 标注 MID/LID；不改变通用 `Task.iteration` 语义。 |
+| `src/static_analysis/passes/hermod_metadata.py` | 对 AICB 训练 workload 标注 MID/LID/coflow；不改变通用 `Task.iteration` 语义。 |
 | `src/static_analysis/passes/hermod_priority.py` | PP/DP/EP 分类、优先级排序与 EP 模式校验。 |
 | `src/static_analysis/strategies/hermod_strategy.py` | pipeline serializer、BFS routing 与 Hermod priority analysis。 |
 | `src/executor/bandwidth_allocators/hermod_allocator.py` | coflow 间严格优先、层内公平共享。 |
@@ -152,10 +154,16 @@ a flat position.  It does not change the generic parser, `Task.layer_id`, DAG,
 or any non-Hermod scheduler.  Static and dynamic sidecars record the mapping
 rule and source operation for audit.
 
-The remaining reproduction limitations are material: this recovers the local
-layer ordering but does not establish model-stage ownership or virtual-pipeline
-chunk ownership, the placement is not yet a paper-validated distributed-
-training placement, and §4.2 matching-based intra-coflow allocation/EP is
+For Mixtral traces, one `attention_column` starts a logical layer; its
+`attention_row`, following `mlp_moelayer` rows, and `final_column` boundary
+share that local LID.  The adapter offsets local LIDs by PP stage and separates
+EP dispatch/gather by their AICB collective item.  PP coflows are separated by
+pipeline boundary.  Every Hermod-relevant EP/PP/DP flow must have a sidecar
+record, and every coflow must have one consistent `(job, MID, CType, LID)`.
+
+The remaining reproduction limitations are material: virtual-pipeline chunk
+ownership is not represented, the placement is not yet a paper-validated
+distributed-training placement, and matching-based intra-coflow allocation is
 absent.  A result where Hermod is slower is therefore useful diagnosis, not
 evidence of a faithful full-paper comparison.  Before reporting a speedup
 study, validate a placement that makes the intended PP/DP coflows share the
@@ -205,8 +213,9 @@ batch 都先完成 AICB Hermod metadata 标注，随后
 priority analysis；输出还包含 `<mode>_task_meta.json`，可审计每个动态任务的 MID/LID/coflow。
 Hermod mode 还会写入聚合的 `hermod_metadata.json`，与静态入口的 sidecar 命名保持一致。
 
-该 dynamic 路径不支持 EP；配置没有 `ep_mode`，固定为 `reject`。它也不替代单 iteration
-静态复现，而是用于避免一次性物化大量训练 iteration，并研究多 job 竞争。
+dynamic 路径与静态入口一样支持 `ep_mode=reject|enable`；每个动态 job 使用自己的 AICB
+header/items 构建 sidecar，混合 GPT/Mixtral workload 不会再由第一份 trace 解释全部任务。
+它不替代单 iteration 静态复现，而是用于避免一次性物化大量训练 iteration，并研究多 job 竞争。
 
 ## 已验证配置与限制
 
@@ -214,15 +223,27 @@ Hermod mode 还会写入聚合的 `hermod_metadata.json`，与静态入口的 si
 覆盖运行。该运行生成 4 个 PP coflow 与 16 个 DP coflow，并成功运行 Default、Puppeteer、
 Hermod 三种模式；同一配置下 GPipe 与 1F1B 分支也可完成运行。
 
-Hermod priority、allocator、AICB metadata、builder 与 job merger 的定向测试通过（46 tests）。
+Hermod priority、allocator、AICB metadata、builder、placement 与 dynamic update 的定向测试通过。
 Dynamic Hermod 审查修复后，两个不同 AICB spec（第一项 `dp=2,num_jobs=1,num_iters=2`，第二项
 `dp=1,num_jobs=1,num_iters=1`）在 16-GPU AlibabaHPN 上完成混合 E2E：共 3 个动态 job、27,416
 个任务；Default/Hermod makespan 分别为 1,525,671 / 1,534,909 us。`hermod_metadata.json` 已验证
 包含每个范围内 flow 的 `coflow_id`、MID 与 LID。
+
+EP 验证使用 Mixtral `tp=2, pp=4, ep=2, ga=4` trace，显式设置 `dp=2`，因此模拟 world
+size 为 16。静态 E2E 生成 512 条 EP flow、128 个 EP coflow、24 个 PP coflow 和 8 个 DP
+coflow并完成 Hermod 执行；`ga=1` 的同类 trace 也完成 dynamic Hermod E2E。`ep1` Mixtral
+trace 仅作为“MoE 但没有 EP flow”的负对照。EP 示例使用诊断性的 `cyclic_pp_dp`
+placement：TP group 保持单机，组成 EP group 的 DP replicas 跨服务器；该 placement 用于制造
+可观察竞争，不代表论文或生产放置。该配置下 Default/Hermod makespan 分别为
+`1,732,889 / 1,732,729 us`；160 us 的差异只证明优先级路径实际参与分配，不应作为性能结论。
+
+```powershell
+python scripts/run_hermod_e2e.py --config scripts/config/hermod_ep_e2e_config.json
+python scripts/run_hermod_dynamic_e2e.py --config scripts/config/hermod_dynamic_ep_e2e_config.json
+```
 全量测试中 Spectrum-X 相关的既有测试仍依赖仓库外缺失的旧拓扑文件；这与 Hermod 无关。
 
-当前实现的结论应限制为 PP/DP 的 §4.1 流级严格优先实验。对于 GPT 风格 AICB，Hermod 专用
-adapter 会从 `embedding_layer` 与相邻的 `attention_layer + mlp_layer` 对恢复可审计的局部
-Transformer LID，而不是使用扁平 item 位置；但它尚未证明模型 stage ownership 或 VPP chunk
-ownership，因此完整的 Case III 层语义仍待验证。EP 与 §4.2 完成前，不应报告为完整 Hermod
-端到端复现。推荐场景、负例及结果解释见 `hermod-experiment-status.md`。
+当前实现的结论应限制为 EP/PP/DP 的 model-factor inter-coflow 严格优先实验。GPT 与 Mixtral
+均使用显式 operation-group 映射，而不是扁平 item 位置；EP coflow 已进入同一优先级分析和
+allocator。matching、真实 interleaved/VPP serializer 与生产交换机机制仍未实现，因此不应
+报告为完整 Hermod 系统复现。推荐场景、负例及结果解释见 `hermod-experiment-status.md`。

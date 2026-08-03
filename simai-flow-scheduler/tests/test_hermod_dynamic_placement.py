@@ -32,3 +32,20 @@ def test_cyclic_pp_dp_keeps_tp_local_and_spreads_pp_dp_across_servers():
 def test_contiguous_placement_remains_the_legacy_mapping():
     parallelism = ParallelismConfig(tp=4, dp=2, pp=2, ep=1)
     assert assigned_nodes_for(parallelism, "contiguous", gpus_per_server=8) == list(range(16))
+
+
+def test_contiguous_ep_is_a_dp_subdivision_not_world_size_multiplier():
+    parallelism = ParallelismConfig(tp=2, dp=2, pp=4, ep=2)
+    assert assigned_nodes_for(parallelism, "contiguous", gpus_per_server=8) == list(range(16))
+
+
+def test_cyclic_ep_keeps_tp_local_and_spreads_expert_group_across_servers():
+    parallelism = ParallelismConfig(tp=2, dp=2, pp=4, ep=2)
+    nodes = assigned_nodes_for(parallelism, "cyclic_pp_dp", gpus_per_server=8)
+    tp_groups = [nodes[index:index + 2] for index in range(0, len(nodes), 2)]
+
+    assert all(group[0] // 8 == group[1] // 8 for group in tp_groups)
+    for pp_idx in range(parallelism.pp):
+        dp0 = tp_groups[pp_idx * parallelism.dp]
+        dp1 = tp_groups[pp_idx * parallelism.dp + 1]
+        assert dp0[0] // 8 != dp1[0] // 8

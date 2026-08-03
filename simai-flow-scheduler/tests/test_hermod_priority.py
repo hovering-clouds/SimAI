@@ -120,9 +120,29 @@ def test_pp_dp_case_iii_uses_lid_before_mid():
     assert a.priority_order([1, 2]) == ["dp", "pp"]
 
 
-def test_missing_records_entry_skips_task():
-    a = analysis(_task(1, CommType.PP_SEND), records={})
-    assert not a.coflows
+def test_missing_records_entry_is_rejected():
+    with pytest.raises(ValueError, match="metadata is missing"):
+        analysis(_task(1, CommType.PP_SEND), records={})
+
+
+def test_reject_mode_is_enforced_by_priority_analysis():
+    records = {1: _rec(1, "ep", CommType.EP_ALLTOALL)}
+    with pytest.raises(ValueError, match="EP is disabled"):
+        analysis(
+            _task(1, CommType.EP_ALLTOALL), records=records,
+            ep_mode=HermodEpMode.REJECT,
+        )
+
+
+def test_metadata_coflow_type_must_match_task():
+    records = {1: _rec(1, "ep", CommType.PP_SEND)}
+    # _rec derives "pp" from the supplied type; corrupt it deliberately.
+    records[1] = HermodMetadataRecord(
+        task_id=1, coflow_id="ep", microbatch_id=0, logical_layer_id=0,
+        coflow_type="ep", provenance="test",
+    )
+    with pytest.raises(ValueError, match="does not match"):
+        analysis(_task(1, CommType.PP_SEND), records=records)
 
 
 def test_coflow_metadata_must_be_consistent():
