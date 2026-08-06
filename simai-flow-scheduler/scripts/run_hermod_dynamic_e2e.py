@@ -38,11 +38,12 @@ DEFAULT_TOPO = "inputs/topologies/AlibabaHPN_16g_8gps_DualToR_DualPlane_200Gbps_
 CONFIG_KEYS = {
     "workload", "aicb", "topology", "topo", "dp", "pipeline", "variant",
     "jobs", "iterations", "workloads", "modes", "output", "visualize",
-    "placement", "gpus_per_server",
+    "placement", "gpus_per_server", "ep_mode",
 }
 PIPELINES = {"gpipe", "1f1b"}
 MODES = {"default", "hermod"}
 VARIANTS = {variant.value for variant in HermodScheduleVariant}
+EP_MODES = {mode.value for mode in HermodEpMode}
 WORKLOAD_KEYS = {"aicb", "dp", "num_jobs", "num_iters"}
 
 
@@ -78,6 +79,8 @@ def load_config(path: str) -> dict:
         raise ValueError(f"Unsupported pipeline: {data['pipeline']!r}")
     if "variant" in data and data["variant"] not in VARIANTS:
         raise ValueError(f"Unsupported variant: {data['variant']!r}")
+    if "ep_mode" in data and data["ep_mode"] not in EP_MODES:
+        raise ValueError(f"Unsupported ep_mode: {data['ep_mode']!r}")
     if "modes" in data and (
         not isinstance(data["modes"], list)
         or not all(isinstance(mode, str) and mode in MODES for mode in data["modes"])
@@ -118,6 +121,11 @@ def build_compact_workload(
         header, _ = AicbParser().parse(aicb_path)
         header_dp = header.all_gpus // (header.tp * header.pp)
         dp = spec.get("dp", header_dp)
+        if dp % header.ep:
+            raise ValueError(
+                f"Hermod Megatron EP requires dp ({dp}) to be divisible by "
+                f"the AICB ep size ({header.ep}) for workload {aicb_path!r}"
+            )
         num_jobs = spec.get("num_jobs", 1)
         num_iters = spec.get("num_iters", 1)
         parallelism = ParallelismConfig(tp=header.tp, dp=dp, pp=header.pp, ep=header.ep)
@@ -171,9 +179,10 @@ def run_mode(mode: str, compact: CompactWorkload, topology, args):
             analyzer = DefaultAnalyzer(topology)
     else:
         variant = HermodScheduleVariant(args.variant)
+        ep_mode = HermodEpMode(args.ep_mode)
         empty = HermodAnalysisResult(
             BfsRouteTable(topology), ExecutionPlan(),
-            HermodPriorityAnalysis({}, variant, HermodEpMode.REJECT),
+            HermodPriorityAnalysis({}, variant, ep_mode),
         )
         policy = HermodSchedulingPolicy(empty)
         trace_src_by_job = {
@@ -185,7 +194,7 @@ def run_mode(mode: str, compact: CompactWorkload, topology, args):
             {job.job_id: job for job in compact.jobs},
             trace_src_by_job,
             variant=variant,
-            ep_mode=HermodEpMode.REJECT,
+            ep_mode=ep_mode,
             pipeline_mode=args.pipeline,
         )
     from src.workload_generator.inference_profile import InferenceProfileStore
@@ -216,6 +225,7 @@ def main() -> None:
     parser.add_argument("--pipeline", choices=sorted(PIPELINES), default="1f1b")
     parser.add_argument("--variant", choices=sorted(VARIANTS),
                         default=HermodScheduleVariant.CONVENTIONAL_1F1B.value)
+    parser.add_argument("--ep-mode", choices=sorted(EP_MODES), default="reject")
     parser.add_argument("--modes", nargs="+", choices=sorted(MODES), default=["default", "hermod"])
     parser.add_argument("--output", default="outputs/hermod_dynamic_e2e")
     parser.add_argument("--placement", choices=sorted(PLACEMENTS), default="contiguous",
@@ -285,7 +295,7 @@ def main() -> None:
         results[mode] = result
     summary = {
         "input": {"topology": args.topo, "pipeline": args.pipeline,
-                  "variant": args.variant, "ep_mode": "reject",
+                  "variant": args.variant, "ep_mode": args.ep_mode,
                   "placement": args.placement, "gpus_per_server": args.gpus_per_server},
         "workloads": resolved_specs,
         "dynamic": {

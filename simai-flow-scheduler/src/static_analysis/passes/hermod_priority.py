@@ -77,13 +77,26 @@ class HermodPriorityAnalysis:
     ) -> "HermodPriorityAnalysis":
         grouped: dict[str, list] = {}
         for task in workload.get_flow_tasks():
+            coflow_type = classify_coflow_type(task.comm_type)
+            if coflow_type is None:
+                continue
+            if coflow_type == HermodCoflowType.EP and ep_mode == HermodEpMode.REJECT:
+                raise ValueError(
+                    f"Hermod EP is disabled: task {task.task_id} is {task.comm_type.value}"
+                )
             record = hermod_records.get(task.task_id)
             if record is None:
-                continue
+                raise ValueError(
+                    f"Hermod metadata is missing for {coflow_type.value} task {task.task_id}"
+                )
+            if record.coflow_type != coflow_type.value:
+                raise ValueError(
+                    f"Hermod task {task.task_id} metadata type {record.coflow_type!r} "
+                    f"does not match communication type {task.comm_type.value!r}"
+                )
             coflow_id = record.coflow_id
             microbatch_id = record.microbatch_id
             logical_layer_id = record.logical_layer_id
-            coflow_type = classify_coflow_type(task.comm_type)
             grouped.setdefault(coflow_id, []).append((task, microbatch_id, logical_layer_id))
 
         coflows: dict[str, HermodCoflowInfo] = {}

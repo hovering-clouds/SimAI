@@ -10,20 +10,26 @@ def assigned_nodes_for(
     placement: str,
     gpus_per_server: int,
 ) -> list[int]:
-    """Map logical [PP][DP][EP][TP] ranks onto physical GPU IDs.
+    """Map logical [PP][DP][TP] ranks onto physical GPU IDs.
 
     ``cyclic_pp_dp`` is an experimental contention placement for homogeneous
     servers: every TP group remains local, while both adjacent PP stages and
     DP replicas rotate across servers.  It is not a paper placement.
     """
-    total = parallelism.tp * parallelism.dp * parallelism.pp * parallelism.ep
+    if parallelism.ep < 1 or parallelism.dp % parallelism.ep:
+        raise ValueError(
+            f"Hermod Megatron placement requires dp ({parallelism.dp}) "
+            f"to be divisible by ep ({parallelism.ep})"
+        )
+    # EP is a subdivision of the DP dimension, not another world-size
+    # multiplier.  Keep this identical to ParallelismConfig.world_size and
+    # MegatronRankGrouper's [PP][DP][TP] layout.
+    total = parallelism.world_size
     if placement == "contiguous":
         return list(range(total))
     if total % gpus_per_server or gpus_per_server % parallelism.tp:
         raise ValueError("cyclic_pp_dp requires whole TP groups on equal-size servers")
     server_count = total // gpus_per_server
-    if parallelism.ep != 1:
-        raise ValueError("cyclic_pp_dp currently requires ep=1")
     slots_per_server = gpus_per_server // parallelism.tp
     slots_used = [0] * server_count
     nodes: list[int] = []
